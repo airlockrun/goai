@@ -1,0 +1,10 @@
+# Test binaries
+*.test
+
+# Environment files
+.env
+.env.*
+
+# IDE
+.idea/
+.vscode/
