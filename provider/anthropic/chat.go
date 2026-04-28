@@ -191,29 +191,55 @@ func BuildRequestBody(cfg Config, modelID string, options *stream.CallOptions) (
 		}
 	}
 
-	// Extract system message
+	// Group messages into blocks so consecutive user+tool runs collapse into
+	// a single anthropic user message and consecutive assistant runs collapse
+	// into a single anthropic assistant message. Mirrors ai-sdk's
+	// groupIntoBlocks (convert-to-anthropic-prompt.ts:1088). Anthropic's API
+	// requires every tool_result for a given assistant turn to live in one
+	// user message immediately following that turn — emitting a separate
+	// anthropic message per goai message breaks that pairing.
 	var system string
 	var systemProviderOpts map[string]any
 	var messages []anthropicMessage
 
-	for _, msg := range inputMessages {
-		switch msg.Role {
-		case message.RoleSystem:
-			system = getTextFromContent(msg.Content)
-			systemProviderOpts = msg.ProviderOptions
-		case message.RoleUser:
+	for _, block := range groupIntoBlocks(inputMessages) {
+		switch block.Type {
+		case blockSystem:
+			// goai's legacy behavior: last system message wins (silent
+			// overwrite, unlike ai-sdk which throws on multiple).
+			for _, msg := range block.Messages {
+				system = getTextFromContent(msg.Content)
+				systemProviderOpts = msg.ProviderOptions
+			}
+
+		case blockUser:
+			// Combine all user and tool messages in this block into a
+			// single anthropic user message.
+			var content []anthropicContentBlock
+			for _, msg := range block.Messages {
+				switch msg.Role {
+				case message.RoleUser:
+					content = append(content, convertToAnthropicContent(msg.Content, msg.ProviderOptions)...)
+				case message.RoleTool:
+					content = append(content, toolMessageToBlocks(msg)...)
+				}
+			}
 			messages = append(messages, anthropicMessage{
 				Role:    "user",
-				Content: convertToAnthropicContent(msg.Content, msg.ProviderOptions),
+				Content: content,
 			})
-		case message.RoleAssistant:
-			content := convertAssistantContent(msg.Content, msg.ProviderOptions)
+
+		case blockAssistant:
+			// Combine all assistant messages in this block into a single
+			// anthropic assistant message.
+			var content []anthropicContentBlock
+			for _, msg := range block.Messages {
+				content = append(content, convertAssistantContent(msg.Content, msg.ProviderOptions)...)
+			}
 			messages = append(messages, anthropicMessage{
 				Role:    "assistant",
 				Content: content,
 			})
-		case message.RoleTool:
-			messages = append(messages, convertToolMessages(msg)...)
 		}
 	}
 
@@ -404,6 +430,19 @@ func BuildRequestBody(cfg Config, modelID string, options *stream.CallOptions) (
 				Schema: options.ResponseFormat.Schema,
 			},
 		}
+	}
+
+	// effort → output_config.effort. ai-sdk parity:
+	// anthropic-language-model.ts:407-411 — effort is suppressed when
+	// thinking.type is explicitly "disabled" (the model can't apply effort
+	// when reasoning is off), but otherwise rides alongside any other
+	// output_config payload. Merge into req.OutputConfig so the
+	// structured-output path above doesn't get clobbered.
+	if opts.Effort != "" && (opts.Thinking == nil || opts.Thinking.Type != "disabled") {
+		if req.OutputConfig == nil {
+			req.OutputConfig = &anthropicOutputConfig{}
+		}
+		req.OutputConfig.Effort = opts.Effort
 	}
 
 	// Collect betas. Order: caller-supplied via providerOptions first so

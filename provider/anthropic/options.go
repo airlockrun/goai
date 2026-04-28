@@ -33,7 +33,9 @@ type MessagesOptions struct {
 	// When false, the model returns all tool calls at once after a delay. Default is true.
 	ToolStreaming *bool `json:"toolStreaming,omitempty"`
 
-	// Effort controls the effort level. Default is "high".
+	// Effort advises the model how much effort to spend on the task. Lands
+	// at output_config.effort on the wire (ai-sdk parity). Suppressed when
+	// Thinking.Type is explicitly "disabled". Unset by default.
 	// Values: "low", "medium", "high", "xhigh", "max".
 	Effort string `json:"effort,omitempty"`
 
