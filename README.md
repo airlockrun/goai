@@ -4,6 +4,9 @@ Go port of the [Vercel AI SDK](https://github.com/vercel/ai) — streaming text 
 
 The TypeScript-flavored API surface is preserved as faithfully as Go syntax allows, so patterns from the Vercel AI SDK docs translate directly. See [NOTICE](NOTICE) for attribution.
 
+> [!WARNING]
+> **Alpha software.** APIs may change between 0.x releases as we track changes in the upstream Vercel AI SDK and shake out the Go translation. Once we hit 1.0 we'll commit to backwards compatibility on the public surface.
+
 ## Install
 
 ```go
