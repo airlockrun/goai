@@ -128,6 +128,13 @@ func (m *ChatModel) buildRequest(options *stream.CallOptions) ([]byte, []stream.
 		req.Tools = convertToChatTools(options.Tools)
 	}
 
+	// Translate goai's loose ToolChoice (bare strings or ai-sdk-shaped objects)
+	// into OpenAI Chat's tool_choice. Mirrors ai-sdk parity:
+	// packages/openai/src/chat/openai-chat-prepare-tools.ts.
+	if options.ToolChoice != nil {
+		req.ToolChoice = convertChatToolChoice(options.ToolChoice)
+	}
+
 	// Map ResponseFormat to chat response_format.
 	// Mirrors ai-sdk openai-chat-language-model.ts:147-160.
 	if options.ResponseFormat != nil && options.ResponseFormat.Type == "json" {

@@ -15,8 +15,22 @@ type geminiRequest struct {
 	SystemInstruction *geminiContent          `json:"systemInstruction,omitempty"`
 	GenerationConfig  *geminiGenerationConfig `json:"generationConfig,omitempty"`
 	Tools             []geminiTool            `json:"tools,omitempty"`
+	ToolConfig        *geminiToolConfig       `json:"toolConfig,omitempty"`
 	SafetySettings    []geminiSafetySetting   `json:"safetySettings,omitempty"`
 	CachedContent     string                  `json:"cachedContent,omitempty"`
+}
+
+// geminiToolConfig configures tool calling. Mirrors Gemini's toolConfig wire
+// shape (ai-sdk: google-prepare-tools.ts). functionCallingConfig.mode is one
+// of "AUTO" / "ANY" / "NONE"; allowedFunctionNames restricts ANY-mode calls
+// to a specific subset.
+type geminiToolConfig struct {
+	FunctionCallingConfig *geminiFunctionCallingConfig `json:"functionCallingConfig,omitempty"`
+}
+
+type geminiFunctionCallingConfig struct {
+	Mode                 string   `json:"mode,omitempty"`
+	AllowedFunctionNames []string `json:"allowedFunctionNames,omitempty"`
 }
 
 // geminiSafetySetting represents a safety setting for content blocking.

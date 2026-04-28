@@ -229,6 +229,13 @@ func (m *GoogleModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 		req.Tools = prepareGeminiTools(options.Tools, m.id)
 	}
 
+	// Translate goai's loose ToolChoice (bare strings or ai-sdk-shaped objects)
+	// into Gemini's toolConfig.functionCallingConfig. Mirrors ai-sdk parity:
+	// packages/google/src/google-prepare-tools.ts.
+	if options.ToolChoice != nil {
+		req.ToolConfig = convertToolChoice(options.ToolChoice)
+	}
+
 	// Apply provider-specific options from typed struct
 
 	// safetySettings

@@ -242,6 +242,14 @@ func (m *CompatModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 		req.Tools = convertToTools(options.Tools)
 	}
 
+	// Translate goai's loose ToolChoice (bare strings or ai-sdk-shaped objects)
+	// into Chat Completions' tool_choice. Most OpenAI-compatible APIs accept
+	// the same shape. Mirrors ai-sdk parity:
+	// packages/openai/src/chat/openai-chat-prepare-tools.ts.
+	if options.ToolChoice != nil {
+		req.ToolChoice = convertToolChoice(options.ToolChoice)
+	}
+
 	// Stream options for usage
 	req.StreamOptions = &streamOptions{IncludeUsage: true}
 

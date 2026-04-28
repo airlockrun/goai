@@ -150,6 +150,100 @@ func TestIntegration_ToolCalls(t *testing.T) {
 	}
 }
 
+// Regression: sol passes ToolChoice as a bare string ("auto"/"required"). The
+// Anthropic API rejects bare strings on tool_choice ("Input should be a valid
+// dictionary or object to extract fields from"); the provider must translate
+// each form into Anthropic's object shape. Hits each ai-sdk-documented form
+// against the live API.
+func TestIntegration_ToolChoiceForms(t *testing.T) {
+	skipIfNoKey(t)
+	p := getProvider()
+	m := p.LanguageModel("claude-haiku-4-5-20251001")
+
+	tools := tool.Set{
+		"calculator": {
+			Name:        "calculator",
+			Description: "Evaluate a mathematical expression",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"expression":{"type":"string"}},"required":["expression"]}`),
+			Execute: func(ctx context.Context, input json.RawMessage, opts tool.CallOptions) (tool.Result, error) {
+				return tool.Result{Output: "4"}, nil
+			},
+		},
+	}
+
+	cases := []struct {
+		name       string
+		toolChoice any
+	}{
+		{name: "string auto", toolChoice: "auto"},
+		{name: "string required", toolChoice: "required"},
+		{name: "object auto", toolChoice: map[string]any{"type": "auto"}},
+		{name: "object required", toolChoice: map[string]any{"type": "required"}},
+		{name: "object tool by toolName", toolChoice: map[string]any{"type": "tool", "toolName": "calculator"}},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+
+			_, err := goai.GenerateText(ctx, stream.Input{
+				Model: m,
+				Messages: []message.Message{
+					message.NewUserMessage("What is 2+2? Use the calculator tool."),
+				},
+				Tools:      tools,
+				ToolChoice: tc.toolChoice,
+			})
+			if err != nil {
+				t.Fatalf("GenerateText with toolChoice=%v: %v", tc.toolChoice, err)
+			}
+		})
+	}
+}
+
+// "none" is special — Anthropic has no native "none" tool_choice. ai-sdk
+// models it by sending no tools at all, so the model must return text. Verify
+// the live API accepts this against goai's translation.
+func TestIntegration_ToolChoiceNone(t *testing.T) {
+	skipIfNoKey(t)
+	p := getProvider()
+	m := p.LanguageModel("claude-haiku-4-5-20251001")
+
+	tools := tool.Set{
+		"calculator": {
+			Name:        "calculator",
+			Description: "Evaluate a mathematical expression",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"expression":{"type":"string"}},"required":["expression"]}`),
+			Execute: func(ctx context.Context, input json.RawMessage, opts tool.CallOptions) (tool.Result, error) {
+				return tool.Result{Output: "4"}, nil
+			},
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	result, err := goai.GenerateText(ctx, stream.Input{
+		Model: m,
+		Messages: []message.Message{
+			message.NewUserMessage("Say hello in one word."),
+		},
+		Tools:      tools,
+		ToolChoice: "none",
+	})
+	if err != nil {
+		t.Fatalf("GenerateText with toolChoice=none: %v", err)
+	}
+	if len(result.ToolCalls) != 0 {
+		t.Errorf("expected no tool calls with toolChoice=none, got %d", len(result.ToolCalls))
+	}
+	if result.Text == "" {
+		t.Error("expected non-empty text response")
+	}
+}
+
 func TestIntegration_ImageInput(t *testing.T) {
 	skipIfNoKey(t)
 	p := getProvider()

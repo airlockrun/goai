@@ -267,14 +267,20 @@ func BuildRequestBody(cfg Config, modelID string, options *stream.CallOptions) (
 		warnings = append(warnings, toolWarnings...)
 	}
 
+	// Translate goai's loose ToolChoice (string forms "auto"/"none"/"required"/<tool name>
+	// or a structured map) into Anthropic's wire-format object. Mirrors ai-sdk's
+	// prepare-tools tool_choice handling: "required" → {type: "any"}, "none" drops
+	// both tools[] and tool_choice. Anthropic rejects bare strings on tool_choice.
+	choice, dropTools := convertAnthropicToolChoice(options.ToolChoice)
+	if dropTools {
+		req.Tools = nil
+	} else {
+		req.ToolChoice = choice
+	}
+
 	// Append the synthetic JSON tool after user tools so it doesn't reorder them.
 	if syntheticJSONTool != nil {
 		req.Tools = append(req.Tools, *syntheticJSONTool)
-	}
-
-	// Add tool choice from Input
-	if options.ToolChoice != nil {
-		req.ToolChoice = options.ToolChoice
 	}
 
 	// Force the synthetic JSON tool. Overrides any caller-supplied ToolChoice

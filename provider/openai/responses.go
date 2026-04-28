@@ -142,9 +142,13 @@ func (m *ResponsesModel) buildRequest(options *stream.CallOptions) ([]byte, []st
 		req.MaxOutputTokens = options.MaxOutputTokens
 	}
 
-	// Add tool choice from Input (matching ai-sdk pattern where toolChoice is top-level)
+	// Translate goai's loose ToolChoice (bare strings or ai-sdk-shaped objects)
+	// into the OpenAI Responses wire form. Bare "auto"/"none"/"required" pass
+	// through; {type: "tool", toolName: X} resolves to {type: "function", name: X}
+	// for function tools or the hosted-tool wire shape for provider tools.
+	// ai-sdk parity: packages/openai/src/responses/openai-responses-prepare-tools.ts.
 	if options.ToolChoice != nil {
-		req.ToolChoice = options.ToolChoice
+		req.ToolChoice = convertResponsesToolChoice(options.ToolChoice, options.Tools)
 	}
 
 	// Apply provider-specific options from typed struct
