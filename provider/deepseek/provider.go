@@ -33,12 +33,13 @@ func New(opts Options) *Provider {
 	}
 	return &Provider{
 		compat: openaicompat.New(openaicompat.Options{
-			ProviderID:      "deepseek",
-			BaseURL:         baseURL,
-			APIKey:          opts.APIKey,
-			Headers:         opts.Headers,
-			RequestModifier: deepseekRequestModifier,
-			CallWarner:      deepseekCallWarner,
+			ProviderID:       "deepseek",
+			BaseURL:          baseURL,
+			APIKey:           opts.APIKey,
+			Headers:          opts.Headers,
+			RequestModifier:  deepseekRequestModifier,
+			CallWarner:       deepseekCallWarner,
+			MessageConverter: convertMessages,
 		}),
 	}
 }

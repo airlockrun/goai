@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/provider"
 	"github.com/airlockrun/goai/stream"
 	"github.com/airlockrun/goai/tool"
@@ -27,6 +28,16 @@ type RequestModifier func(providerOptions map[string]any) (extraFields map[strin
 // emits provider-specific warnings (e.g. "topK is not supported"). Separate
 // from RequestModifier because that one only sees providerOptions.
 type CallWarner func(options *stream.CallOptions) []stream.Warning
+
+// MessageConverter, when set, replaces the default goai-message → chat-message
+// conversion. It receives the model ID and the original goai messages and
+// returns a slice of message objects ready for JSON marshaling (each element
+// can be a ChatMessage, a map[string]any, or any other JSON-marshalable value).
+// Use this when a provider needs model-specific message conversion — for
+// example DeepSeek's different reasoning_content rules across deepseek-v4
+// (echo) vs deepseek-reasoner (strip). When nil, the default
+// ConvertToChatMessages output is used.
+type MessageConverter func(modelID string, messages []message.Message) ([]any, error)
 
 // Options contains configuration for an OpenAI-compatible provider.
 type Options struct {
@@ -56,6 +67,10 @@ type Options struct {
 	// for unsupported CallOption fields (e.g. topK, frequencyPenalty).
 	// Matches the per-provider inventory in ai-sdk's language models.
 	CallWarner CallWarner
+
+	// MessageConverter, when set, replaces the default message conversion.
+	// See the MessageConverter type doc for details.
+	MessageConverter MessageConverter
 
 	// SupportsStructuredOutputs indicates the provider's endpoint honors the
 	// OpenAI "json_schema" response_format with strict decoding. When false,
@@ -217,10 +232,25 @@ func (m *CompatModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 		}
 	}
 
+	var convertedMessages []any
+	if m.provider.opts.MessageConverter != nil {
+		custom, err := m.provider.opts.MessageConverter(m.id, messages)
+		if err != nil {
+			return nil, warnings, fmt.Errorf("message converter error: %w", err)
+		}
+		convertedMessages = custom
+	} else {
+		raw := convertToMessages(messages)
+		convertedMessages = make([]any, len(raw))
+		for i := range raw {
+			convertedMessages[i] = raw[i]
+		}
+	}
+
 	req := chatRequest{
 		Model:          m.id,
 		Stream:         true,
-		Messages:       convertToMessages(messages),
+		Messages:       convertedMessages,
 		ResponseFormat: respFormat,
 	}
 
