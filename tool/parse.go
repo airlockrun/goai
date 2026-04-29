@@ -8,7 +8,7 @@ import (
 )
 
 // RawToolCall represents a tool call from the language model before validation.
-// Source: ai-sdk/packages/provider/src/language-model-v3.ts (LanguageModelV3ToolCall)
+// Source: ai-sdk/packages/provider/src/language-model/v4/language-model-v4-tool-call.ts (LanguageModelV4ToolCall)
 type RawToolCall struct {
 	Type       string `json:"type"` // "tool-call"
 	ToolCallID string `json:"toolCallId"`

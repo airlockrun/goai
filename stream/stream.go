@@ -40,7 +40,7 @@ type Result struct {
 }
 
 // ResponseFormat configures how the model should format its response.
-// Mirrors ai-sdk's LanguageModelV3CallOptions.responseFormat.
+// Mirrors ai-sdk's LanguageModelV4CallOptions.responseFormat.
 type ResponseFormat struct {
 	// Type is "text" or "json".
 	Type string `json:"type"`
@@ -184,7 +184,7 @@ type OnFinishData struct {
 	FinalStep StepResultData
 }
 
-// CallOptions is the provider-facing input (like ai-sdk's LanguageModelV3CallOptions).
+// CallOptions is the provider-facing input (like ai-sdk's LanguageModelV4CallOptions).
 // This is what providers receive - it has Tools as an already-ordered slice.
 type CallOptions struct {
 	// Messages is the conversation history.

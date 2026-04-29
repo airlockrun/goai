@@ -231,7 +231,7 @@ const (
 )
 
 // Usage contains token usage information. Mirrors ai-sdk's
-// LanguageModelV3Usage (packages/provider/src/language-model/v3/language-model-v3-usage.ts).
+// LanguageModelV4Usage (packages/provider/src/language-model/v4/language-model-v4-usage.ts).
 // All integer fields are pointers so "unreported by provider" (nil) is
 // distinguishable from "reported as zero" (pointer to 0).
 type Usage struct {
