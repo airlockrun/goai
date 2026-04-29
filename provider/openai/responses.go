@@ -89,7 +89,7 @@ func (m *ResponsesModel) doStream(ctx context.Context, options *stream.CallOptio
 		return
 	}
 
-	m.processStream(ctx, resp.Body, options.Tools, events)
+	m.processStream(ctx, resp.Body, options.Tools, events, options.IncludeRawChunks)
 }
 
 func (m *ResponsesModel) buildRequest(options *stream.CallOptions) ([]byte, []stream.Warning, error) {
@@ -286,7 +286,7 @@ func (m *ResponsesModel) buildRequest(options *stream.CallOptions) ([]byte, []st
 	return body, warnings, err
 }
 
-func (m *ResponsesModel) processStream(ctx context.Context, body io.Reader, tools []tool.Tool, events chan<- stream.Event) {
+func (m *ResponsesModel) processStream(ctx context.Context, body io.Reader, tools []tool.Tool, events chan<- stream.Event, includeRawChunks bool) {
 	// Convert tools slice to map for name lookup
 	toolsByName := make(map[string]tool.Tool, len(tools))
 	for _, t := range tools {
@@ -327,6 +327,10 @@ func (m *ResponsesModel) processStream(ctx context.Context, body io.Reader, tool
 		data := strings.TrimPrefix(line, "data: ")
 		if data == "[DONE]" {
 			break
+		}
+
+		if includeRawChunks {
+			events <- stream.Event{Type: stream.EventRawChunk, Data: stream.RawChunkEvent{RawValue: data}}
 		}
 
 		var chunk responsesChunk

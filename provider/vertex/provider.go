@@ -269,7 +269,7 @@ func (m *VertexLanguageModel) doStream(ctx context.Context, options *stream.Call
 		return
 	}
 
-	m.processStream(ctx, resp.Body, options.Tools, events)
+	m.processStream(ctx, resp.Body, options.Tools, events, options.IncludeRawChunks)
 }
 
 func convertMessage(msg message.Message) map[string]any {
@@ -319,7 +319,7 @@ func convertMessage(msg message.Message) map[string]any {
 	}
 }
 
-func (m *VertexLanguageModel) processStream(ctx context.Context, body io.Reader, tools []tool.Tool, events chan<- stream.Event) {
+func (m *VertexLanguageModel) processStream(ctx context.Context, body io.Reader, tools []tool.Tool, events chan<- stream.Event, includeRawChunks bool) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
@@ -345,6 +345,10 @@ func (m *VertexLanguageModel) processStream(ctx context.Context, body io.Reader,
 		data := strings.TrimPrefix(line, "data: ")
 		if data == "" {
 			continue
+		}
+
+		if includeRawChunks {
+			events <- stream.Event{Type: stream.EventRawChunk, Data: stream.RawChunkEvent{RawValue: data}}
 		}
 
 		var chunk vertexStreamChunk

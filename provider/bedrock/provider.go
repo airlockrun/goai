@@ -334,9 +334,9 @@ func (m *BedrockLanguageModel) doStream(ctx context.Context, options *stream.Cal
 
 	// Process based on model type
 	if strings.HasPrefix(m.id, "anthropic.") {
-		m.processAnthropicStream(ctx, resp.Body, options.Tools, events, jsonToolInjected)
+		m.processAnthropicStream(ctx, resp.Body, options.Tools, events, jsonToolInjected, options.IncludeRawChunks)
 	} else {
-		m.processGenericStream(ctx, resp.Body, events)
+		m.processGenericStream(ctx, resp.Body, events, options.IncludeRawChunks)
 	}
 }
 
@@ -567,7 +567,7 @@ func (m *BedrockLanguageModel) buildCohereRequest(options *stream.CallOptions) (
 	return body, nil, err
 }
 
-func (m *BedrockLanguageModel) processAnthropicStream(ctx context.Context, body io.Reader, tools []tool.Tool, events chan<- stream.Event, jsonToolInjected bool) {
+func (m *BedrockLanguageModel) processAnthropicStream(ctx context.Context, body io.Reader, tools []tool.Tool, events chan<- stream.Event, jsonToolInjected bool, includeRawChunks bool) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
@@ -600,6 +600,11 @@ func (m *BedrockLanguageModel) processAnthropicStream(ctx context.Context, body 
 		}
 
 		data := strings.TrimPrefix(line, "data: ")
+
+		if includeRawChunks {
+			events <- stream.Event{Type: stream.EventRawChunk, Data: stream.RawChunkEvent{RawValue: data}}
+		}
+
 		var event anthropicStreamEvent
 		if err := json.Unmarshal([]byte(data), &event); err != nil {
 			continue
@@ -734,7 +739,7 @@ func (m *BedrockLanguageModel) processAnthropicStream(ctx context.Context, body 
 	}
 }
 
-func (m *BedrockLanguageModel) processGenericStream(ctx context.Context, body io.Reader, events chan<- stream.Event) {
+func (m *BedrockLanguageModel) processGenericStream(ctx context.Context, body io.Reader, events chan<- stream.Event, includeRawChunks bool) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
@@ -753,6 +758,10 @@ func (m *BedrockLanguageModel) processGenericStream(ctx context.Context, body io
 		line := scanner.Text()
 		if line == "" {
 			continue
+		}
+
+		if includeRawChunks {
+			events <- stream.Event{Type: stream.EventRawChunk, Data: stream.RawChunkEvent{RawValue: line}}
 		}
 
 		// Parse based on model-specific format

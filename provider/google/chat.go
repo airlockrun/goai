@@ -86,7 +86,7 @@ func (m *GoogleModel) doStream(ctx context.Context, options *stream.CallOptions,
 		return
 	}
 
-	m.processStream(ctx, resp.Body, options.Tools, events)
+	m.processStream(ctx, resp.Body, options.Tools, events, options.IncludeRawChunks)
 }
 
 func (m *GoogleModel) buildRequest(options *stream.CallOptions) ([]byte, []stream.Warning, error) {
@@ -341,7 +341,7 @@ func (m *GoogleModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 	return body, warnings, err
 }
 
-func (m *GoogleModel) processStream(ctx context.Context, body io.Reader, tools []tool.Tool, events chan<- stream.Event) {
+func (m *GoogleModel) processStream(ctx context.Context, body io.Reader, tools []tool.Tool, events chan<- stream.Event, includeRawChunks bool) {
 	// Convert tools slice to map for name lookup
 	toolsByName := make(map[string]tool.Tool, len(tools))
 	for _, t := range tools {
@@ -374,6 +374,10 @@ func (m *GoogleModel) processStream(ctx context.Context, body io.Reader, tools [
 		}
 
 		data := strings.TrimPrefix(line, "data: ")
+
+		if includeRawChunks {
+			events <- stream.Event{Type: stream.EventRawChunk, Data: stream.RawChunkEvent{RawValue: data}}
+		}
 
 		var chunk geminiStreamChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {

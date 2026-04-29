@@ -25,6 +25,7 @@ const (
 	EventFinishStep     EventType = "finish-step"
 	EventFinish         EventType = "finish"
 	EventError          EventType = "error"
+	EventRawChunk       EventType = "raw"
 )
 
 // Event represents a single streaming event.
@@ -343,3 +344,14 @@ type ErrorEvent struct {
 }
 
 func (ErrorEvent) eventType() EventType { return EventError }
+
+// RawChunkEvent carries an unparsed payload from the upstream provider.
+// Emitted only when CallOptions.IncludeRawChunks is true. RawValue is
+// typically the SSE "data: …" string with the prefix already trimmed;
+// providers may emit []byte or a parsed object when that's more useful.
+// Mirrors ai-sdk's v4 raw stream-part (LanguageModelV4StreamPart).
+type RawChunkEvent struct {
+	RawValue any `json:"rawValue"`
+}
+
+func (RawChunkEvent) eventType() EventType { return EventRawChunk }

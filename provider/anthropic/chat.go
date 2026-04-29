@@ -110,7 +110,7 @@ func (m *AnthropicModel) doStream(ctx context.Context, options *stream.CallOptio
 		return
 	}
 
-	m.processStream(ctx, resp.Body, options.Tools, events, jsonToolInjected)
+	m.processStream(ctx, resp.Body, options.Tools, events, jsonToolInjected, options.IncludeRawChunks)
 }
 
 // syntheticJSONToolName is the name of the synthetic tool injected when the
@@ -644,7 +644,7 @@ func parseContextKeep(raw any) *anthropicContextKeep {
 	return nil
 }
 
-func (m *AnthropicModel) processStream(ctx context.Context, body io.Reader, tools []tool.Tool, events chan<- stream.Event, jsonToolInjected bool) {
+func (m *AnthropicModel) processStream(ctx context.Context, body io.Reader, tools []tool.Tool, events chan<- stream.Event, jsonToolInjected bool, includeRawChunks bool) {
 	// Convert tools slice to map for name lookup
 	toolsByName := make(map[string]tool.Tool, len(tools))
 	for _, t := range tools {
@@ -687,6 +687,10 @@ func (m *AnthropicModel) processStream(ctx context.Context, body io.Reader, tool
 		}
 
 		data := strings.TrimPrefix(line, "data: ")
+
+		if includeRawChunks {
+			events <- stream.Event{Type: stream.EventRawChunk, Data: stream.RawChunkEvent{RawValue: data}}
+		}
 
 		var event anthropicStreamEvent
 		if err := json.Unmarshal([]byte(data), &event); err != nil {

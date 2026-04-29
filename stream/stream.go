@@ -142,6 +142,17 @@ type Input struct {
 	// ProviderOptions are provider-specific options.
 	ProviderOptions map[string]any
 
+	// IncludeRawChunks, when true, makes streaming providers emit a
+	// RawChunkEvent for each upstream SSE payload before the translated
+	// events. Off by default. Mirrors ai-sdk v4 includeRawChunks.
+	IncludeRawChunks bool
+
+	// Reasoning is the uniform reasoning-effort enum (one of "", "none",
+	// "minimal", "low", "medium", "high", "xhigh"). Empty means
+	// "provider default". Provider-specific effort options take precedence
+	// when both are set. Mirrors ai-sdk v4 reasoning.
+	Reasoning ReasoningEffort
+
 	// Output is the optional output strategy for parsing the model's response.
 	// When set, ResponseFormat is sent to the model on every step, and the
 	// final step's text is parsed via Output.ParseComplete (only when the
@@ -232,9 +243,37 @@ type CallOptions struct {
 	// ResponseFormat configures structured output (text or json with optional schema).
 	ResponseFormat *ResponseFormat `json:"responseFormat,omitempty"`
 
+	// IncludeRawChunks, when true, makes streaming providers emit a
+	// RawChunkEvent for each upstream SSE payload before the translated
+	// events. Off by default. Mirrors ai-sdk v4 includeRawChunks.
+	IncludeRawChunks bool `json:"includeRawChunks,omitempty"`
+
+	// Reasoning is the uniform reasoning-effort enum. Empty string means
+	// "use the provider's default" — providers that have an effort-style
+	// knob will lower it to their wire-specific field. Provider-specific
+	// effort options (e.g. anthropic.MessagesOptions.Effort) take
+	// precedence when both are set. Mirrors ai-sdk v4 reasoning.
+	Reasoning ReasoningEffort `json:"reasoning,omitempty"`
+
 	// ProviderOptions are provider-specific options.
 	ProviderOptions map[string]any `json:"providerOptions,omitempty"`
 }
+
+// ReasoningEffort is the uniform top-level reasoning-effort enum.
+// Mirrors ai-sdk v4 LanguageModelV4CallOptions.reasoning.
+type ReasoningEffort = string
+
+// Reasoning effort values. Empty string means "use the provider's default"
+// (equivalent to ai-sdk's "provider-default" sentinel; goai uses the empty
+// string instead since Go has no first-class union types).
+const (
+	ReasoningEffortNone    ReasoningEffort = "none"
+	ReasoningEffortMinimal ReasoningEffort = "minimal"
+	ReasoningEffortLow     ReasoningEffort = "low"
+	ReasoningEffortMedium  ReasoningEffort = "medium"
+	ReasoningEffortHigh    ReasoningEffort = "high"
+	ReasoningEffortXHigh   ReasoningEffort = "xhigh"
+)
 
 // Model represents a language model.
 type Model interface {
