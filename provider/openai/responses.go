@@ -153,9 +153,16 @@ func (m *ResponsesModel) buildRequest(options *stream.CallOptions) ([]byte, []st
 
 	// Apply provider-specific options from typed struct
 
-	// reasoningEffort - transforms to reasoning.effort in request
-	if opts.ReasoningEffort != "" {
-		req.Reasoning = &reasoningConfig{Effort: opts.ReasoningEffort}
+	// reasoningEffort - transforms to reasoning.effort in request.
+	// Provider-specific opts.ReasoningEffort wins; otherwise the top-level
+	// CallOptions.Reasoning lowers into the same wire field (mirrors
+	// ai-sdk v4's reasoning enum).
+	effort := opts.ReasoningEffort
+	if effort == "" {
+		effort = options.Reasoning
+	}
+	if effort != "" {
+		req.Reasoning = &reasoningConfig{Effort: effort}
 	}
 
 	// reasoningSummary

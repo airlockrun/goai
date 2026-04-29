@@ -125,9 +125,16 @@ func (m *XaiResponsesModel) buildRequest(options *stream.CallOptions) ([]byte, [
 		warnings = append(warnings, choiceWarnings...)
 	}
 
-	// reasoningEffort (flat key in providerOptions → reasoning.effort in request)
-	if opts.ReasoningEffort != "" {
-		req.Reasoning = &reasoningConfig{Effort: opts.ReasoningEffort}
+	// reasoningEffort (flat key in providerOptions → reasoning.effort in
+	// request). Provider-specific opts.ReasoningEffort wins; otherwise
+	// CallOptions.Reasoning lowers into the same wire field (ai-sdk v4
+	// reasoning enum).
+	effort := opts.ReasoningEffort
+	if effort == "" {
+		effort = options.Reasoning
+	}
+	if effort != "" {
+		req.Reasoning = &reasoningConfig{Effort: effort}
 	}
 
 	// logprobs / topLogprobs. ai-sdk forces logprobs=true when topLogprobs

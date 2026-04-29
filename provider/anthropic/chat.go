@@ -438,11 +438,19 @@ func BuildRequestBody(cfg Config, modelID string, options *stream.CallOptions) (
 	// when reasoning is off), but otherwise rides alongside any other
 	// output_config payload. Merge into req.OutputConfig so the
 	// structured-output path above doesn't get clobbered.
-	if opts.Effort != "" && (opts.Thinking == nil || opts.Thinking.Type != "disabled") {
+	//
+	// Resolution: provider-specific opts.Effort wins when set; otherwise
+	// the top-level CallOptions.Reasoning lowers into the same wire field
+	// (mirrors ai-sdk v4's reasoning enum).
+	effort := opts.Effort
+	if effort == "" {
+		effort = options.Reasoning
+	}
+	if effort != "" && (opts.Thinking == nil || opts.Thinking.Type != "disabled") {
 		if req.OutputConfig == nil {
 			req.OutputConfig = &anthropicOutputConfig{}
 		}
-		req.OutputConfig.Effort = opts.Effort
+		req.OutputConfig.Effort = effort
 	}
 
 	// Collect betas. Order: caller-supplied via providerOptions first so

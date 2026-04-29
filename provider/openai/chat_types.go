@@ -12,17 +12,18 @@ import (
 // Chat Completions API request types
 
 type chatRequest struct {
-	Model          string              `json:"model"`
-	Messages       []chatMessage       `json:"messages"`
-	Stream         bool                `json:"stream"`
-	Temperature    *float64            `json:"temperature,omitempty"`
-	TopP           *float64            `json:"top_p,omitempty"`
-	MaxTokens      *int                `json:"max_tokens,omitempty"`
-	Stop           []string            `json:"stop,omitempty"`
-	Tools          []chatTool          `json:"tools,omitempty"`
-	ToolChoice     any                 `json:"tool_choice,omitempty"`
-	ResponseFormat *chatResponseFormat `json:"response_format,omitempty"`
-	StreamOptions  *chatStreamOptions  `json:"stream_options,omitempty"`
+	Model           string              `json:"model"`
+	Messages        []chatMessage       `json:"messages"`
+	Stream          bool                `json:"stream"`
+	Temperature     *float64            `json:"temperature,omitempty"`
+	TopP            *float64            `json:"top_p,omitempty"`
+	MaxTokens       *int                `json:"max_tokens,omitempty"`
+	Stop            []string            `json:"stop,omitempty"`
+	Tools           []chatTool          `json:"tools,omitempty"`
+	ToolChoice      any                 `json:"tool_choice,omitempty"`
+	ResponseFormat  *chatResponseFormat `json:"response_format,omitempty"`
+	StreamOptions   *chatStreamOptions  `json:"stream_options,omitempty"`
+	ReasoningEffort string              `json:"reasoning_effort,omitempty"`
 
 	Logprobs    *bool `json:"logprobs,omitempty"`
 	TopLogprobs *int  `json:"top_logprobs,omitempty"`

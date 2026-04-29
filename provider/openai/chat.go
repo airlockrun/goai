@@ -135,6 +135,18 @@ func (m *ChatModel) buildRequest(options *stream.CallOptions) ([]byte, []stream.
 		req.ToolChoice = convertChatToolChoice(options.ToolChoice)
 	}
 
+	// reasoning_effort. Provider-specific opts.ReasoningEffort wins;
+	// otherwise CallOptions.Reasoning lowers into the same wire field
+	// (mirrors ai-sdk v4 reasoning enum). Gated to reasoning-capable
+	// models (o-series, gpt-5*) — non-reasoning models reject the field.
+	effort := opts.ReasoningEffort
+	if effort == "" {
+		effort = options.Reasoning
+	}
+	if effort != "" && GetLanguageModelCapabilities(m.id).IsReasoningModel {
+		req.ReasoningEffort = effort
+	}
+
 	// Map ResponseFormat to chat response_format.
 	// Mirrors ai-sdk openai-chat-language-model.ts:147-160.
 	if options.ResponseFormat != nil && options.ResponseFormat.Type == "json" {
