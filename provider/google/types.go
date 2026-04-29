@@ -24,8 +24,15 @@ type geminiRequest struct {
 // shape (ai-sdk: google-prepare-tools.ts). functionCallingConfig.mode is one
 // of "AUTO" / "ANY" / "NONE"; allowedFunctionNames restricts ANY-mode calls
 // to a specific subset.
+//
+// includeServerSideToolInvocations enables Gemini to surface invocations of
+// server-side tools (e.g. google_search, code_execution) in the response
+// stream. Set on direct Gemini only — the Vertex endpoint rejects this
+// field (ai-sdk PR #14767). goai's vertex package is implemented separately
+// and does not share this struct.
 type geminiToolConfig struct {
-	FunctionCallingConfig *geminiFunctionCallingConfig `json:"functionCallingConfig,omitempty"`
+	FunctionCallingConfig            *geminiFunctionCallingConfig `json:"functionCallingConfig,omitempty"`
+	IncludeServerSideToolInvocations bool                         `json:"includeServerSideToolInvocations,omitempty"`
 }
 
 type geminiFunctionCallingConfig struct {

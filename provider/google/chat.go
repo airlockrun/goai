@@ -234,6 +234,13 @@ func (m *GoogleModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 	// packages/google/src/google-prepare-tools.ts.
 	if options.ToolChoice != nil {
 		req.ToolConfig = convertToolChoice(options.ToolChoice)
+		// includeServerSideToolInvocations: true mirrors ai-sdk's prepare-tools
+		// behavior for non-Vertex Gemini (PR #14767). The Vertex endpoint
+		// rejects this field, but goai's vertex package is separate, so the
+		// google package is always non-Vertex.
+		if req.ToolConfig != nil {
+			req.ToolConfig.IncludeServerSideToolInvocations = true
+		}
 	}
 
 	// Apply provider-specific options from typed struct
