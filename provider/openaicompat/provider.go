@@ -359,31 +359,40 @@ func (m *CompatModel) processStream(ctx context.Context, body io.Reader, tools [
 			events <- stream.Event{Type: stream.EventTextDelta, Data: stream.TextDeltaEvent{Text: delta.Content}}
 		}
 
-		// Handle tool calls
+		// Handle tool calls. Buffers id + arguments until function.name
+		// arrives. Some openai-compatible providers send the first delta
+		// without function.name and supply it on a later chunk; emitting
+		// tool-input-start before the name would produce malformed events.
+		// Mirrors ai-sdk PR #14760.
 		for _, tc := range delta.ToolCalls {
 			acc, exists := currentToolCalls[tc.Index]
 			if !exists {
 				acc = &toolCallAccumulator{index: tc.Index}
 				currentToolCalls[tc.Index] = acc
+			}
+			if tc.ID != "" && acc.id == "" {
+				acc.id = tc.ID
+			}
 
-				if tc.ID != "" {
-					acc.id = tc.ID
-				}
+			if !acc.started {
+				acc.arguments += tc.Function.Arguments
 				if tc.Function.Name != "" {
 					acc.name = tc.Function.Name
+					acc.started = true
 					events <- stream.Event{
 						Type: stream.EventToolInputStart,
 						Data: stream.ToolInputStartEvent{ID: acc.id, ToolName: acc.name},
 					}
+					if acc.arguments != "" {
+						events <- stream.Event{
+							Type: stream.EventToolInputDelta,
+							Data: stream.ToolInputDeltaEvent{ID: acc.id, Delta: acc.arguments},
+						}
+					}
 				}
+				continue
 			}
 
-			if tc.ID != "" && acc.id == "" {
-				acc.id = tc.ID
-			}
-			if tc.Function.Name != "" && acc.name == "" {
-				acc.name = tc.Function.Name
-			}
 			if tc.Function.Arguments != "" {
 				acc.arguments += tc.Function.Arguments
 				events <- stream.Event{
@@ -401,6 +410,17 @@ func (m *CompatModel) processStream(ctx context.Context, body io.Reader, tools [
 
 	// Process completed tool calls
 	for _, acc := range currentToolCalls {
+		if !acc.started {
+			// function.name never arrived for this tool-call index. Mirrors
+			// ai-sdk's processDelta which raises AI_InvalidResponseDataError
+			// in the same situation (PR #14760).
+			events <- stream.Event{
+				Type: stream.EventError,
+				Data: stream.ErrorEvent{Error: fmt.Errorf("openaicompat: tool call at index %d has no function.name", acc.index)},
+			}
+			continue
+		}
+
 		events <- stream.Event{
 			Type: stream.EventToolInputEnd,
 			Data: stream.ToolInputEndEvent{ID: acc.id},
@@ -454,6 +474,7 @@ type toolCallAccumulator struct {
 	id        string
 	name      string
 	arguments string
+	started   bool // true once tool-input-start has been emitted (after function.name arrives)
 }
 
 func mapFinishReason(reason string) stream.FinishReason {

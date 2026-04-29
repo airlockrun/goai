@@ -378,6 +378,137 @@ func TestOpenAICompatModel_ToolCalls(t *testing.T) {
 			t.Errorf("expected tool name get_weather, got %s", toolCalls[0].ToolName)
 		}
 	})
+
+	// Some openai-compatible providers send the first tool-call delta with
+	// id and arguments but no function.name, then deliver the name in a later
+	// chunk. Mirrors ai-sdk PR #14760: id+args must be buffered and the
+	// tool-input-start must not fire until function.name is known.
+	t.Run("buffers tool-call deltas until function.name arrives", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+
+			chunks := []string{
+				`data: {"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":null}}]}`,
+				`data: {"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_123","type":"function","function":{"arguments":""}}]}}]}`,
+				`data: {"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_123","type":"function","function":{"name":"bash","arguments":"{"}}]}}]}`,
+				`data: {"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"command\""}}]}}]}`,
+				`data: {"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":": \"ls -la\"}"}}]}}]}`,
+				`data: {"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+				`data: [DONE]`,
+			}
+			for _, c := range chunks {
+				w.Write([]byte(c + "\n\n"))
+			}
+		}))
+		defer server.Close()
+
+		p := New(Options{ProviderID: "custom", APIKey: "k", BaseURL: server.URL})
+		m := p.Model("m")
+
+		events, err := m.Stream(context.Background(), &stream.CallOptions{
+			Messages: []message.Message{message.NewUserMessage("run ls")},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		var (
+			startEvents []stream.ToolInputStartEvent
+			deltaEvents []stream.ToolInputDeltaEvent
+			toolCalls   []stream.ToolCallEvent
+			errEvents   []stream.ErrorEvent
+		)
+		startSeen := false
+		var deltasBeforeStart int
+		for ev := range events {
+			switch d := ev.Data.(type) {
+			case stream.ToolInputStartEvent:
+				startSeen = true
+				startEvents = append(startEvents, d)
+			case stream.ToolInputDeltaEvent:
+				if !startSeen {
+					deltasBeforeStart++
+				}
+				deltaEvents = append(deltaEvents, d)
+			case stream.ToolCallEvent:
+				toolCalls = append(toolCalls, d)
+			case stream.ErrorEvent:
+				errEvents = append(errEvents, d)
+			}
+		}
+
+		if len(errEvents) != 0 {
+			t.Fatalf("did not expect error events, got %+v", errEvents)
+		}
+		if deltasBeforeStart != 0 {
+			t.Errorf("delta events emitted before tool-input-start: %d", deltasBeforeStart)
+		}
+		if len(startEvents) != 1 {
+			t.Fatalf("expected 1 tool-input-start, got %d (%+v)", len(startEvents), startEvents)
+		}
+		if startEvents[0].ToolName != "bash" || startEvents[0].ID != "call_123" {
+			t.Errorf("unexpected start event: %+v", startEvents[0])
+		}
+		if len(toolCalls) != 1 {
+			t.Fatalf("expected 1 tool call, got %d", len(toolCalls))
+		}
+		gotInput := strings.ReplaceAll(string(toolCalls[0].Input), " ", "")
+		wantInput := `{"command":"ls-la"}`
+		if gotInput != wantInput {
+			t.Errorf("tool call input = %q, want %q", string(toolCalls[0].Input), wantInput)
+		}
+		if toolCalls[0].ToolName != "bash" {
+			t.Errorf("tool call name = %q, want bash", toolCalls[0].ToolName)
+		}
+	})
+
+	// Stream ends without function.name ever arriving — surface as an error
+	// event (mirrors ai-sdk's AI_InvalidResponseDataError end-of-stream
+	// behavior in #14760).
+	t.Run("emits error when function.name never arrives", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+
+			chunks := []string{
+				`data: {"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":null}}]}`,
+				`data: {"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_999","type":"function","function":{"arguments":"{\"x\":1}"}}]}}]}`,
+				`data: {"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+				`data: [DONE]`,
+			}
+			for _, c := range chunks {
+				w.Write([]byte(c + "\n\n"))
+			}
+		}))
+		defer server.Close()
+
+		p := New(Options{ProviderID: "custom", APIKey: "k", BaseURL: server.URL})
+		m := p.Model("m")
+		events, err := m.Stream(context.Background(), &stream.CallOptions{
+			Messages: []message.Message{message.NewUserMessage("hi")},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		var sawErr bool
+		var sawToolCall bool
+		for ev := range events {
+			switch ev.Data.(type) {
+			case stream.ErrorEvent:
+				sawErr = true
+			case stream.ToolCallEvent:
+				sawToolCall = true
+			}
+		}
+		if !sawErr {
+			t.Error("expected error event when function.name never arrives")
+		}
+		if sawToolCall {
+			t.Error("did not expect tool-call event when function.name never arrives")
+		}
+	})
 }
 
 func TestOpenAICompatModel_ResponseFormat(t *testing.T) {
