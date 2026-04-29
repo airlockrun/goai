@@ -209,4 +209,72 @@ func TestOpenAIImage_Warnings(t *testing.T) {
 			}
 		}
 	})
+
+	// Mirrors ai-sdk's OpenAIImageModelId family + hasDefaultResponseFormat
+	// (PR #14680, packages/openai/src/image/openai-image-options.ts).
+	t.Run("gpt-image family is recognized for capabilities and wire shape", func(t *testing.T) {
+		family := []string{"gpt-image-1", "gpt-image-1-mini", "gpt-image-1.5", "gpt-image-2", "chatgpt-image-latest"}
+
+		for _, id := range family {
+			id := id
+			t.Run(id, func(t *testing.T) {
+				var captured map[string]any
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					json.NewDecoder(r.Body).Decode(&captured)
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode(map[string]any{
+						"created": 1,
+						"data":    []map[string]any{{"b64_json": testImageBase64}},
+					})
+				}))
+				defer server.Close()
+
+				p := New(provider.Options{APIKey: "k", BaseURL: server.URL})
+				im := p.ImageModel(id)
+
+				if got := im.(*OpenAIImageModel).MaxImagesPerCall(); got != 10 {
+					t.Errorf("%s MaxImagesPerCall = %d, want 10", id, got)
+				}
+
+				res, err := im.Generate(context.Background(), model.ImageCallOptions{Prompt: "x", N: 1, AspectRatio: "1024x1024"})
+				if err != nil {
+					t.Fatalf("Generate: %v", err)
+				}
+				for _, w := range res.Warnings {
+					if w.Feature == "aspectRatio" {
+						t.Errorf("did not expect aspectRatio warning on %s, got %+v", id, res.Warnings)
+					}
+				}
+				if _, has := captured["response_format"]; has {
+					t.Errorf("%s wire body should omit response_format, got %v", id, captured["response_format"])
+				}
+				if captured["size"] != "1024x1024" {
+					t.Errorf("%s wire body size = %v, want 1024x1024", id, captured["size"])
+				}
+			})
+		}
+	})
+
+	t.Run("dall-e-3 still sends response_format=b64_json", func(t *testing.T) {
+		var captured map[string]any
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			json.NewDecoder(r.Body).Decode(&captured)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"created": 1,
+				"data":    []map[string]any{{"b64_json": testImageBase64}},
+			})
+		}))
+		defer server.Close()
+
+		p := New(provider.Options{APIKey: "k", BaseURL: server.URL})
+		im := p.ImageModel("dall-e-3")
+		_, err := im.Generate(context.Background(), model.ImageCallOptions{Prompt: "x", N: 1})
+		if err != nil {
+			t.Fatalf("Generate: %v", err)
+		}
+		if captured["response_format"] != "b64_json" {
+			t.Errorf("dall-e-3 wire body response_format = %v, want b64_json", captured["response_format"])
+		}
+	})
 }

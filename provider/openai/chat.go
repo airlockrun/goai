@@ -83,7 +83,7 @@ func (m *ChatModel) doStream(ctx context.Context, options *stream.CallOptions, e
 		return
 	}
 
-	m.processStream(ctx, resp.Body, options.Tools, events)
+	m.processStream(ctx, resp.Body, options.Tools, events, options.IncludeRawChunks)
 }
 
 func (m *ChatModel) buildRequest(options *stream.CallOptions) ([]byte, []stream.Warning, error) {
@@ -126,6 +126,25 @@ func (m *ChatModel) buildRequest(options *stream.CallOptions) ([]byte, []stream.
 	// Add tools (already ordered by core)
 	if len(options.Tools) > 0 {
 		req.Tools = convertToChatTools(options.Tools)
+	}
+
+	// Translate goai's loose ToolChoice (bare strings or ai-sdk-shaped objects)
+	// into OpenAI Chat's tool_choice. Mirrors ai-sdk parity:
+	// packages/openai/src/chat/openai-chat-prepare-tools.ts.
+	if options.ToolChoice != nil {
+		req.ToolChoice = convertChatToolChoice(options.ToolChoice)
+	}
+
+	// reasoning_effort. Provider-specific opts.ReasoningEffort wins;
+	// otherwise CallOptions.Reasoning lowers into the same wire field
+	// (mirrors ai-sdk v4 reasoning enum). Gated to reasoning-capable
+	// models (o-series, gpt-5*) — non-reasoning models reject the field.
+	effort := opts.ReasoningEffort
+	if effort == "" {
+		effort = options.Reasoning
+	}
+	if effort != "" && GetLanguageModelCapabilities(m.id).IsReasoningModel {
+		req.ReasoningEffort = effort
 	}
 
 	// Map ResponseFormat to chat response_format.
@@ -194,7 +213,7 @@ func (m *ChatModel) buildRequest(options *stream.CallOptions) ([]byte, []stream.
 	return body, warnings, err
 }
 
-func (m *ChatModel) processStream(ctx context.Context, body io.Reader, tools []tool.Tool, events chan<- stream.Event) {
+func (m *ChatModel) processStream(ctx context.Context, body io.Reader, tools []tool.Tool, events chan<- stream.Event, includeRawChunks bool) {
 	// Convert tools slice to map for name lookup
 	toolsByName := make(map[string]tool.Tool, len(tools))
 	for _, t := range tools {
@@ -228,6 +247,10 @@ func (m *ChatModel) processStream(ctx context.Context, body io.Reader, tools []t
 		data := strings.TrimPrefix(line, "data: ")
 		if data == "[DONE]" {
 			break
+		}
+
+		if includeRawChunks {
+			events <- stream.Event{Type: stream.EventRawChunk, Data: stream.RawChunkEvent{RawValue: data}}
 		}
 
 		var chunk chatCompletionChunk

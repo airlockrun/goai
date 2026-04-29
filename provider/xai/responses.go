@@ -82,7 +82,7 @@ func (m *XaiResponsesModel) doStream(ctx context.Context, options *stream.CallOp
 		return
 	}
 
-	m.processStream(ctx, resp.Body, options.Tools, events)
+	m.processStream(ctx, resp.Body, options.Tools, events, options.IncludeRawChunks)
 }
 
 func (m *XaiResponsesModel) buildRequest(options *stream.CallOptions) ([]byte, []stream.Warning, error) {
@@ -125,9 +125,16 @@ func (m *XaiResponsesModel) buildRequest(options *stream.CallOptions) ([]byte, [
 		warnings = append(warnings, choiceWarnings...)
 	}
 
-	// reasoningEffort (flat key in providerOptions → reasoning.effort in request)
-	if opts.ReasoningEffort != "" {
-		req.Reasoning = &reasoningConfig{Effort: opts.ReasoningEffort}
+	// reasoningEffort (flat key in providerOptions → reasoning.effort in
+	// request). Provider-specific opts.ReasoningEffort wins; otherwise
+	// CallOptions.Reasoning lowers into the same wire field (ai-sdk v4
+	// reasoning enum).
+	effort := opts.ReasoningEffort
+	if effort == "" {
+		effort = options.Reasoning
+	}
+	if effort != "" {
+		req.Reasoning = &reasoningConfig{Effort: effort}
 	}
 
 	// logprobs / topLogprobs. ai-sdk forces logprobs=true when topLogprobs
@@ -224,7 +231,7 @@ type responsesToolCallAccumulator struct {
 	arguments string
 }
 
-func (m *XaiResponsesModel) processStream(ctx context.Context, body io.Reader, tools []tool.Tool, events chan<- stream.Event) {
+func (m *XaiResponsesModel) processStream(ctx context.Context, body io.Reader, tools []tool.Tool, events chan<- stream.Event, includeRawChunks bool) {
 	// (tools passed through for symmetry with OpenAI parser; unused here
 	// because the xAI Responses parser emits tool-call events directly
 	// from stream items.)
@@ -283,6 +290,10 @@ func (m *XaiResponsesModel) processStream(ctx context.Context, body io.Reader, t
 		data := strings.TrimPrefix(line, "data: ")
 		if data == "[DONE]" {
 			break
+		}
+
+		if includeRawChunks {
+			events <- stream.Event{Type: stream.EventRawChunk, Data: stream.RawChunkEvent{RawValue: data}}
 		}
 
 		var chunk responsesStreamChunk

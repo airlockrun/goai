@@ -7,10 +7,33 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/airlockrun/goai/model"
 	"github.com/airlockrun/goai/stream"
 )
+
+// gptImageFamilyPrefixes matches model IDs that share the gpt-image
+// surface (auto size default, aspectRatio→size mapping, b64_json
+// response by default — so response_format is omitted on the wire).
+// Mirrors ai-sdk's OpenAIImageModelId list and hasDefaultResponseFormat
+// (packages/openai/src/image/openai-image-options.ts).
+var gptImageFamilyPrefixes = []string{
+	"chatgpt-image-",
+	"gpt-image-1-mini",
+	"gpt-image-1.5",
+	"gpt-image-1",
+	"gpt-image-2",
+}
+
+func isGPTImageFamily(id string) bool {
+	for _, p := range gptImageFamilyPrefixes {
+		if strings.HasPrefix(id, p) {
+			return true
+		}
+	}
+	return false
+}
 
 // OpenAIImageModel implements the ImageModel interface for OpenAI.
 type OpenAIImageModel struct {
@@ -35,19 +58,21 @@ func (m *OpenAIImageModel) MaxImagesPerCall() int {
 		return 1 // DALL-E 3 only supports 1 image per call
 	case "dall-e-2":
 		return 10
-	case "gpt-image-1":
-		return 1
-	default:
-		return 1
 	}
+	if isGPTImageFamily(m.id) {
+		return 10
+	}
+	return 1
 }
 
 // Generate generates images based on the provided options.
 func (m *OpenAIImageModel) Generate(ctx context.Context, opts model.ImageCallOptions) (*model.ImageResult, error) {
-	// Mirrors ai-sdk openai-image-model.ts: gpt-image-1 can map aspectRatio
-	// into size; all other models ignore both aspectRatio and seed.
+	// Mirrors ai-sdk openai-image-model.ts: the gpt-image family can map
+	// aspectRatio into size; all other models ignore both aspectRatio and
+	// seed.
+	gptImage := isGPTImageFamily(m.id)
 	var warnings []stream.Warning
-	if opts.AspectRatio != "" && m.id != "gpt-image-1" {
+	if opts.AspectRatio != "" && !gptImage {
 		warnings = append(warnings, stream.UnsupportedWarning("aspectRatio", "This model does not support aspect ratio. Use `size` instead."))
 	}
 	if opts.Seed != nil {
@@ -70,23 +95,25 @@ func (m *OpenAIImageModel) Generate(ctx context.Context, opts model.ImageCallOpt
 		req.Size = opts.Size
 	} else {
 		// Default sizes based on model
-		switch m.id {
-		case "dall-e-3":
+		switch {
+		case m.id == "dall-e-3", m.id == "dall-e-2":
 			req.Size = "1024x1024"
-		case "dall-e-2":
-			req.Size = "1024x1024"
-		case "gpt-image-1":
+		case gptImage:
 			req.Size = "auto"
 		}
 	}
 
-	// Handle aspect ratio for gpt-image-1
-	if opts.AspectRatio != "" && m.id == "gpt-image-1" {
+	// Aspect ratio maps to size for the gpt-image family.
+	if opts.AspectRatio != "" && gptImage {
 		req.Size = opts.AspectRatio
 	}
 
-	// Request base64 response for easier handling
-	req.ResponseFormat = "b64_json"
+	// Mirrors ai-sdk's hasDefaultResponseFormat: the gpt-image family
+	// returns b64_json by default and rejects an explicit response_format
+	// on some endpoints, so omit it for those models.
+	if !gptImage {
+		req.ResponseFormat = "b64_json"
+	}
 
 	// Extract OpenAI-specific provider options
 	openaiOpts, _ := opts.ProviderOptions["openai"].(map[string]any)

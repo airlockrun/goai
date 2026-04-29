@@ -20,7 +20,7 @@ import (
 //     ProviderID carries the canonical id (e.g. "google.google_search")
 //     and Args carries the JSON-encoded arguments.
 //
-// Mirrors ai-sdk's LanguageModelV3FunctionTool | LanguageModelV3ProviderDefinedTool union.
+// Mirrors ai-sdk's LanguageModelV4FunctionTool | LanguageModelV4ProviderDefinedTool union.
 type Tool struct {
 	// Type is "" (function tool) or "provider" (provider-defined tool).
 	Type string `json:"type,omitempty"`
@@ -38,7 +38,7 @@ type Tool struct {
 	InputSchema json.RawMessage `json:"inputSchema,omitempty"` // JSON Schema (function tools)
 	// InputExamples is an optional list of example inputs that show the
 	// language model what the tool input should look like. Mirrors ai-sdk's
-	// LanguageModelV3FunctionTool.inputExamples. Providers that natively
+	// LanguageModelV4FunctionTool.inputExamples. Providers that natively
 	// accept examples (e.g. Anthropic via input_examples) pass them through;
 	// others can use middleware.AddToolInputExamples to serialize them into
 	// the description instead.

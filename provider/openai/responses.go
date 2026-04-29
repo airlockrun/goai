@@ -89,7 +89,7 @@ func (m *ResponsesModel) doStream(ctx context.Context, options *stream.CallOptio
 		return
 	}
 
-	m.processStream(ctx, resp.Body, options.Tools, events)
+	m.processStream(ctx, resp.Body, options.Tools, events, options.IncludeRawChunks)
 }
 
 func (m *ResponsesModel) buildRequest(options *stream.CallOptions) ([]byte, []stream.Warning, error) {
@@ -142,16 +142,27 @@ func (m *ResponsesModel) buildRequest(options *stream.CallOptions) ([]byte, []st
 		req.MaxOutputTokens = options.MaxOutputTokens
 	}
 
-	// Add tool choice from Input (matching ai-sdk pattern where toolChoice is top-level)
+	// Translate goai's loose ToolChoice (bare strings or ai-sdk-shaped objects)
+	// into the OpenAI Responses wire form. Bare "auto"/"none"/"required" pass
+	// through; {type: "tool", toolName: X} resolves to {type: "function", name: X}
+	// for function tools or the hosted-tool wire shape for provider tools.
+	// ai-sdk parity: packages/openai/src/responses/openai-responses-prepare-tools.ts.
 	if options.ToolChoice != nil {
-		req.ToolChoice = options.ToolChoice
+		req.ToolChoice = convertResponsesToolChoice(options.ToolChoice, options.Tools)
 	}
 
 	// Apply provider-specific options from typed struct
 
-	// reasoningEffort - transforms to reasoning.effort in request
-	if opts.ReasoningEffort != "" {
-		req.Reasoning = &reasoningConfig{Effort: opts.ReasoningEffort}
+	// reasoningEffort - transforms to reasoning.effort in request.
+	// Provider-specific opts.ReasoningEffort wins; otherwise the top-level
+	// CallOptions.Reasoning lowers into the same wire field (mirrors
+	// ai-sdk v4's reasoning enum).
+	effort := opts.ReasoningEffort
+	if effort == "" {
+		effort = options.Reasoning
+	}
+	if effort != "" {
+		req.Reasoning = &reasoningConfig{Effort: effort}
 	}
 
 	// reasoningSummary
@@ -282,7 +293,7 @@ func (m *ResponsesModel) buildRequest(options *stream.CallOptions) ([]byte, []st
 	return body, warnings, err
 }
 
-func (m *ResponsesModel) processStream(ctx context.Context, body io.Reader, tools []tool.Tool, events chan<- stream.Event) {
+func (m *ResponsesModel) processStream(ctx context.Context, body io.Reader, tools []tool.Tool, events chan<- stream.Event, includeRawChunks bool) {
 	// Convert tools slice to map for name lookup
 	toolsByName := make(map[string]tool.Tool, len(tools))
 	for _, t := range tools {
@@ -323,6 +334,10 @@ func (m *ResponsesModel) processStream(ctx context.Context, body io.Reader, tool
 		data := strings.TrimPrefix(line, "data: ")
 		if data == "[DONE]" {
 			break
+		}
+
+		if includeRawChunks {
+			events <- stream.Event{Type: stream.EventRawChunk, Data: stream.RawChunkEvent{RawValue: data}}
 		}
 
 		var chunk responsesChunk

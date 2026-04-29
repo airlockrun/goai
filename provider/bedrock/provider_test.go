@@ -554,8 +554,12 @@ func TestBedrockAnthropic_RequestBodyWiring(t *testing.T) {
 	if cc["ttl"] != "1h" {
 		t.Errorf("cache_control.ttl = %v, want 1h", cc["ttl"])
 	}
-	if body["tool_choice"] != "auto" {
-		t.Errorf("tool_choice = %v, want auto (should pass through)", body["tool_choice"])
+	// Anthropic-on-Bedrock uses the same Messages-API wire format as direct
+	// Anthropic: tool_choice is an object, not a bare string. The provider
+	// translates "auto" → {type: "auto"}.
+	tc, ok := body["tool_choice"].(map[string]any)
+	if !ok || tc["type"] != "auto" {
+		t.Errorf("tool_choice = %v, want {type: auto}", body["tool_choice"])
 	}
 	tools, ok := body["tools"].([]any)
 	if !ok || len(tools) != 1 {

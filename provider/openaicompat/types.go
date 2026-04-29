@@ -12,16 +12,17 @@ import (
 // Request types
 
 type chatRequest struct {
-	Model          string              `json:"model"`
-	Messages       []chatMessage       `json:"messages"`
-	Stream         bool                `json:"stream"`
-	Temperature    *float64            `json:"temperature,omitempty"`
-	TopP           *float64            `json:"top_p,omitempty"`
-	MaxTokens      *int                `json:"max_tokens,omitempty"`
-	Stop           []string            `json:"stop,omitempty"`
-	Tools          []chatTool          `json:"tools,omitempty"`
-	ResponseFormat *responseFormat     `json:"response_format,omitempty"`
-	StreamOptions  *streamOptions      `json:"stream_options,omitempty"`
+	Model          string          `json:"model"`
+	Messages       []any           `json:"messages"`
+	Stream         bool            `json:"stream"`
+	Temperature    *float64        `json:"temperature,omitempty"`
+	TopP           *float64        `json:"top_p,omitempty"`
+	MaxTokens      *int            `json:"max_tokens,omitempty"`
+	Stop           []string        `json:"stop,omitempty"`
+	Tools          []chatTool      `json:"tools,omitempty"`
+	ToolChoice     any             `json:"tool_choice,omitempty"`
+	ResponseFormat *responseFormat `json:"response_format,omitempty"`
+	StreamOptions  *streamOptions  `json:"stream_options,omitempty"`
 }
 
 // responseFormat mirrors OpenAI chat response_format.

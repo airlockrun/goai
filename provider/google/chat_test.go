@@ -911,6 +911,72 @@ func TestGoogleModel_NewOptionsOnWire(t *testing.T) {
 	}
 }
 
+// includeServerSideToolInvocations should ride along with toolConfig on
+// non-Vertex Gemini (mirrors ai-sdk PR #14767). The Vertex endpoint rejects
+// the field, but goai's vertex package is implemented separately and does
+// not use this code path.
+func TestGoogleModel_ToolConfigIncludesServerSideToolInvocations(t *testing.T) {
+	var captured map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &captured)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(`data: {"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}]}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	p := New(Options{APIKey: "k", BaseURL: server.URL})
+	m := p.Model("gemini-2.5-pro")
+	events, err := m.Stream(context.Background(), &stream.CallOptions{
+		Messages:   []message.Message{message.NewUserMessage("hi")},
+		ToolChoice: "required",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range events {
+	}
+
+	tc, ok := captured["toolConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected toolConfig on request, got %T (%v)", captured["toolConfig"], captured["toolConfig"])
+	}
+	if tc["includeServerSideToolInvocations"] != true {
+		t.Errorf("toolConfig.includeServerSideToolInvocations = %v, want true", tc["includeServerSideToolInvocations"])
+	}
+	fc, _ := tc["functionCallingConfig"].(map[string]any)
+	if fc["mode"] != "ANY" {
+		t.Errorf("functionCallingConfig.mode = %v, want ANY", fc["mode"])
+	}
+}
+
+// Without ToolChoice no toolConfig should ride along — and therefore no
+// includeServerSideToolInvocations either.
+func TestGoogleModel_ToolConfigOmittedWhenNoToolChoice(t *testing.T) {
+	var captured map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &captured)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(`data: {"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}]}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	p := New(Options{APIKey: "k", BaseURL: server.URL})
+	m := p.Model("gemini-2.5-pro")
+	events, err := m.Stream(context.Background(), &stream.CallOptions{
+		Messages: []message.Message{message.NewUserMessage("hi")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range events {
+	}
+	if _, has := captured["toolConfig"]; has {
+		t.Errorf("expected no toolConfig when ToolChoice is unset, got %v", captured["toolConfig"])
+	}
+}
+
 // Verify the latest gemini 3.x + 2.5 model IDs landed and obsolete
 // 1.0-pro is pruned.
 func TestGoogleProvider_ModelsContainsLatest(t *testing.T) {

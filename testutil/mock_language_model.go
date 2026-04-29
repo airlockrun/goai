@@ -10,7 +10,7 @@ import (
 )
 
 // MockLanguageModel is a mock implementation of LanguageModel for testing.
-// It mirrors ai-sdk's MockLanguageModelV3.
+// It mirrors ai-sdk's MockLanguageModelV4.
 type MockLanguageModel struct {
 	id       string
 	provider string

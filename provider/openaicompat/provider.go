@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/provider"
 	"github.com/airlockrun/goai/stream"
 	"github.com/airlockrun/goai/tool"
@@ -27,6 +28,16 @@ type RequestModifier func(providerOptions map[string]any) (extraFields map[strin
 // emits provider-specific warnings (e.g. "topK is not supported"). Separate
 // from RequestModifier because that one only sees providerOptions.
 type CallWarner func(options *stream.CallOptions) []stream.Warning
+
+// MessageConverter, when set, replaces the default goai-message → chat-message
+// conversion. It receives the model ID and the original goai messages and
+// returns a slice of message objects ready for JSON marshaling (each element
+// can be a ChatMessage, a map[string]any, or any other JSON-marshalable value).
+// Use this when a provider needs model-specific message conversion — for
+// example DeepSeek's different reasoning_content rules across deepseek-v4
+// (echo) vs deepseek-reasoner (strip). When nil, the default
+// ConvertToChatMessages output is used.
+type MessageConverter func(modelID string, messages []message.Message) ([]any, error)
 
 // Options contains configuration for an OpenAI-compatible provider.
 type Options struct {
@@ -56,6 +67,10 @@ type Options struct {
 	// for unsupported CallOption fields (e.g. topK, frequencyPenalty).
 	// Matches the per-provider inventory in ai-sdk's language models.
 	CallWarner CallWarner
+
+	// MessageConverter, when set, replaces the default message conversion.
+	// See the MessageConverter type doc for details.
+	MessageConverter MessageConverter
 
 	// SupportsStructuredOutputs indicates the provider's endpoint honors the
 	// OpenAI "json_schema" response_format with strict decoding. When false,
@@ -171,7 +186,7 @@ func (m *CompatModel) doStream(ctx context.Context, options *stream.CallOptions,
 		return
 	}
 
-	m.processStream(ctx, resp.Body, options.Tools, events)
+	m.processStream(ctx, resp.Body, options.Tools, events, options.IncludeRawChunks)
 }
 
 func (m *CompatModel) buildRequest(options *stream.CallOptions) ([]byte, []stream.Warning, error) {
@@ -217,10 +232,25 @@ func (m *CompatModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 		}
 	}
 
+	var convertedMessages []any
+	if m.provider.opts.MessageConverter != nil {
+		custom, err := m.provider.opts.MessageConverter(m.id, messages)
+		if err != nil {
+			return nil, warnings, fmt.Errorf("message converter error: %w", err)
+		}
+		convertedMessages = custom
+	} else {
+		raw := convertToMessages(messages)
+		convertedMessages = make([]any, len(raw))
+		for i := range raw {
+			convertedMessages[i] = raw[i]
+		}
+	}
+
 	req := chatRequest{
 		Model:          m.id,
 		Stream:         true,
-		Messages:       convertToMessages(messages),
+		Messages:       convertedMessages,
 		ResponseFormat: respFormat,
 	}
 
@@ -240,6 +270,14 @@ func (m *CompatModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 	// Add tools (already ordered by core)
 	if len(options.Tools) > 0 {
 		req.Tools = convertToTools(options.Tools)
+	}
+
+	// Translate goai's loose ToolChoice (bare strings or ai-sdk-shaped objects)
+	// into Chat Completions' tool_choice. Most OpenAI-compatible APIs accept
+	// the same shape. Mirrors ai-sdk parity:
+	// packages/openai/src/chat/openai-chat-prepare-tools.ts.
+	if options.ToolChoice != nil {
+		req.ToolChoice = convertToolChoice(options.ToolChoice)
 	}
 
 	// Stream options for usage
@@ -276,7 +314,7 @@ func (m *CompatModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 	return body, warnings, err
 }
 
-func (m *CompatModel) processStream(ctx context.Context, body io.Reader, tools []tool.Tool, events chan<- stream.Event) {
+func (m *CompatModel) processStream(ctx context.Context, body io.Reader, tools []tool.Tool, events chan<- stream.Event, includeRawChunks bool) {
 	// Convert tools slice to map for name lookup
 	toolsByName := make(map[string]tool.Tool, len(tools))
 	for _, t := range tools {
@@ -310,6 +348,10 @@ func (m *CompatModel) processStream(ctx context.Context, body io.Reader, tools [
 		data := strings.TrimPrefix(line, "data: ")
 		if data == "[DONE]" {
 			break
+		}
+
+		if includeRawChunks {
+			events <- stream.Event{Type: stream.EventRawChunk, Data: stream.RawChunkEvent{RawValue: data}}
 		}
 
 		var chunk chatCompletionChunk
@@ -351,31 +393,40 @@ func (m *CompatModel) processStream(ctx context.Context, body io.Reader, tools [
 			events <- stream.Event{Type: stream.EventTextDelta, Data: stream.TextDeltaEvent{Text: delta.Content}}
 		}
 
-		// Handle tool calls
+		// Handle tool calls. Buffers id + arguments until function.name
+		// arrives. Some openai-compatible providers send the first delta
+		// without function.name and supply it on a later chunk; emitting
+		// tool-input-start before the name would produce malformed events.
+		// Mirrors ai-sdk PR #14760.
 		for _, tc := range delta.ToolCalls {
 			acc, exists := currentToolCalls[tc.Index]
 			if !exists {
 				acc = &toolCallAccumulator{index: tc.Index}
 				currentToolCalls[tc.Index] = acc
+			}
+			if tc.ID != "" && acc.id == "" {
+				acc.id = tc.ID
+			}
 
-				if tc.ID != "" {
-					acc.id = tc.ID
-				}
+			if !acc.started {
+				acc.arguments += tc.Function.Arguments
 				if tc.Function.Name != "" {
 					acc.name = tc.Function.Name
+					acc.started = true
 					events <- stream.Event{
 						Type: stream.EventToolInputStart,
 						Data: stream.ToolInputStartEvent{ID: acc.id, ToolName: acc.name},
 					}
+					if acc.arguments != "" {
+						events <- stream.Event{
+							Type: stream.EventToolInputDelta,
+							Data: stream.ToolInputDeltaEvent{ID: acc.id, Delta: acc.arguments},
+						}
+					}
 				}
+				continue
 			}
 
-			if tc.ID != "" && acc.id == "" {
-				acc.id = tc.ID
-			}
-			if tc.Function.Name != "" && acc.name == "" {
-				acc.name = tc.Function.Name
-			}
 			if tc.Function.Arguments != "" {
 				acc.arguments += tc.Function.Arguments
 				events <- stream.Event{
@@ -393,6 +444,17 @@ func (m *CompatModel) processStream(ctx context.Context, body io.Reader, tools [
 
 	// Process completed tool calls
 	for _, acc := range currentToolCalls {
+		if !acc.started {
+			// function.name never arrived for this tool-call index. Mirrors
+			// ai-sdk's processDelta which raises AI_InvalidResponseDataError
+			// in the same situation (PR #14760).
+			events <- stream.Event{
+				Type: stream.EventError,
+				Data: stream.ErrorEvent{Error: fmt.Errorf("openaicompat: tool call at index %d has no function.name", acc.index)},
+			}
+			continue
+		}
+
 		events <- stream.Event{
 			Type: stream.EventToolInputEnd,
 			Data: stream.ToolInputEndEvent{ID: acc.id},
@@ -446,6 +508,7 @@ type toolCallAccumulator struct {
 	id        string
 	name      string
 	arguments string
+	started   bool // true once tool-input-start has been emitted (after function.name arrives)
 }
 
 func mapFinishReason(reason string) stream.FinishReason {

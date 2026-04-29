@@ -207,10 +207,10 @@ func (m *HuggingFaceLanguageModel) doStream(ctx context.Context, options *stream
 		return
 	}
 
-	m.processStream(ctx, resp.Body, options.Tools, events)
+	m.processStream(ctx, resp.Body, options.Tools, events, options.IncludeRawChunks)
 }
 
-func (m *HuggingFaceLanguageModel) processStream(ctx context.Context, body io.Reader, tools []tool.Tool, events chan<- stream.Event) {
+func (m *HuggingFaceLanguageModel) processStream(ctx context.Context, body io.Reader, tools []tool.Tool, events chan<- stream.Event, includeRawChunks bool) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
@@ -236,6 +236,10 @@ func (m *HuggingFaceLanguageModel) processStream(ctx context.Context, body io.Re
 
 		if data == "" {
 			continue
+		}
+
+		if includeRawChunks {
+			events <- stream.Event{Type: stream.EventRawChunk, Data: stream.RawChunkEvent{RawValue: data}}
 		}
 
 		var chunk struct {

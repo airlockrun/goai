@@ -73,9 +73,17 @@ type anthropicTaskBudget struct {
 	Remaining int    `json:"remaining,omitempty"`
 }
 
-// anthropicOutputConfig carries structured-output configuration.
+// anthropicOutputConfig carries output-related configuration. Currently used
+// for structured-output (format) and the effort hint. ai-sdk colocates these
+// (and task_budget) under output_config.
 type anthropicOutputConfig struct {
 	Format *anthropicOutputFormat `json:"format,omitempty"`
+
+	// Effort advises the model how much effort to put into the task.
+	// Values: "low" / "medium" / "high" / "xhigh" / "max". Mirrors
+	// ai-sdk's anthropicOptions.effort which lands at output_config.effort
+	// (anthropic-language-model.ts:454-456).
+	Effort string `json:"effort,omitempty"`
 }
 
 type anthropicOutputFormat struct {
@@ -391,8 +399,16 @@ func getTextFromContent(content message.Content) string {
 	return ""
 }
 
-func convertToolMessages(msg message.Message) []anthropicMessage {
-	// Collect non-ToolResult parts (attachments) from the message
+// toolMessageToBlocks converts one goai tool-role message into the slice of
+// tool_result content blocks it contributes to the surrounding user block.
+// The user-block walker in BuildRequestBody calls this and appends the result
+// alongside any sibling user-role parts so all tool_results for a turn land
+// in a single anthropic user message — Anthropic's API requires this pairing.
+func toolMessageToBlocks(msg message.Message) []anthropicContentBlock {
+	// Collect non-ToolResult parts (attachments) from the message; goai
+	// allows text/image/file parts to ride alongside ToolResults in a tool
+	// message, and they get embedded inside each tool_result's content
+	// array (legacy goai behavior preserved here).
 	var attachments []message.Part
 	for _, part := range msg.Content.Parts {
 		switch part.(type) {
@@ -401,7 +417,7 @@ func convertToolMessages(msg message.Message) []anthropicMessage {
 		}
 	}
 
-	// Collect tool result parts to know which is last.
+	// Collect tool result parts to know which is last for cache-control.
 	var toolResults []message.ToolResultPart
 	for _, part := range msg.Content.Parts {
 		if tr, ok := part.(message.ToolResultPart); ok {
@@ -409,7 +425,7 @@ func convertToolMessages(msg message.Message) []anthropicMessage {
 		}
 	}
 
-	var result []anthropicMessage
+	out := make([]anthropicContentBlock, 0, len(toolResults))
 	for i, tr := range toolResults {
 		block := anthropicContentBlock{
 			Type:      "tool_result",
@@ -418,7 +434,6 @@ func convertToolMessages(msg message.Message) []anthropicMessage {
 		}
 
 		if len(attachments) > 0 {
-			// Build content array: text result + attachment blocks
 			var contentBlocks []anthropicContentBlock
 			resultStr := toolResultToString(tr.Result)
 			if resultStr != "" {
@@ -440,12 +455,22 @@ func convertToolMessages(msg message.Message) []anthropicMessage {
 		}
 		block.CacheControl = cc
 
-		result = append(result, anthropicMessage{
-			Role:    "user",
-			Content: []anthropicContentBlock{block},
-		})
+		out = append(out, block)
 	}
-	return result
+	return out
+}
+
+// convertToolMessages wraps toolMessageToBlocks back into a one-element slice
+// of anthropicMessage. Kept for the existing TestConvertToolMessages tests
+// that exercise the block-construction logic directly. The live request
+// builder no longer calls this — it calls toolMessageToBlocks and merges the
+// blocks into the surrounding user block.
+func convertToolMessages(msg message.Message) []anthropicMessage {
+	blocks := toolMessageToBlocks(msg)
+	if len(blocks) == 0 {
+		return nil
+	}
+	return []anthropicMessage{{Role: "user", Content: blocks}}
 }
 
 func toolResultToString(result any) string {

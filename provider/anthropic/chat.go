@@ -110,7 +110,7 @@ func (m *AnthropicModel) doStream(ctx context.Context, options *stream.CallOptio
 		return
 	}
 
-	m.processStream(ctx, resp.Body, options.Tools, events, jsonToolInjected)
+	m.processStream(ctx, resp.Body, options.Tools, events, jsonToolInjected, options.IncludeRawChunks)
 }
 
 // syntheticJSONToolName is the name of the synthetic tool injected when the
@@ -191,29 +191,55 @@ func BuildRequestBody(cfg Config, modelID string, options *stream.CallOptions) (
 		}
 	}
 
-	// Extract system message
+	// Group messages into blocks so consecutive user+tool runs collapse into
+	// a single anthropic user message and consecutive assistant runs collapse
+	// into a single anthropic assistant message. Mirrors ai-sdk's
+	// groupIntoBlocks (convert-to-anthropic-prompt.ts:1088). Anthropic's API
+	// requires every tool_result for a given assistant turn to live in one
+	// user message immediately following that turn — emitting a separate
+	// anthropic message per goai message breaks that pairing.
 	var system string
 	var systemProviderOpts map[string]any
 	var messages []anthropicMessage
 
-	for _, msg := range inputMessages {
-		switch msg.Role {
-		case message.RoleSystem:
-			system = getTextFromContent(msg.Content)
-			systemProviderOpts = msg.ProviderOptions
-		case message.RoleUser:
+	for _, block := range groupIntoBlocks(inputMessages) {
+		switch block.Type {
+		case blockSystem:
+			// goai's legacy behavior: last system message wins (silent
+			// overwrite, unlike ai-sdk which throws on multiple).
+			for _, msg := range block.Messages {
+				system = getTextFromContent(msg.Content)
+				systemProviderOpts = msg.ProviderOptions
+			}
+
+		case blockUser:
+			// Combine all user and tool messages in this block into a
+			// single anthropic user message.
+			var content []anthropicContentBlock
+			for _, msg := range block.Messages {
+				switch msg.Role {
+				case message.RoleUser:
+					content = append(content, convertToAnthropicContent(msg.Content, msg.ProviderOptions)...)
+				case message.RoleTool:
+					content = append(content, toolMessageToBlocks(msg)...)
+				}
+			}
 			messages = append(messages, anthropicMessage{
 				Role:    "user",
-				Content: convertToAnthropicContent(msg.Content, msg.ProviderOptions),
+				Content: content,
 			})
-		case message.RoleAssistant:
-			content := convertAssistantContent(msg.Content, msg.ProviderOptions)
+
+		case blockAssistant:
+			// Combine all assistant messages in this block into a single
+			// anthropic assistant message.
+			var content []anthropicContentBlock
+			for _, msg := range block.Messages {
+				content = append(content, convertAssistantContent(msg.Content, msg.ProviderOptions)...)
+			}
 			messages = append(messages, anthropicMessage{
 				Role:    "assistant",
 				Content: content,
 			})
-		case message.RoleTool:
-			messages = append(messages, convertToolMessages(msg)...)
 		}
 	}
 
@@ -267,14 +293,20 @@ func BuildRequestBody(cfg Config, modelID string, options *stream.CallOptions) (
 		warnings = append(warnings, toolWarnings...)
 	}
 
+	// Translate goai's loose ToolChoice (string forms "auto"/"none"/"required"/<tool name>
+	// or a structured map) into Anthropic's wire-format object. Mirrors ai-sdk's
+	// prepare-tools tool_choice handling: "required" → {type: "any"}, "none" drops
+	// both tools[] and tool_choice. Anthropic rejects bare strings on tool_choice.
+	choice, dropTools := convertAnthropicToolChoice(options.ToolChoice)
+	if dropTools {
+		req.Tools = nil
+	} else {
+		req.ToolChoice = choice
+	}
+
 	// Append the synthetic JSON tool after user tools so it doesn't reorder them.
 	if syntheticJSONTool != nil {
 		req.Tools = append(req.Tools, *syntheticJSONTool)
-	}
-
-	// Add tool choice from Input
-	if options.ToolChoice != nil {
-		req.ToolChoice = options.ToolChoice
 	}
 
 	// Force the synthetic JSON tool. Overrides any caller-supplied ToolChoice
@@ -398,6 +430,27 @@ func BuildRequestBody(cfg Config, modelID string, options *stream.CallOptions) (
 				Schema: options.ResponseFormat.Schema,
 			},
 		}
+	}
+
+	// effort → output_config.effort. ai-sdk parity:
+	// anthropic-language-model.ts:407-411 — effort is suppressed when
+	// thinking.type is explicitly "disabled" (the model can't apply effort
+	// when reasoning is off), but otherwise rides alongside any other
+	// output_config payload. Merge into req.OutputConfig so the
+	// structured-output path above doesn't get clobbered.
+	//
+	// Resolution: provider-specific opts.Effort wins when set; otherwise
+	// the top-level CallOptions.Reasoning lowers into the same wire field
+	// (mirrors ai-sdk v4's reasoning enum).
+	effort := opts.Effort
+	if effort == "" {
+		effort = options.Reasoning
+	}
+	if effort != "" && (opts.Thinking == nil || opts.Thinking.Type != "disabled") {
+		if req.OutputConfig == nil {
+			req.OutputConfig = &anthropicOutputConfig{}
+		}
+		req.OutputConfig.Effort = effort
 	}
 
 	// Collect betas. Order: caller-supplied via providerOptions first so
@@ -599,7 +652,7 @@ func parseContextKeep(raw any) *anthropicContextKeep {
 	return nil
 }
 
-func (m *AnthropicModel) processStream(ctx context.Context, body io.Reader, tools []tool.Tool, events chan<- stream.Event, jsonToolInjected bool) {
+func (m *AnthropicModel) processStream(ctx context.Context, body io.Reader, tools []tool.Tool, events chan<- stream.Event, jsonToolInjected bool, includeRawChunks bool) {
 	// Convert tools slice to map for name lookup
 	toolsByName := make(map[string]tool.Tool, len(tools))
 	for _, t := range tools {
@@ -642,6 +695,10 @@ func (m *AnthropicModel) processStream(ctx context.Context, body io.Reader, tool
 		}
 
 		data := strings.TrimPrefix(line, "data: ")
+
+		if includeRawChunks {
+			events <- stream.Event{Type: stream.EventRawChunk, Data: stream.RawChunkEvent{RawValue: data}}
+		}
 
 		var event anthropicStreamEvent
 		if err := json.Unmarshal([]byte(data), &event); err != nil {

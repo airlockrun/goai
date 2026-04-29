@@ -1,0 +1,7 @@
+goai
+Copyright 2026 Oleg Karpov
+
+This project is a Go port of the Vercel AI SDK
+(https://github.com/vercel/ai), Copyright 2023 Vercel, Inc., licensed
+under the Apache License, Version 2.0 — the same license under which
+goai is distributed. See LICENSE for the full license text.

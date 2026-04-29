@@ -599,17 +599,19 @@ func GenerateText(ctx context.Context, input stream.Input) (*GenerateTextResult,
 // ai-sdk's generate-text.ts:578).
 func buildCallOptions(input *stream.Input) *stream.CallOptions {
 	opts := &stream.CallOptions{
-		Messages:        input.Messages,
-		Tools:           input.Tools.Ordered(input.ActiveTools),
-		ToolChoice:      input.ToolChoice,
-		Temperature:     input.Temperature,
-		TopP:            input.TopP,
-		TopK:            input.TopK,
-		MaxOutputTokens: input.MaxOutputTokens,
-		StopSequences:   input.StopSequences,
-		AbortSignal:     input.AbortSignal,
-		Headers:         input.Headers,
-		ProviderOptions: input.ProviderOptions,
+		Messages:         input.Messages,
+		Tools:            input.Tools.Ordered(input.ActiveTools),
+		ToolChoice:       input.ToolChoice,
+		Temperature:      input.Temperature,
+		TopP:             input.TopP,
+		TopK:             input.TopK,
+		MaxOutputTokens:  input.MaxOutputTokens,
+		StopSequences:    input.StopSequences,
+		AbortSignal:      input.AbortSignal,
+		Headers:          input.Headers,
+		ProviderOptions:  input.ProviderOptions,
+		IncludeRawChunks: input.IncludeRawChunks,
+		Reasoning:        input.Reasoning,
 	}
 	if input.Output != nil {
 		opts.ResponseFormat = input.Output.ResponseFormat()
