@@ -48,6 +48,9 @@ type ServerConfig struct {
 
 	// Headers are HTTP headers for sse/http transport.
 	Headers map[string]string
+
+	// AuthProvider is the optional OAuth integration. nil = no OAuth.
+	AuthProvider OAuthClientProvider
 }
 
 // ServerConnection represents a connection to an MCP server.
@@ -121,9 +124,9 @@ func (c *Client) Connect(ctx context.Context, config ServerConfig) error {
 	case "stdio":
 		transport = NewStdioTransport(config.Command, config.Args, config.Env)
 	case "sse":
-		transport = NewSSETransport(config.URL, config.Headers)
+		transport = NewSSETransport(config.URL, config.Headers, config.AuthProvider)
 	case "http":
-		transport = NewHTTPTransport(config.URL, config.Headers)
+		transport = NewHTTPTransport(config.URL, config.Headers, config.AuthProvider)
 	default:
 		return fmt.Errorf("unknown transport: %s", config.Transport)
 	}
@@ -140,6 +143,7 @@ func (c *Client) Connect(ctx context.Context, config ServerConfig) error {
 		resources: make(map[string]Resource),
 		connected: true,
 	}
+	transport.OnNotification(conn.handleNotification)
 
 	// Initialize the connection
 	if err := conn.initialize(ctx); err != nil {
@@ -253,7 +257,7 @@ func (c *Client) ReadResource(ctx context.Context, uri string) (*ResourceContent
 func (conn *ServerConnection) initialize(ctx context.Context) error {
 	// Send initialize request
 	initParams := map[string]any{
-		"protocolVersion": "2024-11-05",
+		"protocolVersion": LatestProtocolVersion,
 		"capabilities": map[string]any{
 			"tools":     map[string]any{},
 			"resources": map[string]any{"subscribe": true},
@@ -286,6 +290,19 @@ func (conn *ServerConnection) initialize(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// handleNotification dispatches server-pushed notifications. The well-
+// known list_changed notifications trigger a re-fetch so our local view
+// stays in sync; everything else is silently ignored for now.
+func (conn *ServerConnection) handleNotification(method string, _ json.RawMessage) {
+	ctx := context.Background()
+	switch method {
+	case "notifications/tools/list_changed":
+		_ = conn.listTools(ctx)
+	case "notifications/resources/list_changed":
+		_ = conn.listResources(ctx)
+	}
 }
 
 func (conn *ServerConnection) listTools(ctx context.Context) error {
