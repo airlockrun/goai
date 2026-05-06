@@ -49,9 +49,13 @@ func GetLanguageModelCapabilities(modelID string) LanguageModelCapabilities {
 		(strings.HasPrefix(modelID, "gpt-5") && !strings.HasPrefix(modelID, "gpt-5-chat"))
 
 	// https://platform.openai.com/docs/guides/latest-model#gpt-5-1-parameter-compatibility
-	// GPT-5.1 and GPT-5.2 support temperature, topP, logProbs when reasoningEffort is none
+	// GPT-5.1 and later families support temperature, topP, logProbs when
+	// reasoningEffort is none.
 	supportsNonReasoningParameters := strings.HasPrefix(modelID, "gpt-5.1") ||
-		strings.HasPrefix(modelID, "gpt-5.2")
+		strings.HasPrefix(modelID, "gpt-5.2") ||
+		strings.HasPrefix(modelID, "gpt-5.3") ||
+		strings.HasPrefix(modelID, "gpt-5.4") ||
+		strings.HasPrefix(modelID, "gpt-5.5")
 
 	systemMessageMode := "system"
 	if isReasoningModel {

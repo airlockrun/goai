@@ -384,6 +384,28 @@ func (m *XaiResponsesModel) processStream(ctx context.Context, body io.Reader, t
 				}
 			}
 
+		case "response.output_text.annotation.added":
+			// Citations from web_search / x_search hosted tools.
+			// Mirrors ai-sdk packages/xai/src/responses/
+			// xai-responses-language-model.ts.
+			if chunk.Annotation == nil {
+				continue
+			}
+			if src, ok := annotationToSource(*chunk.Annotation); ok {
+				events <- stream.Event{Type: stream.EventSource, Data: src}
+			}
+
+		case "response.output_text.done":
+			// xAI also batches annotations on the text-done event;
+			// emit any that arrived. Duplicates with annotation.added
+			// are unlikely in practice but harmless — each gets a
+			// unique source ID.
+			for _, a := range chunk.Annotations {
+				if src, ok := annotationToSource(a); ok {
+					events <- stream.Event{Type: stream.EventSource, Data: src}
+				}
+			}
+
 		case "response.function_call_arguments.delta":
 			// #902e93b: stream function_call_arguments delta events.
 			acc, exists := currentToolCalls[chunk.OutputIndex]

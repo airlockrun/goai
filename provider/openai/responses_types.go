@@ -183,6 +183,10 @@ type responsesContentPart struct {
 	Type     string `json:"type"`
 	Text     string `json:"text,omitempty"`
 	ImageURL string `json:"image_url,omitempty"`
+	// Detail forwards openai.imageDetail providerOptions on tool-result
+	// image content. Values: "low" | "high" | "auto" | "original".
+	// ai-sdk #14970.
+	Detail   string `json:"detail,omitempty"`
 	FileURL  string `json:"file_url,omitempty"`
 	FileID   string `json:"file_id,omitempty"`
 	Filename string `json:"filename,omitempty"`
@@ -257,6 +261,11 @@ type responsesItem struct {
 	CallID    string `json:"call_id,omitempty"`
 	Name      string `json:"name,omitempty"`
 	Arguments string `json:"arguments,omitempty"`
+	// Namespace, when set, identifies a logical grouping for the tool
+	// (e.g. an MCP server slug). Preserved on
+	// providerMetadata.openai.namespace so downstream callers can route
+	// the call back to the originating tool surface. ai-sdk #14789.
+	Namespace string `json:"namespace,omitempty"`
 
 	// For reasoning
 	EncryptedContent string `json:"encrypted_content,omitempty"`
@@ -273,6 +282,14 @@ type responsesAnnotation struct {
 	Title      string `json:"title,omitempty"`
 	StartIndex int    `json:"start_index,omitempty"`
 	EndIndex   int    `json:"end_index,omitempty"`
+
+	// File-citation variants (file_citation, container_file_citation,
+	// file_path). Mirrors ai-sdk's discriminated annotation union in
+	// packages/openai/src/responses/openai-responses-api.ts.
+	FileID      string `json:"file_id,omitempty"`
+	Filename    string `json:"filename,omitempty"`
+	Index       int    `json:"index,omitempty"`
+	ContainerID string `json:"container_id,omitempty"`
 }
 
 type responsesUsage struct {
@@ -536,6 +553,7 @@ func convertToResponsesInputWithWarnings(messages []message.Message, systemMessa
 					attachments = append(attachments, responsesContentPart{
 						Type:     "input_image",
 						ImageURL: imageURL,
+						Detail:   openaiImageDetail(p.ProviderOptions),
 					})
 				case message.FilePart:
 					// ai-sdk #bc01093: file-url in tool output. A FilePart
@@ -618,6 +636,7 @@ func convertToResponsesContentParts(content message.Content) []responsesContentP
 			result = append(result, responsesContentPart{
 				Type:     "input_image",
 				ImageURL: imageURL,
+				Detail:   openaiImageDetail(p.ProviderOptions),
 			})
 		case message.FilePart:
 			// A URL-bearing FilePart maps to input_file with file_url
@@ -796,4 +815,20 @@ func mapResponsesFinishReason(reason string, hasFunctionCall bool) stream.Finish
 	default:
 		return stream.FinishReasonOther
 	}
+}
+
+// openaiImageDetail extracts an image_url.detail value from a content
+// part's ProviderOptions["openai"]["imageDetail"]. Returns "" when
+// absent — empty maps to omitempty so we never emit a stray detail key.
+// ai-sdk #14970.
+func openaiImageDetail(opts map[string]any) string {
+	if opts == nil {
+		return ""
+	}
+	openai, ok := opts["openai"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	d, _ := openai["imageDetail"].(string)
+	return d
 }

@@ -48,8 +48,12 @@ type chatStreamOptions struct {
 }
 
 type chatMessage struct {
-	Role       string         `json:"role"`
-	Content    any            `json:"content,omitempty"`
+	Role string `json:"role"`
+	// Content is always emitted (no omitempty). OpenAI requires content
+	// to be a string for assistant messages without tool_calls (even an
+	// empty string), and to be null for tool-only messages. nil → "null",
+	// "" → empty string. ai-sdk #14950.
+	Content    any            `json:"content"`
 	Name       string         `json:"name,omitempty"`
 	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string         `json:"tool_call_id,omitempty"`
@@ -166,10 +170,8 @@ func convertToChatMessages(messages []message.Message) ([]chatMessage, error) {
 				Content: convertUserContent(msg.Content),
 			})
 		case message.RoleAssistant:
-			cm := chatMessage{
-				Role:    "assistant",
-				Content: getTextFromContent(msg.Content),
-			}
+			text := getTextFromContent(msg.Content)
+			cm := chatMessage{Role: "assistant"}
 			// Add tool calls if present. Empty arguments serialize as "{}"
 			// so Chat Completions never sees a blank string (ai-sdk #953385d).
 			for _, part := range msg.Content.Parts {
@@ -187,6 +189,14 @@ func convertToChatMessages(messages []message.Message) ([]chatMessage, error) {
 						},
 					})
 				}
+			}
+			// content: null is only allowed when tool_calls is non-empty;
+			// otherwise OpenAI rejects with "expected a string, got null"
+			// (ai-sdk #14950).
+			if len(cm.ToolCalls) > 0 && text == "" {
+				cm.Content = nil
+			} else {
+				cm.Content = text
 			}
 			result = append(result, cm)
 		case message.RoleTool:

@@ -147,6 +147,8 @@ func (p *Provider) Models() []string {
 		"mistral-small-latest",
 		// Mistral dated
 		"mistral-large-2512",
+		"mistral-medium-3.5",
+		"mistral-medium-3",
 		"mistral-medium-2508",
 		"mistral-medium-2505",
 		"mistral-small-2506",

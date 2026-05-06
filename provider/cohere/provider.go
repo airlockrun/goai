@@ -91,6 +91,13 @@ func (p *Provider) Models() []string {
 	return []string{
 		"command-a-03-2025",
 		"command-a-reasoning-08-2025",
+		// command-a-vision-07-2025 is a vision-capable model. ai-sdk
+		// #14860 wires image input on its V2 chat API. goai's Cohere
+		// adapter still uses the V1 /chat endpoint (Message + ChatHistory),
+		// which has no image_url content type, so passing images to this
+		// model from goai will not work until we migrate to V2. The model
+		// ID is exposed so callers can still invoke it for text-only use.
+		"command-a-vision-07-2025",
 		"command-r7b-12-2024",
 		"command-r-plus-04-2024",
 		"command-r-plus",

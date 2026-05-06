@@ -413,14 +413,31 @@ func (m *GoogleModel) processStream(ctx context.Context, body io.Reader, tools [
 						events <- stream.Event{Type: stream.EventTextDelta, Data: stream.TextDeltaEvent{Text: part.Text}}
 					}
 
-					// Function call
+					// Function call. Vertex emits no-args calls as
+					// `{name: "X"}` with no args; default to "{}" so the
+					// downstream tool executor receives valid JSON
+					// (ai-sdk #14968). thoughtSignature on the same part
+					// rides through providerMetadata.google so Vertex's
+					// multi-turn signature rule is satisfied on the next
+					// agent step.
 					if part.FunctionCall != nil {
-						inputBytes, _ := json.Marshal(part.FunctionCall.Args)
-						pendingToolCalls = append(pendingToolCalls, stream.ToolCallEvent{
+						var inputBytes []byte
+						if part.FunctionCall.Args != nil {
+							inputBytes, _ = json.Marshal(part.FunctionCall.Args)
+						} else {
+							inputBytes = []byte("{}")
+						}
+						tc := stream.ToolCallEvent{
 							ToolCallID: part.FunctionCall.Name, // Gemini uses function name as ID
 							ToolName:   part.FunctionCall.Name,
 							Input:      inputBytes,
-						})
+						}
+						if part.ThoughtSignature != "" {
+							tc.ProviderMetadata = map[string]any{
+								"google": map[string]any{"thoughtSignature": part.ThoughtSignature},
+							}
+						}
+						pendingToolCalls = append(pendingToolCalls, tc)
 					}
 				}
 			}
@@ -459,6 +476,13 @@ func (m *GoogleModel) processStream(ctx context.Context, body io.Reader, tools [
 	// Set finish reason if there were tool calls
 	if len(pendingToolCalls) > 0 && finishReason == "" {
 		finishReason = stream.FinishReasonToolCalls
+	}
+
+	// Emit grounding sources before the finish event so they land in the
+	// step's content. Mirrors ai-sdk's extractSources at
+	// packages/google/src/google-language-model.ts.
+	for _, src := range extractSources(groundingMetadata) {
+		events <- stream.Event{Type: stream.EventSource, Data: src}
 	}
 
 	// Build provider metadata — surfaces groundingMetadata and

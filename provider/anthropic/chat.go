@@ -423,11 +423,19 @@ func BuildRequestBody(cfg Config, modelID string, options *stream.CallOptions) (
 		if name == "" {
 			name = "response"
 		}
+		// Strip JSON-Schema validation keywords Anthropic's decoder
+		// rejects (minimum, pattern, etc.); fold them into description so
+		// the model still honors the constraint. ai-sdk #14790. Caller-side
+		// validation continues to use the original schema.
+		schema, err := sanitizeJSONSchema(options.ResponseFormat.Schema)
+		if err != nil {
+			return nil, nil, nil, err
+		}
 		req.OutputConfig = &anthropicOutputConfig{
 			Format: &anthropicOutputFormat{
 				Type:   "json_schema",
 				Name:   name,
-				Schema: options.ResponseFormat.Schema,
+				Schema: schema,
 			},
 		}
 	}

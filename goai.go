@@ -5,6 +5,7 @@ package goai
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 
@@ -39,6 +40,7 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 		textBuilder       strings.Builder
 		allToolCalls      []stream.ToolCall
 		allToolResults    []stream.ToolResultEvent
+		allSources        []stream.SourceEvent
 		allSteps          []StepResult
 		finalFinishReason stream.FinishReason
 		finalStepText     string
@@ -87,6 +89,7 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 				stepTextBuilder  strings.Builder
 				stepReasoning    []ReasoningContentPart
 				stepToolCalls    []stream.ToolCall
+				stepSources      []stream.SourceEvent
 				stepFinishReason stream.FinishReason
 				stepUsage        stream.Usage
 			)
@@ -117,11 +120,25 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 						})
 					}
 				case stream.ToolCallEvent:
+					refined := e.Input
+					if input.RefineToolInput != nil {
+						r, err := input.RefineToolInput(e.ToolName, e.Input)
+						if err != nil {
+							fullStream <- stream.Event{
+								Type: stream.EventError,
+								Data: stream.ErrorEvent{Error: fmt.Errorf("refineToolInput(%s): %w", e.ToolName, err)},
+							}
+							return
+						}
+						refined = r
+					}
 					stepToolCalls = append(stepToolCalls, stream.ToolCall{
 						ID:    e.ToolCallID,
 						Name:  e.ToolName,
-						Input: e.Input,
+						Input: refined,
 					})
+				case stream.SourceEvent:
+					stepSources = append(stepSources, e)
 				case stream.FinishEvent:
 					stepFinishReason = e.FinishReason
 					stepUsage = e.Usage
@@ -144,6 +161,9 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 			}
 			for _, tc := range stepToolCalls {
 				content = append(content, ToolCallContentPart{ToolCall: tc})
+			}
+			for _, src := range stepSources {
+				content = append(content, SourceContentPart{SourceEvent: src})
 			}
 
 			// Execute tools if finish reason is tool-calls
@@ -198,6 +218,7 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 			textBuilder.WriteString(stepText)
 			allToolCalls = append(allToolCalls, stepToolCalls...)
 			allToolResults = append(allToolResults, stepToolResults...)
+			allSources = append(allSources, stepSources...)
 			allSteps = append(allSteps, stepResult)
 			totalUsage.Add(stepUsage)
 			finalFinishReason = stepFinishReason
@@ -301,6 +322,12 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 			defer mu.Unlock()
 			return allToolResults
 		},
+		Sources: func() []stream.SourceEvent {
+			<-done
+			mu.Lock()
+			defer mu.Unlock()
+			return allSources
+		},
 		FinishReason: func() stream.FinishReason {
 			<-done
 			mu.Lock()
@@ -335,6 +362,11 @@ type GenerateTextResult struct {
 
 	// ToolResults contains tool results from the final step.
 	ToolResults []stream.ToolResultEvent
+
+	// Sources contains citation sources (URLs / documents) from the final
+	// step — emitted by hosted search/retrieval tools. Mirrors ai-sdk's
+	// GenerateTextResult.sources.
+	Sources []stream.SourceEvent
 
 	// FinishReason indicates why the final step stopped.
 	FinishReason stream.FinishReason
@@ -411,6 +443,7 @@ func GenerateText(ctx context.Context, input stream.Input) (*GenerateTextResult,
 			textBuilder   strings.Builder
 			reasoning     []ReasoningContentPart
 			stepToolCalls []stream.ToolCall
+			stepSources   []stream.SourceEvent
 			finishReason  stream.FinishReason
 			stepUsage     stream.Usage
 			lastError     error
@@ -439,11 +472,22 @@ func GenerateText(ctx context.Context, input stream.Input) (*GenerateTextResult,
 					})
 				}
 			case stream.ToolCallEvent:
+				refined := e.Input
+				if input.RefineToolInput != nil {
+					r, err := input.RefineToolInput(e.ToolName, e.Input)
+					if err != nil {
+						lastError = fmt.Errorf("refineToolInput(%s): %w", e.ToolName, err)
+						continue
+					}
+					refined = r
+				}
 				stepToolCalls = append(stepToolCalls, stream.ToolCall{
 					ID:    e.ToolCallID,
 					Name:  e.ToolName,
-					Input: e.Input,
+					Input: refined,
 				})
+			case stream.SourceEvent:
+				stepSources = append(stepSources, e)
 			case stream.FinishEvent:
 				finishReason = e.FinishReason
 				stepUsage = e.Usage
@@ -478,6 +522,12 @@ func GenerateText(ctx context.Context, input stream.Input) (*GenerateTextResult,
 		// Add tool calls to content
 		for _, tc := range stepToolCalls {
 			content = append(content, ToolCallContentPart{ToolCall: tc})
+		}
+
+		// Add cited sources to content (web_search / google_search / file
+		// citations). Mirrors ai-sdk's StepResult.sources.
+		for _, src := range stepSources {
+			content = append(content, SourceContentPart{SourceEvent: src})
 		}
 
 		// Execute tools if finish reason is tool-calls
@@ -566,6 +616,7 @@ func GenerateText(ctx context.Context, input stream.Input) (*GenerateTextResult,
 		Text:         finalStep.Text(),
 		ToolCalls:    finalStep.ToolCalls(),
 		ToolResults:  finalStep.ToolResults(),
+		Sources:      finalStep.Sources(),
 		FinishReason: finalStep.FinishReason,
 		Usage:        totalUsage,
 		Steps:        allSteps,

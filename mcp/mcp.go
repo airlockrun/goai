@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/airlockrun/goai/tool"
@@ -29,6 +30,13 @@ func NewClient() *Client {
 type ServerConfig struct {
 	// Name is a unique identifier for this server.
 	Name string
+
+	// ClientName is the name advertised to the server in the initialize
+	// handshake's clientInfo.name. Defaults to "goai" when empty. Mirrors
+	// ai-sdk #14966 (clientName, replacing the older `name` field on the
+	// JS createMCPClient config — which was unrelated to the per-server
+	// identifier).
+	ClientName string
 
 	// Transport specifies how to connect to the server.
 	// Options: "stdio", "sse", "http"
@@ -55,12 +63,13 @@ type ServerConfig struct {
 
 // ServerConnection represents a connection to an MCP server.
 type ServerConnection struct {
-	config    ServerConfig
-	transport Transport
-	tools     map[string]tool.Tool
-	resources map[string]Resource
-	mu        sync.RWMutex
-	connected bool
+	config       ServerConfig
+	transport    Transport
+	tools        map[string]tool.Tool
+	resources    map[string]Resource
+	instructions string // populated from initialize.result.instructions
+	mu           sync.RWMutex
+	connected    bool
 }
 
 // Transport is the interface for MCP transports.
@@ -228,6 +237,23 @@ func (c *Client) GetResources() []Resource {
 	return resources
 }
 
+// GetServerInstructions returns the instructions string the named server
+// emitted during the initialize handshake (empty when absent or unknown).
+// Servers use this to describe how to use the server and its tools — a
+// good candidate to splice into the LLM system prompt. Mirrors ai-sdk
+// #14764.
+func (c *Client) GetServerInstructions(name string) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	conn, ok := c.servers[name]
+	if !ok {
+		return ""
+	}
+	conn.mu.RLock()
+	defer conn.mu.RUnlock()
+	return conn.instructions
+}
+
 // ReadResource reads the content of a resource.
 func (c *Client) ReadResource(ctx context.Context, uri string) (*ResourceContent, error) {
 	c.mu.RLock()
@@ -255,7 +281,10 @@ func (c *Client) ReadResource(ctx context.Context, uri string) (*ResourceContent
 // ServerConnection methods
 
 func (conn *ServerConnection) initialize(ctx context.Context) error {
-	// Send initialize request
+	clientName := conn.config.ClientName
+	if clientName == "" {
+		clientName = "goai"
+	}
 	initParams := map[string]any{
 		"protocolVersion": LatestProtocolVersion,
 		"capabilities": map[string]any{
@@ -263,15 +292,26 @@ func (conn *ServerConnection) initialize(ctx context.Context) error {
 			"resources": map[string]any{"subscribe": true},
 		},
 		"clientInfo": map[string]any{
-			"name":    "goai",
+			"name":    clientName,
 			"version": "1.0.0",
 		},
 	}
 
-	_, err := conn.transport.Send(ctx, "initialize", initParams)
+	result, err := conn.transport.Send(ctx, "initialize", initParams)
 	if err != nil {
 		return fmt.Errorf("initialize failed: %w", err)
 	}
+
+	// Capture optional server-supplied instructions (MCP spec
+	// initialize.result.instructions). Silently tolerate absence — many
+	// servers don't set it.
+	var initResp struct {
+		Instructions string `json:"instructions"`
+	}
+	_ = json.Unmarshal(result, &initResp)
+	conn.mu.Lock()
+	conn.instructions = initResp.Instructions
+	conn.mu.Unlock()
 
 	// Send initialized notification
 	_, err = conn.transport.Send(ctx, "notifications/initialized", nil)
@@ -363,10 +403,29 @@ func (conn *ServerConnection) createToolExecutor(toolName string) tool.ExecuteFu
 			return tool.Result{}, err
 		}
 
+		// Tool result content per MCP spec — supports text, image, resource
+		// (embedded), and resource_link. We carry text/embedded-text into
+		// Output and image/embedded-blob into Attachments. resource_link
+		// (just a URI reference) gets surfaced as a one-line marker so the
+		// LLM at least sees the pointer.
+		//
+		// The resource_link variant was added in ai-sdk #14928; before
+		// that goai silently dropped any non-text content.
 		var response struct {
 			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
+				Type        string `json:"type"`
+				Text        string `json:"text,omitempty"`
+				Data        string `json:"data,omitempty"`     // base64 (image)
+				MimeType    string `json:"mimeType,omitempty"` // image / resource
+				URI         string `json:"uri,omitempty"`      // resource / resource_link
+				Name        string `json:"name,omitempty"`     // resource_link
+				Description string `json:"description,omitempty"` // resource_link
+				Resource    *struct {
+					URI      string `json:"uri"`
+					MimeType string `json:"mimeType,omitempty"`
+					Text     string `json:"text,omitempty"`
+					Blob     string `json:"blob,omitempty"`
+				} `json:"resource,omitempty"`
 			} `json:"content"`
 			IsError bool `json:"isError"`
 		}
@@ -382,14 +441,49 @@ func (conn *ServerConnection) createToolExecutor(toolName string) tool.ExecuteFu
 			return tool.Result{}, fmt.Errorf("tool error")
 		}
 
-		output := ""
+		out := tool.Result{}
+		var sb strings.Builder
 		for _, c := range response.Content {
-			if c.Type == "text" {
-				output += c.Text
+			switch c.Type {
+			case "text":
+				sb.WriteString(c.Text)
+			case "image":
+				if c.Data != "" {
+					out.Attachments = append(out.Attachments, tool.Attachment{
+						Data:     c.Data,
+						MimeType: c.MimeType,
+					})
+				}
+			case "resource":
+				if c.Resource == nil {
+					continue
+				}
+				if c.Resource.Text != "" {
+					sb.WriteString(c.Resource.Text)
+				}
+				if c.Resource.Blob != "" {
+					out.Attachments = append(out.Attachments, tool.Attachment{
+						Data:     c.Resource.Blob,
+						MimeType: c.Resource.MimeType,
+					})
+				}
+			case "resource_link":
+				if sb.Len() > 0 {
+					sb.WriteByte('\n')
+				}
+				label := c.Name
+				if label == "" {
+					label = c.URI
+				}
+				if c.Description != "" {
+					fmt.Fprintf(&sb, "[Resource: %s — %s — %s]", label, c.URI, c.Description)
+				} else {
+					fmt.Fprintf(&sb, "[Resource: %s — %s]", label, c.URI)
+				}
 			}
 		}
-
-		return tool.Result{Output: output}, nil
+		out.Output = sb.String()
+		return out, nil
 	}
 }
 

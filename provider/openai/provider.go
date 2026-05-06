@@ -104,7 +104,10 @@ func (p *Provider) RerankingModel(modelID string) model.RerankingModel {
 // packages/openai/src/chat/openai-chat-options.ts.
 func (p *Provider) Models() []string {
 	return []string{
-		// GPT-5.4 family (latest)
+		// GPT-5.5 family (latest)
+		"gpt-5.5",
+		"gpt-5.5-2026-04-23",
+		// GPT-5.4
 		"gpt-5.4",
 		"gpt-5.4-2026-03-05",
 		"gpt-5.4-mini",
