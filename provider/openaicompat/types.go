@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/airlockrun/goai/message"
+	"github.com/airlockrun/goai/stream"
 	"github.com/airlockrun/goai/tool"
 )
 
@@ -44,8 +45,10 @@ type streamOptions struct {
 }
 
 type chatMessage struct {
-	Role       string         `json:"role"`
-	Content    any            `json:"content,omitempty"`
+	Role string `json:"role"`
+	// Content is always emitted; OpenAI-compatible servers accept null
+	// only when tool_calls is non-empty. ai-sdk #14950.
+	Content    any            `json:"content"`
 	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string         `json:"tool_call_id,omitempty"`
 }
@@ -117,6 +120,41 @@ type chatUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+	// Cached-token sub-fields surfaced by various openai-compatible
+	// providers. Mistral can send any of three shapes (ai-sdk #14889);
+	// OpenAI itself uses prompt_tokens_details.cached_tokens.
+	NumCachedTokens     int                  `json:"num_cached_tokens,omitempty"`
+	PromptTokensDetails *promptTokensDetails `json:"prompt_tokens_details,omitempty"`
+	PromptTokenDetails  *promptTokensDetails `json:"prompt_token_details,omitempty"`
+}
+
+type promptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens,omitempty"`
+}
+
+// usageFromChat builds a stream.Usage from chatUsage, expanding cached-
+// token info into the Usage.InputTokens.{NoCache,CacheRead} breakdown
+// when the server reports it. Mirrors ai-sdk #14889 (Mistral) and the
+// equivalent OpenAI prompt_tokens_details handling.
+func usageFromChat(u chatUsage) stream.Usage {
+	cached := u.NumCachedTokens
+	if cached == 0 && u.PromptTokensDetails != nil {
+		cached = u.PromptTokensDetails.CachedTokens
+	}
+	if cached == 0 && u.PromptTokenDetails != nil {
+		cached = u.PromptTokenDetails.CachedTokens
+	}
+	out := stream.Usage{
+		InputTokens:  stream.InputTokens{Total: stream.IntPtr(u.PromptTokens)},
+		OutputTokens: stream.OutputTokens{Total: stream.IntPtr(u.CompletionTokens), Text: stream.IntPtr(u.CompletionTokens)},
+	}
+	if cached > 0 {
+		out.InputTokens.CacheRead = stream.IntPtr(cached)
+		out.InputTokens.NoCache = stream.IntPtr(u.PromptTokens - cached)
+	} else {
+		out.InputTokens.NoCache = stream.IntPtr(u.PromptTokens)
+	}
+	return out
 }
 
 // Conversion functions
@@ -137,11 +175,8 @@ func convertToMessages(messages []message.Message) []chatMessage {
 				Content: convertUserContent(msg.Content),
 			})
 		case message.RoleAssistant:
-			cm := chatMessage{
-				Role:    "assistant",
-				Content: getTextFromContent(msg.Content),
-			}
-			// Add tool calls if present
+			text := getTextFromContent(msg.Content)
+			cm := chatMessage{Role: "assistant"}
 			for _, part := range msg.Content.Parts {
 				if tc, ok := part.(message.ToolCallPart); ok {
 					cm.ToolCalls = append(cm.ToolCalls, chatToolCall{
@@ -153,6 +188,11 @@ func convertToMessages(messages []message.Message) []chatMessage {
 						},
 					})
 				}
+			}
+			if len(cm.ToolCalls) > 0 && text == "" {
+				cm.Content = nil
+			} else {
+				cm.Content = text
 			}
 			result = append(result, cm)
 		case message.RoleTool:

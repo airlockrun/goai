@@ -65,6 +65,14 @@ type ToolResultContentPart struct {
 
 func (ToolResultContentPart) contentPartType() string { return "tool-result" }
 
+// SourceContentPart represents a source (URL or document) cited by the
+// model. Emitted by providers with hosted search/retrieval tools.
+type SourceContentPart struct {
+	stream.SourceEvent
+}
+
+func (SourceContentPart) contentPartType() string { return "source" }
+
 // Text returns the concatenated text from all text content parts.
 func (s *StepResult) Text() string {
 	var result string
@@ -161,6 +169,17 @@ func (s *StepResult) DynamicToolResults() []stream.ToolResultEvent {
 	for _, part := range s.Content {
 		if trPart, ok := part.(ToolResultContentPart); ok && trPart.Dynamic {
 			result = append(result, trPart.ToolResultEvent)
+		}
+	}
+	return result
+}
+
+// Sources returns all source content parts cited in this step.
+func (s *StepResult) Sources() []stream.SourceEvent {
+	var result []stream.SourceEvent
+	for _, part := range s.Content {
+		if sp, ok := part.(SourceContentPart); ok {
+			result = append(result, sp.SourceEvent)
 		}
 	}
 	return result

@@ -26,6 +26,21 @@ const (
 	EventFinish         EventType = "finish"
 	EventError          EventType = "error"
 	EventRawChunk       EventType = "raw"
+	EventSource         EventType = "source"
+)
+
+// SourceType is the discriminator on SourceEvent. Mirrors ai-sdk's
+// LanguageModelV4Source union (packages/provider/src/language-model/v4/
+// language-model-v4-source.ts).
+type SourceType string
+
+const (
+	// SourceTypeURL is a web source — used for url_citation annotations
+	// emitted by web_search / google_search hosted tools.
+	SourceTypeURL SourceType = "url"
+	// SourceTypeDocument is a file/document source — used for
+	// file_citation, container_file_citation, and file_path annotations.
+	SourceTypeDocument SourceType = "document"
 )
 
 // Event represents a single streaming event.
@@ -344,6 +359,29 @@ type ErrorEvent struct {
 }
 
 func (ErrorEvent) eventType() EventType { return EventError }
+
+// SourceEvent reports a source the model used to generate the response —
+// emitted by providers when a hosted tool (web_search, google_search,
+// file_search, ...) cites a URL or document. Mirrors ai-sdk's
+// LanguageModelV4Source content part.
+//
+// SourceType discriminates which fields are meaningful:
+//   - SourceTypeURL: ID, URL, Title.
+//   - SourceTypeDocument: ID, MediaType, Title, Filename.
+//
+// ProviderMetadata carries provider-specific extras (e.g. OpenAI's
+// file_id and container_id on file_citation annotations).
+type SourceEvent struct {
+	SourceType       SourceType     `json:"sourceType"`
+	ID               string         `json:"id"`
+	URL              string         `json:"url,omitempty"`
+	Title            string         `json:"title,omitempty"`
+	MediaType        string         `json:"mediaType,omitempty"`
+	Filename         string         `json:"filename,omitempty"`
+	ProviderMetadata map[string]any `json:"providerMetadata,omitempty"`
+}
+
+func (SourceEvent) eventType() EventType { return EventSource }
 
 // RawChunkEvent carries an unparsed payload from the upstream provider.
 // Emitted only when CallOptions.IncludeRawChunks is true. RawValue is

@@ -87,12 +87,17 @@ type responsesSummaryPart struct {
 	Text string `json:"text"`
 }
 
-// responsesContentPart is a single element inside a user message's content
-// array (input_text or input_image).
+// responsesContentPart is a single element inside a user message's
+// content array (input_text / input_image / input_file).
 type responsesContentPart struct {
 	Type     string `json:"type"`
 	Text     string `json:"text,omitempty"`
 	ImageURL string `json:"image_url,omitempty"`
+	// FileURL carries non-image documents (PDF, text, CSV, …) per
+	// https://docs.x.ai/docs/guides/chat-with-files. ai-sdk #14805.
+	FileURL string `json:"file_url,omitempty"`
+	// FileID references a file uploaded via the xAI Files API.
+	FileID string `json:"file_id,omitempty"`
 }
 
 // responsesToolWire is a marker interface for wire-format structs that
@@ -206,7 +211,22 @@ type responsesStreamChunk struct {
 	ItemID string `json:"item_id,omitempty"`
 	Delta  string `json:"delta,omitempty"`
 
+	// Annotations are emitted on response.output_text.done; Annotation
+	// is emitted on response.output_text.annotation.added (one at a
+	// time). Both carry url_citation entries from web_search / x_search.
+	Annotations []responsesAnnotation `json:"annotations,omitempty"`
+	Annotation  *responsesAnnotation  `json:"annotation,omitempty"`
+
 	Error *responsesError `json:"error,omitempty"`
+}
+
+// responsesAnnotation matches xAI's url_citation annotation shape on
+// the Responses API. Mirrors ai-sdk's annotationSchema in
+// packages/xai/src/responses/xai-responses-api.ts.
+type responsesAnnotation struct {
+	Type  string `json:"type"`
+	URL   string `json:"url,omitempty"`
+	Title string `json:"title,omitempty"`
 }
 
 type responsesData struct {
@@ -436,6 +456,21 @@ func convertToResponsesContentParts(content message.Content) []responsesContentP
 				Type:     "input_image",
 				ImageURL: imageURL,
 			})
+		case message.FilePart:
+			// xAI Responses API: non-image documents (PDF, text, CSV, …)
+			// are supported only via URL or a Files-API reference; inline
+			// bytes for non-image files are rejected by the upstream API.
+			// ai-sdk #14805. URL-bearing FileParts emit `input_file`;
+			// inline-bytes non-image parts are dropped silently (no
+			// downstream error path from this helper today — same
+			// behavior as before this commit, which had no FilePart case
+			// at all).
+			if p.URL != "" {
+				result = append(result, responsesContentPart{
+					Type:    "input_file",
+					FileURL: p.URL,
+				})
+			}
 		}
 	}
 	return result

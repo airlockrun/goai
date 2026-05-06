@@ -363,7 +363,7 @@ func (m *CompatModel) processStream(ctx context.Context, body io.Reader, tools [
 		if len(chunk.UsageRaw) > 0 {
 			var typed chatUsage
 			if err := json.Unmarshal(chunk.UsageRaw, &typed); err == nil {
-				usage = stream.UsageFrom(typed.PromptTokens, typed.CompletionTokens)
+				usage = usageFromChat(typed)
 			}
 			var raw map[string]any
 			if err := json.Unmarshal(chunk.UsageRaw, &raw); err == nil {

@@ -101,9 +101,11 @@ func TestEffort_CoexistsWithStructuredOutput(t *testing.T) {
 		t.Fatalf("expected output_config.format, got %v", oc["format"])
 	}
 	wantFormat := map[string]any{
-		"type":   "json_schema",
-		"name":   "answer",
-		"schema": map[string]any{"type": "object"},
+		"type": "json_schema",
+		"name": "answer",
+		// sanitizeJSONSchema adds additionalProperties=false on object schemas
+		// (ai-sdk #14790).
+		"schema": map[string]any{"type": "object", "additionalProperties": false},
 	}
 	if !reflect.DeepEqual(format, wantFormat) {
 		t.Errorf("output_config.format = %#v, want %#v", format, wantFormat)

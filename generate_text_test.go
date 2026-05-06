@@ -3,6 +3,8 @@ package goai
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/airlockrun/goai/message"
@@ -110,6 +112,69 @@ func TestGenerateText_BasicUsage(t *testing.T) {
 		}
 		if result.FinishReason != stream.FinishReasonToolCalls {
 			t.Errorf("expected tool-calls finish reason, got %s", result.FinishReason)
+		}
+	})
+
+	t.Run("RefineToolInput rewrites tool input before exposure", func(t *testing.T) {
+		model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
+			StreamResponse: testutil.MockToolCallResponse(
+				"call_1",
+				"echo",
+				map[string]string{"text": ""},
+				testutil.MockUsage(1, 1),
+			),
+		})
+
+		result, err := GenerateText(context.Background(), stream.Input{
+			Model:    model,
+			Messages: []message.Message{message.NewUserMessage("hi")},
+			Tools: tool.Set{
+				"echo": tool.Tool{
+					Name:        "echo",
+					Description: "echo",
+					InputSchema: json.RawMessage(`{"type":"object"}`),
+				},
+			},
+			RefineToolInput: func(name string, in json.RawMessage) (json.RawMessage, error) {
+				if name != "echo" {
+					t.Errorf("unexpected tool name %s", name)
+				}
+				// Replace empty-string text with a sentinel.
+				return json.RawMessage(`{"text":"refined"}`), nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(result.ToolCalls) != 1 {
+			t.Fatalf("expected 1 tool call, got %d", len(result.ToolCalls))
+		}
+		if string(result.ToolCalls[0].Input) != `{"text":"refined"}` {
+			t.Errorf("expected refined input, got %s", string(result.ToolCalls[0].Input))
+		}
+	})
+
+	t.Run("RefineToolInput error fails the call", func(t *testing.T) {
+		model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
+			StreamResponse: testutil.MockToolCallResponse(
+				"call_1",
+				"echo",
+				map[string]string{"text": "hi"},
+				testutil.MockUsage(1, 1),
+			),
+		})
+		_, err := GenerateText(context.Background(), stream.Input{
+			Model:    model,
+			Messages: []message.Message{message.NewUserMessage("hi")},
+			Tools: tool.Set{
+				"echo": tool.Tool{Name: "echo", InputSchema: json.RawMessage(`{"type":"object"}`)},
+			},
+			RefineToolInput: func(name string, in json.RawMessage) (json.RawMessage, error) {
+				return nil, errors.New("boom")
+			},
+		})
+		if err == nil || !strings.Contains(err.Error(), "refineToolInput") {
+			t.Errorf("expected refineToolInput error, got %v", err)
 		}
 	})
 

@@ -384,10 +384,11 @@ func (m *ResponsesModel) processStream(ctx context.Context, body io.Reader, tool
 			case "function_call":
 				hasFunctionCall = true
 				acc := &responsesToolCallAccumulator{
-					index:  chunk.OutputIndex,
-					id:     chunk.Item.CallID,
-					name:   chunk.Item.Name,
-					itemID: chunk.Item.ID,
+					index:     chunk.OutputIndex,
+					id:        chunk.Item.CallID,
+					name:      chunk.Item.Name,
+					itemID:    chunk.Item.ID,
+					namespace: chunk.Item.Namespace,
 				}
 				currentToolCalls[chunk.OutputIndex] = acc
 				events <- stream.Event{
@@ -450,25 +451,49 @@ func (m *ResponsesModel) processStream(ctx context.Context, body io.Reader, tool
 				if chunk.Item.Arguments != "" {
 					acc.arguments = chunk.Item.Arguments
 				}
+				// Namespace may arrive only on the done event (ai-sdk
+				// #14789); preserve whichever is non-empty.
+				if chunk.Item.Namespace != "" {
+					acc.namespace = chunk.Item.Namespace
+				}
 
 				events <- stream.Event{
 					Type: stream.EventToolInputEnd,
 					Data: stream.ToolInputEndEvent{ID: acc.id},
 				}
 
-				events <- stream.Event{
-					Type: stream.EventToolCall,
-					Data: stream.ToolCallEvent{
-						ToolCallID: acc.id,
-						ToolName:   acc.name,
-						Input:      json.RawMessage(acc.arguments),
-					},
+				toolCallMeta := map[string]any{}
+				if acc.itemID != "" {
+					toolCallMeta["itemId"] = acc.itemID
 				}
+				if acc.namespace != "" {
+					toolCallMeta["namespace"] = acc.namespace
+				}
+				toolCallEvent := stream.ToolCallEvent{
+					ToolCallID: acc.id,
+					ToolName:   acc.name,
+					Input:      json.RawMessage(acc.arguments),
+				}
+				if len(toolCallMeta) > 0 {
+					toolCallEvent.ProviderMetadata = map[string]any{"openai": toolCallMeta}
+				}
+				events <- stream.Event{Type: stream.EventToolCall, Data: toolCallEvent}
 
 				// Note: Tool execution is handled by goai.go's executeTools function,
 				// not here in the provider. The provider just emits ToolCallEvent.
 
 				delete(currentToolCalls, chunk.OutputIndex)
+			}
+
+		case "response.output_text.annotation.added":
+			// Citations from web_search / file_search hosted tools.
+			// ai-sdk #4f6dc77 enqueues a Source content part per
+			// annotation; we mirror that as a SourceEvent.
+			if chunk.Annotation == nil {
+				continue
+			}
+			if src, ok := annotationToSource(*chunk.Annotation); ok {
+				events <- stream.Event{Type: stream.EventSource, Data: src}
 			}
 
 		case "response.completed", "response.incomplete", "response.failed":
@@ -551,5 +576,6 @@ type responsesToolCallAccumulator struct {
 	id        string
 	name      string
 	itemID    string
+	namespace string // ai-sdk #14789 — preserved on tool-call providerMetadata
 	arguments string
 }

@@ -57,6 +57,11 @@ type geminiPart struct {
 	FileData         *geminiFileData         `json:"fileData,omitempty"`
 	FunctionCall     *geminiFunctionCall     `json:"functionCall,omitempty"`
 	FunctionResponse *geminiFunctionResponse `json:"functionResponse,omitempty"`
+	// ThoughtSignature carries the opaque thinking-state signature for
+	// Gemini 3 thinking models. Surfaced via providerMetadata.google.
+	// Vertex's multi-turn rule: if a turn has any function calls, at
+	// least one must carry a thoughtSignature. ai-sdk #14968.
+	ThoughtSignature string `json:"thoughtSignature,omitempty"`
 }
 
 type geminiInlineData struct {
@@ -74,7 +79,10 @@ type geminiFileData struct {
 
 type geminiFunctionCall struct {
 	Name string         `json:"name"`
-	Args map[string]any `json:"args"`
+	// Args may be omitted on no-args calls. Vertex emits `{name: "X"}`
+	// without args/partialArgs/willContinue for zero-arg tools; ai-sdk
+	// #14968. We default to "{}" on the wire.
+	Args map[string]any `json:"args,omitempty"`
 }
 
 type geminiFunctionResponse struct {

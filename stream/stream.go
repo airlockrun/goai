@@ -25,6 +25,11 @@ type Result struct {
 	// This blocks until the stream is complete.
 	ToolResults func() []ToolResultEvent
 
+	// Sources returns all citation sources (URLs / documents) emitted by
+	// hosted search/retrieval tools across all steps. Mirrors ai-sdk's
+	// StreamTextResult.sources. Blocks until the stream is complete.
+	Sources func() []SourceEvent
+
 	// FinishReason returns why the generation stopped.
 	// This blocks until the stream is complete.
 	FinishReason func() FinishReason
@@ -164,6 +169,17 @@ type Input struct {
 
 	// RepairToolCall attempts to fix malformed tool calls.
 	RepairToolCall func(failed FailedToolCall) (*RepairedToolCall, error)
+
+	// RefineToolInput is an experimental hook that runs after a tool call's
+	// input has been parsed (and any RepairToolCall completed) but before
+	// the tool executes. Different LLM providers can produce slightly
+	// different inputs for the same schema (e.g. empty string vs null);
+	// this lets callers normalize them. The refined bytes must remain
+	// schema-shaped — input validation does not run again.
+	//
+	// Returning an error fails the call as if the model had emitted bad
+	// input. Mirrors ai-sdk experimental_refineToolInput (#15000).
+	RefineToolInput func(toolName string, input json.RawMessage) (json.RawMessage, error)
 
 	// --- Multi-step tool loop options ---
 
