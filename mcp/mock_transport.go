@@ -123,6 +123,10 @@ func (t *MockTransport) Close() error {
 	return nil
 }
 
+// SetProtocolVersion is a no-op on the mock — the mock doesn't enforce
+// MCP-Protocol-Version headers. Implements Transport.
+func (t *MockTransport) SetProtocolVersion(string) {}
+
 func (t *MockTransport) OnNotification(handler func(method string, params json.RawMessage)) {
 	t.notifyHandler = handler
 }

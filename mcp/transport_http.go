@@ -34,6 +34,12 @@ type HTTPTransport struct {
 	// POST handler.
 	sessionID atomic.Value // string
 
+	// protocolVersion holds the version sent in the MCP-Protocol-Version
+	// header. Initialized to LatestProtocolVersion and re-pinned by the
+	// MCP client to the negotiated value once initialize completes (per
+	// the spec, subsequent requests must use the negotiated version).
+	protocolVersion atomic.Value // string
+
 	notifyHandler func(method string, params json.RawMessage)
 	notifyMu      sync.Mutex
 
@@ -54,7 +60,18 @@ func NewHTTPTransport(serverURL string, headers map[string]string, authProvider 
 		client:       &http.Client{},
 	}
 	t.sessionID.Store("")
+	t.protocolVersion.Store(LatestProtocolVersion)
 	return t
+}
+
+// SetProtocolVersion pins the MCP-Protocol-Version header value used on
+// subsequent requests. Called by the MCP client after the initialize
+// response yields the negotiated version.
+func (t *HTTPTransport) SetProtocolVersion(version string) {
+	if version == "" {
+		return
+	}
+	t.protocolVersion.Store(version)
 }
 
 // Connect spawns the optional inbound SSE goroutine. The MCP HTTP transport
@@ -127,7 +144,11 @@ func (t *HTTPTransport) commonHeaders(ctx context.Context, extra http.Header) (h
 	for k, vs := range extra {
 		h[k] = vs
 	}
-	h.Set(HeaderProtocolVersion, LatestProtocolVersion)
+	pv, _ := t.protocolVersion.Load().(string)
+	if pv == "" {
+		pv = LatestProtocolVersion
+	}
+	h.Set(HeaderProtocolVersion, pv)
 
 	if sid, _ := t.sessionID.Load().(string); sid != "" {
 		h.Set(HeaderSessionID, sid)
