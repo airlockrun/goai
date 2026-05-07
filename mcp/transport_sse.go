@@ -32,6 +32,11 @@ type SSETransport struct {
 	pendingMu     sync.Mutex
 	notifyHandler func(method string, params json.RawMessage)
 
+	// protocolVersion is the value sent in MCP-Protocol-Version. Defaults
+	// to LatestProtocolVersion; pinned to the negotiated value after
+	// initialize per the MCP HTTP spec.
+	protocolVersion atomic.Value // string
+
 	// endpointCh receives the resolved messageURL once the server emits the
 	// first `endpoint` event. Closed (with error) if the stream ends before
 	// the event arrives.
@@ -49,7 +54,7 @@ type endpointResult struct {
 // NewSSETransport creates a new SSE transport. authProvider is optional;
 // pass nil to skip OAuth.
 func NewSSETransport(serverURL string, headers map[string]string, authProvider OAuthClientProvider) *SSETransport {
-	return &SSETransport{
+	t := &SSETransport{
 		url:          serverURL,
 		headers:      headers,
 		authProvider: authProvider,
@@ -57,6 +62,17 @@ func NewSSETransport(serverURL string, headers map[string]string, authProvider O
 		pending:      make(map[int64]chan json.RawMessage),
 		endpointCh:   make(chan endpointResult, 1),
 	}
+	t.protocolVersion.Store(LatestProtocolVersion)
+	return t
+}
+
+// SetProtocolVersion pins the MCP-Protocol-Version header value used on
+// subsequent requests. Called by the MCP client after initialize.
+func (t *SSETransport) SetProtocolVersion(version string) {
+	if version == "" {
+		return
+	}
+	t.protocolVersion.Store(version)
 }
 
 // commonHeaders builds the standard MCP request headers — protocol
@@ -71,7 +87,11 @@ func (t *SSETransport) commonHeaders(ctx context.Context, extra http.Header) (ht
 	for k, vs := range extra {
 		h[k] = vs
 	}
-	h.Set(HeaderProtocolVersion, LatestProtocolVersion)
+	pv, _ := t.protocolVersion.Load().(string)
+	if pv == "" {
+		pv = LatestProtocolVersion
+	}
+	h.Set(HeaderProtocolVersion, pv)
 
 	if t.authProvider != nil {
 		tokens, err := t.authProvider.Tokens(ctx)

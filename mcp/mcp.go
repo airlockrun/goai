@@ -85,6 +85,14 @@ type Transport interface {
 
 	// OnNotification registers a handler for server notifications.
 	OnNotification(handler func(method string, params json.RawMessage))
+
+	// SetProtocolVersion pins the version sent in the
+	// MCP-Protocol-Version header on subsequent requests. The MCP HTTP
+	// spec requires the client to use the version negotiated in
+	// initialize for everything that follows; the initial value is
+	// LatestProtocolVersion. No-op for transports that don't carry HTTP
+	// headers (stdio).
+	SetProtocolVersion(version string)
 }
 
 // Resource represents an MCP resource.
@@ -302,16 +310,34 @@ func (conn *ServerConnection) initialize(ctx context.Context) error {
 		return fmt.Errorf("initialize failed: %w", err)
 	}
 
-	// Capture optional server-supplied instructions (MCP spec
-	// initialize.result.instructions). Silently tolerate absence — many
-	// servers don't set it.
+	// Capture optional server-supplied instructions and the negotiated
+	// protocolVersion. Per the MCP HTTP spec the client MUST use the
+	// negotiated version in the MCP-Protocol-Version header on
+	// subsequent requests; strict servers hard 400 if we keep sending
+	// LatestProtocolVersion. Silently tolerate absence of instructions
+	// — many servers don't set it.
 	var initResp struct {
-		Instructions string `json:"instructions"`
+		Instructions    string `json:"instructions"`
+		ProtocolVersion string `json:"protocolVersion"`
 	}
 	_ = json.Unmarshal(result, &initResp)
 	conn.mu.Lock()
 	conn.instructions = initResp.Instructions
 	conn.mu.Unlock()
+
+	if initResp.ProtocolVersion != "" {
+		supported := false
+		for _, v := range SupportedProtocolVersions {
+			if v == initResp.ProtocolVersion {
+				supported = true
+				break
+			}
+		}
+		if !supported {
+			return fmt.Errorf("server's protocol version is not supported: %s", initResp.ProtocolVersion)
+		}
+		conn.transport.SetProtocolVersion(initResp.ProtocolVersion)
+	}
 
 	// Send initialized notification
 	_, err = conn.transport.Send(ctx, "notifications/initialized", nil)

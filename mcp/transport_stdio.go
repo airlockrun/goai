@@ -42,6 +42,10 @@ func NewStdioTransport(command string, args []string, env map[string]string) *St
 	}
 }
 
+// SetProtocolVersion is a no-op for stdio — there's no HTTP header to set.
+// Implements Transport.
+func (t *StdioTransport) SetProtocolVersion(string) {}
+
 // Connect starts the subprocess and establishes communication.
 func (t *StdioTransport) Connect(ctx context.Context) error {
 	t.mu.Lock()
