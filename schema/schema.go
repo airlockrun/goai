@@ -6,7 +6,24 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"sync"
 )
+
+// typeOverrides maps reflect.Type to a function that mutates the schema
+// produced by the default Kind-based generation. Used by callers (e.g.
+// agentsdk) to stamp Format markers on named types like FilePath
+// without coupling this package to them.
+//
+// Register at init only. sync.Map keeps reads lock-free at request time.
+var typeOverrides sync.Map // reflect.Type → func(*Schema)
+
+// RegisterTypeOverride installs a post-processing hook for a specific
+// reflect.Type. After fromReflectType produces its default schema for
+// values of that type, fn is called to mutate the result (typically
+// to set Format).
+func RegisterTypeOverride(t reflect.Type, fn func(*Schema)) {
+	typeOverrides.Store(t, fn)
+}
 
 // Schema represents a JSON Schema.
 type Schema struct {
@@ -345,6 +362,24 @@ func fromReflectType(t reflect.Type) (*Schema, error) {
 		return Nullable(s), nil
 	}
 
+	// Type-keyed override: e.g. named string types like agentsdk.FilePath
+	// stamp Format on the schema produced by the default Kind path.
+	if v, ok := typeOverrides.Load(t); ok {
+		base, err := fromReflectKind(t)
+		if err != nil {
+			return nil, err
+		}
+		v.(func(*Schema))(base)
+		return base, nil
+	}
+
+	return fromReflectKind(t)
+}
+
+// fromReflectKind handles the Kind-based default generation. Extracted
+// from fromReflectType so the override path can call it without
+// recursing through the override lookup again.
+func fromReflectKind(t reflect.Type) (*Schema, error) {
 	switch t.Kind() {
 	case reflect.String:
 		return String(), nil

@@ -42,6 +42,28 @@ type Options struct {
 	// MaxRetries is the maximum number of retry attempts for transient errors.
 	// Defaults to 5.
 	MaxRetries int
+
+	// Headers are extra HTTP headers attached to every proxied request
+	// (streaming and non-streaming). The proxy package itself is generic;
+	// callers (e.g. agentsdk) use this to carry run attribution such as
+	// X-Airlock-Run-ID. Authorization/Content-Type are set separately and
+	// are not overridable here.
+	Headers map[string]string
+}
+
+// applyHeaders sets Content-Type, optional bearer auth, and any caller-supplied
+// extra headers on req. Extra headers cannot clobber Content-Type/Authorization.
+func applyHeaders(req *http.Request, opts Options) {
+	req.Header.Set("Content-Type", "application/json")
+	if opts.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+opts.Token)
+	}
+	for k, v := range opts.Headers {
+		if k == "Content-Type" || k == "Authorization" {
+			continue
+		}
+		req.Header.Set(k, v)
+	}
 }
 
 // proxyRequest is the JSON body sent to the proxy endpoint.
@@ -113,10 +135,7 @@ func (m *proxyModel) doStream(ctx context.Context, options *stream.CallOptions, 
 			events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
 			return
 		}
-		req.Header.Set("Content-Type", "application/json")
-		if m.opts.Token != "" {
-			req.Header.Set("Authorization", "Bearer "+m.opts.Token)
-		}
+		applyHeaders(req, m.opts)
 
 		resp, err := m.opts.Client.Do(req)
 		if err != nil {

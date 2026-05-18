@@ -172,10 +172,7 @@ func doModelProxy(ctx context.Context, opts Options, capability string, callOpts
 		if err != nil {
 			return fmt.Errorf("proxy: create request: %w", err)
 		}
-		req.Header.Set("Content-Type", "application/json")
-		if opts.Token != "" {
-			req.Header.Set("Authorization", "Bearer "+opts.Token)
-		}
+		applyHeaders(req, opts)
 
 		resp, err := opts.Client.Do(req)
 		if err != nil {
