@@ -368,7 +368,7 @@ func convertAssistantPart(part message.Part) *LanguageModelPart {
 			Type:       "tool-result",
 			ToolCallID: p.ToolCallID,
 			ToolName:   p.ToolName,
-			Output:     p.Result,
+			Output:     mapToolResultOutput(p.Output),
 		}
 
 	case message.ToolApprovalRequestPart:
@@ -388,7 +388,7 @@ func convertToolPart(part message.Part) *LanguageModelPart {
 			Type:       "tool-result",
 			ToolCallID: p.ToolCallID,
 			ToolName:   p.ToolName,
-			Output:     mapToolResultOutput(p.Result),
+			Output:     mapToolResultOutput(p.Output),
 		}
 
 	case message.ToolApprovalResponsePart:
@@ -775,11 +775,12 @@ func detectImageMediaType(data any) string {
 	return ""
 }
 
-// mapToolResultOutput maps tool result output to the language model format.
-func mapToolResultOutput(output any) any {
-	// For now, pass through the output
-	// ai-sdk has more complex mapping for content types
-	return output
+// mapToolResultOutput maps a discriminated tool-result output to the
+// language-model-prompt representation — the single wire string per
+// ai-sdk's converter (text/error → value, denied → reason, json/content →
+// JSON).
+func mapToolResultOutput(output message.ToolResultOutput) any {
+	return message.ToolOutputWire(output)
 }
 
 // getTextFromContent extracts text from message content.

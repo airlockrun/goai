@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 )
@@ -64,6 +65,12 @@ type Response struct {
 
 	// IsError indicates whether this response represents an error
 	IsError bool `json:"is_error,omitempty"`
+
+	// Denied indicates the call was refused (permission/policy) rather than
+	// failed. Distinct from IsError so it serializes to execution-denied.
+	// DeniedReason is the optional human-facing reason.
+	Denied       bool   `json:"denied,omitempty"`
+	DeniedReason string `json:"denied_reason,omitempty"`
 
 	// NoExecute is true when the tool has no execute function.
 	// This matches ai-sdk behavior where tools without execute return undefined.
@@ -168,9 +175,21 @@ func (e *LocalExecutor) Execute(ctx context.Context, req Request) (Response, err
 			return Response{}, err
 		}
 
+		// A denied tool call is refused, not failed — surface it distinctly
+		// so it serializes to execution-denied.
+		var denied DeniedError
+		if errors.As(err, &denied) {
+			resp := Response{Denied: true, DeniedReason: denied.Reason}
+			if DebugExecutor {
+				fmt.Fprintf(os.Stderr, "[TOOL] <<< %s denied=%q\n", req.ToolName, denied.Reason)
+			}
+			return resp, nil
+		}
+
 		// Normal tool errors: convert to response for model feedback
 		resp := Response{
 			Output:  "Error: " + err.Error(),
+			Error:   err.Error(),
 			IsError: true,
 		}
 		if DebugExecutor {

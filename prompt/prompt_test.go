@@ -357,7 +357,7 @@ func TestConvertToLanguageModelPrompt_ToolMessages(t *testing.T) {
 					{
 						Role: message.RoleTool,
 						Content: message.Content{Parts: []message.Part{
-							message.ToolResultPart{ToolCallID: "toolCallId", ToolName: "toolName", Result: map[string]any{"some": "result"}},
+							message.ToolResultPart{ToolCallID: "toolCallId", ToolName: "toolName", Output: message.JSONOutput{Value: map[string]any{"some": "result"}}},
 						}},
 					},
 				},

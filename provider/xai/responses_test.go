@@ -1119,7 +1119,7 @@ func TestXaiResponses_ConvertToResponsesInput(t *testing.T) {
 				Role: message.RoleTool,
 				Content: message.Content{
 					Parts: []message.Part{
-						message.ToolResultPart{ToolCallID: "call_1", ToolName: "x", Result: "got it"},
+						message.ToolResultPart{ToolCallID: "call_1", ToolName: "x", Output: message.TextOutput{Value: "got it"}},
 					},
 				},
 			},

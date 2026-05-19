@@ -141,7 +141,7 @@ func (m *GoogleModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 					parts = append(parts, geminiPart{
 						FunctionResponse: &geminiFunctionResponse{
 							Name:     p.ToolName,
-							Response: map[string]any{"result": p.Result},
+							Response: map[string]any{"result": message.ToolOutputWire(p.Output)},
 						},
 					})
 				case message.TextPart:

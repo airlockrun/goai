@@ -174,7 +174,7 @@ func TestConvertToolMessages_Google(t *testing.T) {
 					message.ToolResultPart{
 						ToolCallID: "call_123",
 						ToolName:   "get_weather",
-						Result:     "72°F",
+						Output:     message.TextOutput{Value: "72°F"},
 					},
 				},
 			},
@@ -188,7 +188,7 @@ func TestConvertToolMessages_Google(t *testing.T) {
 				parts = append(parts, geminiPart{
 					FunctionResponse: &geminiFunctionResponse{
 						Name:     p.ToolName,
-						Response: map[string]any{"result": p.Result},
+						Response: map[string]any{"result": message.ToolOutputWire(p.Output)},
 					},
 				})
 			}
@@ -213,7 +213,7 @@ func TestConvertToolMessages_Google(t *testing.T) {
 					message.ToolResultPart{
 						ToolCallID: "call_123",
 						ToolName:   "screenshot",
-						Result:     "screenshot taken",
+						Output:     message.TextOutput{Value: "screenshot taken"},
 					},
 					message.ImagePart{
 						Image:    "iVBORw0KGgo=",
@@ -231,7 +231,7 @@ func TestConvertToolMessages_Google(t *testing.T) {
 				parts = append(parts, geminiPart{
 					FunctionResponse: &geminiFunctionResponse{
 						Name:     p.ToolName,
-						Response: map[string]any{"result": p.Result},
+						Response: map[string]any{"result": message.ToolOutputWire(p.Output)},
 					},
 				})
 			case message.ImagePart:
@@ -388,7 +388,7 @@ func TestGeminiRequest_ToolResultMultipart(t *testing.T) {
 			{
 				Role: message.RoleTool,
 				Content: message.Content{Parts: []message.Part{
-					message.ToolResultPart{ToolCallID: "call-1", ToolName: "fetch_report", Result: "the-summary"},
+					message.ToolResultPart{ToolCallID: "call-1", ToolName: "fetch_report", Output: message.TextOutput{Value: "the-summary"}},
 					message.FilePart{URL: "gs://bucket/report.pdf", MimeType: "application/pdf"},
 				}},
 			},

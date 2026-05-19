@@ -186,7 +186,7 @@ func TestDeepSeekConvertMessages_PreservesToolCallsAndResults(t *testing.T) {
 		{
 			Role: message.RoleTool,
 			Content: message.Content{Parts: []message.Part{
-				message.ToolResultPart{ToolCallID: "call_1", ToolName: "weather", Result: "sunny"},
+				message.ToolResultPart{ToolCallID: "call_1", ToolName: "weather", Output: message.TextOutput{Value: "sunny"}},
 			}},
 		},
 	}

@@ -1,6 +1,8 @@
 package openai
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/airlockrun/goai/message"
@@ -19,7 +21,7 @@ func TestConvertToChatMessages_ToolResults(t *testing.T) {
 						message.ToolResultPart{
 							ToolCallID: "call_123",
 							ToolName:   "get_weather",
-							Result:     "72°F",
+							Output:     message.TextOutput{Value: "72°F"},
 						},
 					},
 				},
@@ -54,7 +56,7 @@ func TestConvertToChatMessages_ToolResults(t *testing.T) {
 						message.ToolResultPart{
 							ToolCallID: "call_123",
 							ToolName:   "screenshot",
-							Result:     "screenshot taken",
+							Output:     message.TextOutput{Value: "screenshot taken"},
 						},
 						message.ImagePart{
 							Image:    "base64data",
@@ -80,7 +82,7 @@ func TestConvertToChatMessages_ToolResults(t *testing.T) {
 						message.ToolResultPart{
 							ToolCallID: "call_456",
 							ToolName:   "read_pdf",
-							Result:     "contents",
+							Output:     message.TextOutput{Value: "contents"},
 						},
 						message.FilePart{
 							Data:     "JVBERi0=",
@@ -96,6 +98,54 @@ func TestConvertToChatMessages_ToolResults(t *testing.T) {
 			t.Fatal("expected error for file part in tool result")
 		}
 	})
+}
+
+// TestConvertToChatMessages_OutputVariantWire asserts every
+// ToolResultOutput variant stringifies via ToolOutputWire into the tool
+// message Content, and that there is no is_error field on the OpenAI chat
+// message (ADR §8 — Chat Completions has no error flag).
+func TestConvertToChatMessages_OutputVariantWire(t *testing.T) {
+	tests := []struct {
+		name   string
+		output message.ToolResultOutput
+	}{
+		{"text", message.TextOutput{Value: "plain text"}},
+		{"json", message.JSONOutput{Value: map[string]any{"k": "v"}}},
+		{"error-text", message.ErrorTextOutput{Value: "boom"}},
+		{"error-json", message.ErrorJSONOutput{Value: map[string]any{"code": 1}}},
+		{"execution-denied", message.ExecutionDeniedOutput{Reason: "nope"}},
+		{"content", message.ContentOutput{Value: []message.ToolContentItem{{Type: "text", Text: "hi"}}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msgs := []message.Message{{
+				Role: message.RoleTool,
+				Content: message.Content{Parts: []message.Part{
+					message.ToolResultPart{ToolCallID: "c1", ToolName: "t", Output: tt.output},
+				}},
+			}}
+			result, err := convertToChatMessages(msgs)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(result) != 1 {
+				t.Fatalf("expected 1 message, got %d", len(result))
+			}
+			want := message.ToolOutputWire(tt.output)
+			if result[0].Content != want {
+				t.Errorf("Content = %v, want %q", result[0].Content, want)
+			}
+			// No is_error field exists on the OpenAI chat message: the
+			// marshaled JSON must never carry one.
+			raw, err := json.Marshal(result[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(raw), "is_error") {
+				t.Errorf("openai tool message must not contain is_error: %s", raw)
+			}
+		})
+	}
 }
 
 // Regression for ai-sdk #953385d: empty tool-call input serializes as

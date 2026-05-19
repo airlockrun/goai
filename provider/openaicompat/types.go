@@ -198,18 +198,9 @@ func convertToMessages(messages []message.Message) []chatMessage {
 		case message.RoleTool:
 			for _, part := range msg.Content.Parts {
 				if tr, ok := part.(message.ToolResultPart); ok {
-					resultStr := ""
-					switch v := tr.Result.(type) {
-					case string:
-						resultStr = v
-					default:
-						if b, err := json.Marshal(v); err == nil {
-							resultStr = string(b)
-						}
-					}
 					result = append(result, chatMessage{
 						Role:       "tool",
-						Content:    resultStr,
+						Content:    message.ToolOutputWire(tr.Output),
 						ToolCallID: tr.ToolCallID,
 					})
 				}

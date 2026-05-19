@@ -802,7 +802,7 @@ func TestAnthropicModel_CacheControl_PerPart(t *testing.T) {
 					message.ToolResultPart{
 						ToolCallID:      "tc1",
 						ToolName:        "search",
-						Result:          "results here",
+						Output:          message.TextOutput{Value: "results here"},
 						ProviderOptions: ephemeralOpts,
 					},
 				},
@@ -824,7 +824,7 @@ func TestAnthropicModel_CacheControl_PerPart(t *testing.T) {
 			Role: message.RoleTool,
 			Content: message.Content{
 				Parts: []message.Part{
-					message.ToolResultPart{ToolCallID: "tc1", ToolName: "search", Result: "ok"},
+					message.ToolResultPart{ToolCallID: "tc1", ToolName: "search", Output: message.TextOutput{Value: "ok"}},
 				},
 			},
 			ProviderOptions: ephemeralOpts,
@@ -839,9 +839,9 @@ func TestAnthropicModel_CacheControl_PerPart(t *testing.T) {
 	t.Run("tool definition with cache control", func(t *testing.T) {
 		tools := []tool.Tool{
 			{
-				Name:        "search",
-				Description: "Search the web",
-				InputSchema: json.RawMessage(`{"type":"object"}`),
+				Name:            "search",
+				Description:     "Search the web",
+				InputSchema:     json.RawMessage(`{"type":"object"}`),
 				ProviderOptions: ephemeralOpts,
 			},
 			{

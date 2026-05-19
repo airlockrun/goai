@@ -430,22 +430,23 @@ func toolMessageToBlocks(msg message.Message) []anthropicContentBlock {
 		block := anthropicContentBlock{
 			Type:      "tool_result",
 			ToolUseID: tr.ToolCallID,
-			IsError:   tr.IsError,
+			IsError:   message.ToolOutputIsError(tr.Output),
 		}
 
-		if len(attachments) > 0 {
+		// A content output carries its own multipart items; everything else
+		// reduces to a single string per ai-sdk's Anthropic converter.
+		contentItems := toolOutputContentParts(tr.Output)
+		if len(contentItems) > 0 || len(attachments) > 0 {
 			var contentBlocks []anthropicContentBlock
-			resultStr := toolResultToString(tr.Result)
-			if resultStr != "" {
-				contentBlocks = append(contentBlocks, anthropicContentBlock{
-					Type: "text",
-					Text: resultStr,
-				})
+			if len(contentItems) > 0 {
+				contentBlocks = append(contentBlocks, convertToAnthropicContent(message.Content{Parts: contentItems}, nil)...)
+			} else if resultStr := message.ToolOutputWire(tr.Output); resultStr != "" {
+				contentBlocks = append(contentBlocks, anthropicContentBlock{Type: "text", Text: resultStr})
 			}
 			contentBlocks = append(contentBlocks, convertToAnthropicContent(message.Content{Parts: attachments}, nil)...)
 			block.Content = contentBlocks
 		} else {
-			block.Content = toolResultToString(tr.Result)
+			block.Content = message.ToolOutputWire(tr.Output)
 		}
 
 		// Part-level cache control, message-level fallback on last tool result.
@@ -473,16 +474,31 @@ func convertToolMessages(msg message.Message) []anthropicMessage {
 	return []anthropicMessage{{Role: "user", Content: blocks}}
 }
 
-func toolResultToString(result any) string {
-	switch v := result.(type) {
-	case string:
-		return v
-	default:
-		if b, err := json.Marshal(v); err == nil {
-			return string(b)
-		}
-		return ""
+// toolOutputContentParts converts a ContentOutput's items into message
+// parts so the existing convertToAnthropicContent block builder handles
+// images/files identically to other content. Non-content outputs return
+// nil (the caller stringifies them instead).
+func toolOutputContentParts(o message.ToolResultOutput) []message.Part {
+	co, ok := o.(message.ContentOutput)
+	if !ok {
+		return nil
 	}
+	parts := make([]message.Part, 0, len(co.Value))
+	for _, it := range co.Value {
+		switch it.Type {
+		case "text":
+			parts = append(parts, message.TextPart{Text: it.Text})
+		case "image-data":
+			parts = append(parts, message.ImagePart{Image: it.Data, MimeType: it.MediaType})
+		case "image-url":
+			parts = append(parts, message.ImagePart{Image: it.URL})
+		case "file-data":
+			parts = append(parts, message.FilePart{Data: it.Data, MimeType: it.MediaType, Filename: it.Filename})
+		case "file-url":
+			parts = append(parts, message.FilePart{URL: it.URL, MimeType: it.MediaType, Filename: it.Filename})
+		}
+	}
+	return parts
 }
 
 func convertToAnthropicContent(content message.Content, msgOpts map[string]any) []anthropicContentBlock {

@@ -318,8 +318,7 @@ func convertMessage(msg message.Message) map[string]any {
 			result["tool_calls"] = toolCalls
 		case message.ToolResultPart:
 			result["tool_call_id"] = p.ToolCallID
-			resultBytes, _ := json.Marshal(p.Result)
-			result["content"] = string(resultBytes)
+			result["content"] = message.ToolOutputWire(p.Output)
 			return result
 		}
 	}

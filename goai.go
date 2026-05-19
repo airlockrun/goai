@@ -179,7 +179,7 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 				if toolExecErr != nil {
 					// Emit partial results first (tools completed before the error)
 					for _, tr := range stepToolResults {
-						fullStream <- stream.Event{Type: stream.EventToolResult, Data: tr}
+						fullStream <- toolOutcomeEvent(tr)
 					}
 					fullStream <- stream.Event{
 						Type: stream.EventError,
@@ -188,12 +188,9 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 					return
 				}
 
-				// Emit tool result events
+				// Emit tool result events (kind reflects the outcome variant)
 				for _, tr := range stepToolResults {
-					fullStream <- stream.Event{
-						Type: stream.EventToolResult,
-						Data: tr,
-					}
+					fullStream <- toolOutcomeEvent(tr)
 				}
 
 				// Add tool results to content
@@ -691,14 +688,13 @@ func executeTools(ctx context.Context, executor tool.Executor, toolCalls []strea
 				return results, err
 			}
 
-			// Normal executor errors: wrap as tool result for model feedback
+			// Normal executor errors: classify (denied vs error) and feed
+			// the discriminated outcome back to the model.
 			results = append(results, stream.ToolResultEvent{
 				ToolCallID: tc.ID,
 				ToolName:   tc.Name,
 				Input:      tc.Input,
-				Output: stream.ToolOutput{
-					Output: "Error: " + err.Error(),
-				},
+				Output:     tool.OutputForError(err),
 			})
 			continue
 		}
@@ -713,32 +709,42 @@ func executeTools(ctx context.Context, executor tool.Executor, toolCalls []strea
 			ToolCallID: tc.ID,
 			ToolName:   tc.Name,
 			Input:      tc.Input,
-			Output: stream.ToolOutput{
-				Output:      resp.Output,
-				Title:       resp.Title,
-				Metadata:    resp.Metadata,
-				Attachments: convertAttachments(resp.Attachments),
-			},
+			Output:     outputFromResponse(resp),
 		})
 	}
 
 	return results, nil
 }
 
-// convertAttachments converts tool attachments to stream attachments.
-func convertAttachments(attachments []tool.Attachment) []stream.Attachment {
-	if len(attachments) == 0 {
-		return nil
+// outputFromResponse maps a tool.Response to the discriminated
+// ToolResultOutput: denied → execution-denied; is-error → error-text;
+// otherwise the success output (text or multipart content).
+func outputFromResponse(resp tool.Response) message.ToolResultOutput {
+	if resp.Denied {
+		return message.ExecutionDeniedOutput{Reason: resp.DeniedReason}
 	}
-	result := make([]stream.Attachment, len(attachments))
-	for i, a := range attachments {
-		result[i] = stream.Attachment{
-			Data:     a.Data,
-			MimeType: a.MimeType,
-			Filename: a.Filename,
+	if resp.IsError {
+		v := resp.Error
+		if v == "" {
+			v = resp.Output
 		}
+		return message.ErrorTextOutput{Value: v}
 	}
-	return result
+	return tool.SuccessOutput(tool.Result{
+		Output:      resp.Output,
+		Title:       resp.Title,
+		Metadata:    resp.Metadata,
+		Attachments: resp.Attachments,
+	})
+}
+
+// toolOutcomeEvent wraps a collected tool result into the live stream event
+// whose kind matches its discriminated outcome: success → tool-result,
+// error → tool-error, execution-denied → tool-output-denied. Consumers that
+// branch on event type (UI, audit) get the right signal; the persisted
+// message keeps the full union in ToolResultPart.Output regardless.
+func toolOutcomeEvent(tr stream.ToolResultEvent) stream.Event {
+	return stream.ToolOutcomeEvent(tr.ToolCallID, tr.ToolName, tr.Input, tr.Output)
 }
 
 // buildStepMessages builds the messages for a step result.
@@ -787,25 +793,12 @@ func buildStepMessages(text string, reasoning []ReasoningContentPart, toolCalls 
 		msgs = append(msgs, message.NewAssistantMessage(text))
 	}
 
-	// Add tool results as tool messages
+	// Add tool results as tool messages — the discriminated Output (text /
+	// json / content / error-* / execution-denied) is carried as-is, so a
+	// content output keeps its file/image items inside the tool-result part
+	// rather than being flattened into separate message parts.
 	for _, tr := range toolResults {
-		toolMsg := message.NewToolMessage(
-			tr.ToolCallID,
-			tr.ToolName,
-			tr.Output.Output,
-			false,
-		)
-		// Convert tool result attachments to message content parts.
-		for _, att := range tr.Output.Attachments {
-			if strings.HasPrefix(att.MimeType, "image/") {
-				toolMsg.Content.Parts = append(toolMsg.Content.Parts,
-					message.ImagePart{Image: att.Data, MimeType: att.MimeType})
-			} else {
-				toolMsg.Content.Parts = append(toolMsg.Content.Parts,
-					message.FilePart{Data: att.Data, MimeType: att.MimeType, Filename: att.Filename})
-			}
-		}
-		msgs = append(msgs, toolMsg)
+		msgs = append(msgs, message.NewToolMessage(tr.ToolCallID, tr.ToolName, tr.Output))
 	}
 
 	return msgs
@@ -824,15 +817,24 @@ func Tool(name, description string, schema json.RawMessage, execute tool.Execute
 
 // Re-export commonly used types for convenience
 type (
-	Message       = message.Message
-	Part          = message.Part
-	TextPart      = message.TextPart
-	ToolCallPart  = message.ToolCallPart
-	ReasoningPart = message.ReasoningPart
-	ToolSet       = tool.Set
-	StreamResult  = stream.Result
-	StreamEvent   = stream.Event
-	EventType     = stream.EventType
+	Message               = message.Message
+	Part                  = message.Part
+	TextPart              = message.TextPart
+	ToolCallPart          = message.ToolCallPart
+	ToolResultPart        = message.ToolResultPart
+	ReasoningPart         = message.ReasoningPart
+	ToolResultOutput      = message.ToolResultOutput
+	TextOutput            = message.TextOutput
+	JSONOutput            = message.JSONOutput
+	ErrorTextOutput       = message.ErrorTextOutput
+	ErrorJSONOutput       = message.ErrorJSONOutput
+	ExecutionDeniedOutput = message.ExecutionDeniedOutput
+	ContentOutput         = message.ContentOutput
+	ToolContentItem       = message.ToolContentItem
+	ToolSet               = tool.Set
+	StreamResult          = stream.Result
+	StreamEvent           = stream.Event
+	EventType             = stream.EventType
 )
 
 // Message constructors
@@ -842,4 +844,15 @@ var (
 	NewAssistantMessage          = message.NewAssistantMessage
 	NewAssistantMessageWithParts = message.NewAssistantMessageWithParts
 	NewToolMessage               = message.NewToolMessage
+	NewToolResultText            = message.NewToolResultText
+	NewToolResultJSON            = message.NewToolResultJSON
+	NewToolResultDenied          = message.NewToolResultDenied
+)
+
+// Tool-output classifiers (heuristic-free, structured).
+var (
+	ToolOutputText    = message.ToolOutputText
+	ToolOutputWire    = message.ToolOutputWire
+	ToolOutputIsError = message.ToolOutputIsError
+	ToolOutcome       = message.ToolOutcome
 )

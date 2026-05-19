@@ -2,6 +2,8 @@ package message
 
 import (
 	"encoding/json"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -133,8 +135,7 @@ func TestContentJSON_ToolResultPart(t *testing.T) {
 			ToolResultPart{
 				ToolCallID: "call_123",
 				ToolName:   "read",
-				Result:     "file contents here",
-				IsError:    false,
+				Output:     TextOutput{Value: "file contents here"},
 			},
 		}},
 	}
@@ -153,9 +154,8 @@ func TestContentJSON_ToolResultPart(t *testing.T) {
 	if tr.ToolCallID != "call_123" || tr.ToolName != "read" {
 		t.Errorf("tool result = %+v", tr)
 	}
-	// Result is unmarshaled as any (interface{}), so it becomes a string
-	if tr.Result != "file contents here" {
-		t.Errorf("result = %v", tr.Result)
+	if ToolOutputText(tr.Output) != "file contents here" {
+		t.Errorf("result = %v", tr.Output)
 	}
 }
 
@@ -293,7 +293,7 @@ func TestContentJSON_MessageSliceRoundTrip(t *testing.T) {
 			TextPart{Text: "I'll help"},
 			ToolCallPart{ID: "c1", Name: "read", Input: json.RawMessage(`{"path":"f.txt"}`)},
 		),
-		NewToolMessage("c1", "read", "file content", false),
+		NewToolResultText("c1", "read", "file content"),
 		NewAssistantMessage("done"),
 	}
 
@@ -343,5 +343,109 @@ func TestContentJSON_InvalidJSON(t *testing.T) {
 	err := c.UnmarshalJSON([]byte(`{invalid`))
 	if err == nil {
 		t.Error("expected error for invalid JSON")
+	}
+}
+
+// TestToolResultPart_OutputRoundTrip verifies every ToolResultOutput variant
+// survives a ToolResultPart JSON marshal→unmarshal: the concrete Go type and
+// its value are preserved, and the serialized JSON carries the discriminated
+// "output":{"type":"<variant>"} envelope (ADR §8).
+func TestToolResultPart_OutputRoundTrip(t *testing.T) {
+	tests := []struct {
+		name     string
+		output   ToolResultOutput
+		wantType string
+	}{
+		{"text", TextOutput{Value: "hello"}, "text"},
+		{"json", JSONOutput{Value: map[string]any{"k": "v"}}, "json"},
+		{"error-text", ErrorTextOutput{Value: "boom"}, "error-text"},
+		{"error-json", ErrorJSONOutput{Value: map[string]any{"code": float64(42)}}, "error-json"},
+		{"execution-denied", ExecutionDeniedOutput{Reason: "nope"}, "execution-denied"},
+		{"content", ContentOutput{Value: []ToolContentItem{
+			{Type: "text", Text: "see image"},
+			{Type: "image-data", Data: "Zm9v", MediaType: "image/png"},
+		}}, "content"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			part := ToolResultPart{ToolCallID: "c1", ToolName: "tool", Output: tt.output}
+			data, err := json.Marshal(part)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantEnvelope := `"output":{"type":"` + tt.wantType + `"`
+			if !strings.Contains(string(data), wantEnvelope) {
+				t.Errorf("marshaled JSON %s missing %s", data, wantEnvelope)
+			}
+			var got ToolResultPart
+			if err := json.Unmarshal(data, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.ToolCallID != "c1" || got.ToolName != "tool" {
+				t.Errorf("identity lost: %+v", got)
+			}
+			if reflect.TypeOf(got.Output) != reflect.TypeOf(tt.output) {
+				t.Fatalf("concrete type changed: got %T, want %T", got.Output, tt.output)
+			}
+			if got.Output.outputType() != tt.wantType {
+				t.Errorf("outputType = %q, want %q", got.Output.outputType(), tt.wantType)
+			}
+			if !reflect.DeepEqual(got.Output, tt.output) {
+				t.Errorf("value not preserved: got %#v, want %#v", got.Output, tt.output)
+			}
+		})
+	}
+}
+
+// TestContentJSON_ToolApprovalParts_RoundTrip verifies tool-approval-request
+// and tool-approval-response parts round-trip through Content (un)marshal
+// (ADR §8).
+func TestContentJSON_ToolApprovalParts_RoundTrip(t *testing.T) {
+	msg := NewAssistantMessageWithParts(
+		ToolApprovalRequestPart{
+			ApprovalID: "apr_1",
+			ToolCallID: "call_1",
+			ToolName:   "bash",
+			Input:      map[string]any{"command": "ls"},
+		},
+		ToolApprovalResponsePart{
+			ApprovalID:       "apr_1",
+			Approved:         true,
+			Reason:           "ok",
+			ProviderExecuted: true,
+		},
+	)
+
+	data, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"type":"tool-approval-request"`) {
+		t.Errorf("missing tool-approval-request type: %s", data)
+	}
+	if !strings.Contains(string(data), `"type":"tool-approval-response"`) {
+		t.Errorf("missing tool-approval-response type: %s", data)
+	}
+
+	var got Message
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Content.Parts) != 2 {
+		t.Fatalf("expected 2 parts, got %d", len(got.Content.Parts))
+	}
+	req, ok := got.Content.Parts[0].(ToolApprovalRequestPart)
+	if !ok {
+		t.Fatalf("part[0] = %T, want ToolApprovalRequestPart", got.Content.Parts[0])
+	}
+	if req.ApprovalID != "apr_1" || req.ToolCallID != "call_1" || req.ToolName != "bash" {
+		t.Errorf("approval request not preserved: %+v", req)
+	}
+	resp, ok := got.Content.Parts[1].(ToolApprovalResponsePart)
+	if !ok {
+		t.Fatalf("part[1] = %T, want ToolApprovalResponsePart", got.Content.Parts[1])
+	}
+	if resp.ApprovalID != "apr_1" || !resp.Approved || resp.Reason != "ok" || !resp.ProviderExecuted {
+		t.Errorf("approval response not preserved: %+v", resp)
 	}
 }

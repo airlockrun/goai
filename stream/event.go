@@ -2,31 +2,36 @@
 // This mirrors the ai-sdk fullStream event types.
 package stream
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/airlockrun/goai/message"
+)
 
 // EventType represents the type of streaming event.
 type EventType string
 
 const (
-	EventStart          EventType = "start"
-	EventTextStart      EventType = "text-start"
-	EventTextDelta      EventType = "text-delta"
-	EventTextEnd        EventType = "text-end"
-	EventToolInputStart EventType = "tool-input-start"
-	EventToolInputDelta EventType = "tool-input-delta"
-	EventToolInputEnd   EventType = "tool-input-end"
-	EventToolCall       EventType = "tool-call"
-	EventToolResult     EventType = "tool-result"
-	EventToolError      EventType = "tool-error"
-	EventReasoningStart EventType = "reasoning-start"
-	EventReasoningDelta EventType = "reasoning-delta"
-	EventReasoningEnd   EventType = "reasoning-end"
-	EventStartStep      EventType = "start-step"
-	EventFinishStep     EventType = "finish-step"
-	EventFinish         EventType = "finish"
-	EventError          EventType = "error"
-	EventRawChunk       EventType = "raw"
-	EventSource         EventType = "source"
+	EventStart            EventType = "start"
+	EventTextStart        EventType = "text-start"
+	EventTextDelta        EventType = "text-delta"
+	EventTextEnd          EventType = "text-end"
+	EventToolInputStart   EventType = "tool-input-start"
+	EventToolInputDelta   EventType = "tool-input-delta"
+	EventToolInputEnd     EventType = "tool-input-end"
+	EventToolCall         EventType = "tool-call"
+	EventToolResult       EventType = "tool-result"
+	EventToolError        EventType = "tool-error"
+	EventToolOutputDenied EventType = "tool-output-denied"
+	EventReasoningStart   EventType = "reasoning-start"
+	EventReasoningDelta   EventType = "reasoning-delta"
+	EventReasoningEnd     EventType = "reasoning-end"
+	EventStartStep        EventType = "start-step"
+	EventFinishStep       EventType = "finish-step"
+	EventFinish           EventType = "finish"
+	EventError            EventType = "error"
+	EventRawChunk         EventType = "raw"
+	EventSource           EventType = "source"
 )
 
 // SourceType is the discriminator on SourceEvent. Mirrors ai-sdk's
@@ -160,40 +165,120 @@ type ToolCallEvent struct {
 
 func (ToolCallEvent) eventType() EventType { return EventToolCall }
 
-// ToolResultEvent contains the result of a tool execution.
+// ToolResultEvent contains a successful tool execution result. Output is a
+// success variant of the discriminated union (text | json | content).
 type ToolResultEvent struct {
-	ToolCallID string          `json:"toolCallId"`
-	ToolName   string          `json:"toolName"`
-	Input      json.RawMessage `json:"input,omitempty"`
-	Output     ToolOutput      `json:"output"`
+	ToolCallID string                   `json:"toolCallId"`
+	ToolName   string                   `json:"toolName"`
+	Input      json.RawMessage          `json:"input,omitempty"`
+	Output     message.ToolResultOutput `json:"output"`
 }
 
 func (ToolResultEvent) eventType() EventType { return EventToolResult }
 
-// ToolOutput represents the output from a tool execution.
-type ToolOutput struct {
-	Output      string         `json:"output"`
-	Title       string         `json:"title,omitempty"`
-	Metadata    map[string]any `json:"metadata,omitempty"`
-	Attachments []Attachment   `json:"attachments,omitempty"`
+func (e ToolResultEvent) MarshalJSON() ([]byte, error) {
+	return marshalToolEvent(e.ToolCallID, e.ToolName, e.Input, e.Output)
+}
+func (e *ToolResultEvent) UnmarshalJSON(b []byte) error {
+	return unmarshalToolEvent(b, &e.ToolCallID, &e.ToolName, &e.Input, &e.Output)
 }
 
-// Attachment represents a file attachment.
-type Attachment struct {
-	Data     string `json:"data"`
-	MimeType string `json:"mimeType"`
-	Filename string `json:"filename,omitempty"`
-}
-
-// ToolErrorEvent signals an error during tool execution.
+// ToolErrorEvent signals a failed tool execution. Output carries the
+// error variant (error-text | error-json).
 type ToolErrorEvent struct {
-	ToolCallID string          `json:"toolCallId"`
-	ToolName   string          `json:"toolName"`
-	Input      json.RawMessage `json:"input,omitempty"`
-	Error      error           `json:"error"`
+	ToolCallID string                   `json:"toolCallId"`
+	ToolName   string                   `json:"toolName"`
+	Input      json.RawMessage          `json:"input,omitempty"`
+	Output     message.ToolResultOutput `json:"output"`
 }
 
 func (ToolErrorEvent) eventType() EventType { return EventToolError }
+
+func (e ToolErrorEvent) MarshalJSON() ([]byte, error) {
+	return marshalToolEvent(e.ToolCallID, e.ToolName, e.Input, e.Output)
+}
+func (e *ToolErrorEvent) UnmarshalJSON(b []byte) error {
+	return unmarshalToolEvent(b, &e.ToolCallID, &e.ToolName, &e.Input, &e.Output)
+}
+
+// ErrorText returns the error message text for this event.
+func (e ToolErrorEvent) ErrorText() string { return message.ToolOutputText(e.Output) }
+
+// ToolOutputDeniedEvent signals a tool call the user/policy refused to run.
+type ToolOutputDeniedEvent struct {
+	ToolCallID string          `json:"toolCallId"`
+	ToolName   string          `json:"toolName"`
+	Input      json.RawMessage `json:"input,omitempty"`
+	Reason     string          `json:"reason,omitempty"`
+}
+
+func (ToolOutputDeniedEvent) eventType() EventType { return EventToolOutputDenied }
+
+// ToolOutcomeEvent wraps a tool output into the stream event whose kind
+// matches its discriminated outcome: success → tool-result, error →
+// tool-error, execution-denied → tool-output-denied. Shared by every
+// producer so consumers that branch on event type get a consistent signal
+// while the carried Output keeps the full union.
+func ToolOutcomeEvent(toolCallID, toolName string, input json.RawMessage, out message.ToolResultOutput) Event {
+	switch message.ToolOutcome(out) {
+	case "error":
+		return Event{Type: EventToolError, Data: ToolErrorEvent{
+			ToolCallID: toolCallID, ToolName: toolName, Input: input, Output: out,
+		}}
+	case "denied":
+		reason := ""
+		if d, ok := out.(message.ExecutionDeniedOutput); ok {
+			reason = d.Reason
+		}
+		return Event{Type: EventToolOutputDenied, Data: ToolOutputDeniedEvent{
+			ToolCallID: toolCallID, ToolName: toolName, Input: input, Reason: reason,
+		}}
+	default:
+		return Event{Type: EventToolResult, Data: ToolResultEvent{
+			ToolCallID: toolCallID, ToolName: toolName, Input: input, Output: out,
+		}}
+	}
+}
+
+// marshalToolEvent serializes a tool result/error event with the Output
+// union carrying its discriminated "type".
+func marshalToolEvent(id, name string, input json.RawMessage, out message.ToolResultOutput) ([]byte, error) {
+	raw, err := message.MarshalOutput(out)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(struct {
+		ToolCallID string          `json:"toolCallId"`
+		ToolName   string          `json:"toolName"`
+		Input      json.RawMessage `json:"input,omitempty"`
+		Output     json.RawMessage `json:"output"`
+	}{id, name, input, raw})
+}
+
+func unmarshalToolEvent(b []byte, id, name *string, input *json.RawMessage, out *message.ToolResultOutput) error {
+	var a struct {
+		ToolCallID string          `json:"toolCallId"`
+		ToolName   string          `json:"toolName"`
+		Input      json.RawMessage `json:"input,omitempty"`
+		Output     json.RawMessage `json:"output"`
+	}
+	if err := json.Unmarshal(b, &a); err != nil {
+		return err
+	}
+	*id = a.ToolCallID
+	*name = a.ToolName
+	*input = a.Input
+	if len(a.Output) == 0 || string(a.Output) == "null" {
+		*out = nil
+		return nil
+	}
+	o, err := message.UnmarshalOutput(a.Output)
+	if err != nil {
+		return err
+	}
+	*out = o
+	return nil
+}
 
 // ReasoningStartEvent signals the start of reasoning/thinking.
 type ReasoningStartEvent struct {

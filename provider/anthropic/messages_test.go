@@ -279,7 +279,7 @@ func TestConvertToolMessages(t *testing.T) {
 					message.ToolResultPart{
 						ToolCallID: "toolu_123",
 						ToolName:   "get_weather",
-						Result:     "72°F and sunny",
+						Output:     message.TextOutput{Value: "72°F and sunny"},
 					},
 				},
 			},
@@ -316,7 +316,7 @@ func TestConvertToolMessages(t *testing.T) {
 					message.ToolResultPart{
 						ToolCallID: "toolu_123",
 						ToolName:   "screenshot",
-						Result:     "Here is the screenshot",
+						Output:     message.TextOutput{Value: "Here is the screenshot"},
 					},
 					message.ImagePart{
 						Image:    "iVBORw0KGgo=",
@@ -379,7 +379,7 @@ func TestConvertToolMessages(t *testing.T) {
 					message.ToolResultPart{
 						ToolCallID: "toolu_456",
 						ToolName:   "read_pdf",
-						Result:     "PDF contents",
+						Output:     message.TextOutput{Value: "PDF contents"},
 					},
 					message.FilePart{
 						Data:     "JVBERi0xLjQ=",
@@ -421,7 +421,7 @@ func TestConvertToolMessages(t *testing.T) {
 					message.ToolResultPart{
 						ToolCallID: "toolu_789",
 						ToolName:   "analyze",
-						Result:     "Analysis complete",
+						Output:     message.TextOutput{Value: "Analysis complete"},
 					},
 					message.TextPart{Text: "Additional context"},
 					message.ImagePart{
@@ -462,8 +462,7 @@ func TestConvertToolMessages(t *testing.T) {
 					message.ToolResultPart{
 						ToolCallID: "toolu_err",
 						ToolName:   "failing_tool",
-						Result:     "Something went wrong",
-						IsError:    true,
+						Output:     message.ErrorTextOutput{Value: "Something went wrong"},
 					},
 				},
 			},
@@ -485,7 +484,7 @@ func TestConvertToolMessages(t *testing.T) {
 					message.ToolResultPart{
 						ToolCallID: "toolu_123",
 						ToolName:   "screenshot",
-						Result:     "Result text",
+						Output:     message.TextOutput{Value: "Result text"},
 					},
 					message.ImagePart{
 						Image:    "aW1hZ2U=",
@@ -519,6 +518,84 @@ func TestConvertToolMessages(t *testing.T) {
 		imageBlock := contentArr[1].(map[string]any)
 		if imageBlock["type"] != "image" {
 			t.Errorf("expected type 'image', got '%v'", imageBlock["type"])
+		}
+	})
+}
+
+// TestConvertToolMessages_OutputVariantWire asserts the Anthropic wire
+// mapping per ToolResultOutput variant (ADR §8): is_error is set ONLY for
+// error-text/error-json; text/json/execution-denied/content never set it;
+// execution-denied serializes to its reason string; and a ContentOutput
+// with an image item produces an Anthropic image block.
+func TestConvertToolMessages_OutputVariantWire(t *testing.T) {
+	t.Run("is_error only for error variants", func(t *testing.T) {
+		cases := []struct {
+			name     string
+			output   message.ToolResultOutput
+			wantErr  bool
+			wantWire string // expected scalar block.Content (when not a block array)
+		}{
+			{"text", message.TextOutput{Value: "hello"}, false, "hello"},
+			{"json", message.JSONOutput{Value: map[string]any{"k": "v"}}, false, `{"k":"v"}`},
+			{"error-text", message.ErrorTextOutput{Value: "boom"}, true, "boom"},
+			{"error-json", message.ErrorJSONOutput{Value: map[string]any{"e": 1}}, true, `{"e":1}`},
+			{"execution-denied", message.ExecutionDeniedOutput{Reason: "policy says no"}, false, "policy says no"},
+			{"execution-denied-default", message.ExecutionDeniedOutput{}, false, "Tool call execution denied."},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				msg := message.Message{
+					Role: message.RoleTool,
+					Content: message.Content{Parts: []message.Part{
+						message.ToolResultPart{ToolCallID: "id", ToolName: "t", Output: tc.output},
+					}},
+				}
+				result := convertToolMessages(msg)
+				block := result[0].Content[0]
+				if block.IsError != tc.wantErr {
+					t.Errorf("IsError = %v, want %v", block.IsError, tc.wantErr)
+				}
+				if got, ok := block.Content.(string); !ok || got != tc.wantWire {
+					t.Errorf("Content = %v (%T), want %q", block.Content, block.Content, tc.wantWire)
+				}
+			})
+		}
+	})
+
+	t.Run("content output with image produces anthropic image block", func(t *testing.T) {
+		msg := message.Message{
+			Role: message.RoleTool,
+			Content: message.Content{Parts: []message.Part{
+				message.ToolResultPart{
+					ToolCallID: "id",
+					ToolName:   "snap",
+					Output: message.ContentOutput{Value: []message.ToolContentItem{
+						{Type: "text", Text: "here it is"},
+						{Type: "image-data", Data: "aW1n", MediaType: "image/png"},
+					}},
+				},
+			}},
+		}
+		result := convertToolMessages(msg)
+		block := result[0].Content[0]
+		if block.IsError {
+			t.Error("content output must not set is_error")
+		}
+		blocks, ok := block.Content.([]anthropicContentBlock)
+		if !ok {
+			t.Fatalf("expected []anthropicContentBlock, got %T", block.Content)
+		}
+		if len(blocks) != 2 {
+			t.Fatalf("expected 2 blocks (text + image), got %d", len(blocks))
+		}
+		if blocks[0].Type != "text" || blocks[0].Text != "here it is" {
+			t.Errorf("block[0] = %+v, want text 'here it is'", blocks[0])
+		}
+		if blocks[1].Type != "image" {
+			t.Errorf("block[1].Type = %q, want image", blocks[1].Type)
+		}
+		if blocks[1].Source == nil || blocks[1].Source.MediaType != "image/png" || blocks[1].Source.Data != "aW1n" {
+			t.Errorf("block[1].Source = %+v", blocks[1].Source)
 		}
 	})
 }
@@ -636,7 +713,7 @@ func TestConvertToolMessages_MultipartWithURLFile(t *testing.T) {
 	msg := message.Message{
 		Role: message.RoleTool,
 		Content: message.Content{Parts: []message.Part{
-			message.ToolResultPart{ToolCallID: "call-1", ToolName: "fetch", Result: "ok"},
+			message.ToolResultPart{ToolCallID: "call-1", ToolName: "fetch", Output: message.TextOutput{Value: "ok"}},
 			message.FilePart{URL: "https://example.com/report.pdf", MimeType: "application/pdf", Filename: "report.pdf"},
 		}},
 	}

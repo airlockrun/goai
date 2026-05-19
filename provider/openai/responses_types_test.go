@@ -199,7 +199,7 @@ func TestConvertToResponsesInput_ToolMessages(t *testing.T) {
 						message.ToolResultPart{
 							ToolCallID: "call_123",
 							ToolName:   "get_weather",
-							Result:     "Sunny, 72°F",
+							Output:     message.TextOutput{Value: "Sunny, 72°F"},
 						},
 					},
 				},
@@ -231,7 +231,7 @@ func TestConvertToResponsesInput_ToolMessages(t *testing.T) {
 						message.ToolResultPart{
 							ToolCallID: "call_123",
 							ToolName:   "get_weather",
-							Result:     map[string]any{"temp": 72, "condition": "sunny"},
+							Output:     message.JSONOutput{Value: map[string]any{"temp": 72, "condition": "sunny"}},
 						},
 					},
 				},
@@ -271,7 +271,7 @@ func TestConvertToResponsesInput_ToolResultMultipart(t *testing.T) {
 						message.ToolResultPart{
 							ToolCallID: "call_123",
 							ToolName:   "search",
-							Result:     "",
+							Output:     message.TextOutput{Value: ""},
 						},
 						message.ImagePart{
 							Image:    "base64_data",
@@ -318,7 +318,7 @@ func TestConvertToResponsesInput_ToolResultMultipart(t *testing.T) {
 						message.ToolResultPart{
 							ToolCallID: "call_123",
 							ToolName:   "screenshot",
-							Result:     "",
+							Output:     message.TextOutput{Value: ""},
 						},
 						message.ImagePart{
 							Image: "https://example.com/screenshot.png",
@@ -348,7 +348,7 @@ func TestConvertToResponsesInput_ToolResultMultipart(t *testing.T) {
 						message.ToolResultPart{
 							ToolCallID: "call_123",
 							ToolName:   "search",
-							Result:     "",
+							Output:     message.TextOutput{Value: ""},
 						},
 						message.FilePart{
 							Data:     "AQIDBAU=",
@@ -388,7 +388,7 @@ func TestConvertToResponsesInput_ToolResultMultipart(t *testing.T) {
 						message.ToolResultPart{
 							ToolCallID: "call_789",
 							ToolName:   "fetch_report",
-							Result:     "",
+							Output:     message.TextOutput{Value: ""},
 						},
 						message.FilePart{
 							URL:      "https://files.example.com/q4.pdf",
@@ -429,7 +429,7 @@ func TestConvertToResponsesInput_ToolResultMultipart(t *testing.T) {
 						message.ToolResultPart{
 							ToolCallID: "call_123",
 							ToolName:   "search",
-							Result:     "The weather in San Francisco is 72°F",
+							Output:     message.TextOutput{Value: "The weather in San Francisco is 72°F"},
 						},
 						message.ImagePart{
 							Image:    "base64_data",
@@ -489,7 +489,7 @@ func TestConvertToResponsesInput_MixedConversation(t *testing.T) {
 						message.ToolResultPart{
 							ToolCallID: "call_1",
 							ToolName:   "get_weather",
-							Result:     "Sunny",
+							Output:     message.TextOutput{Value: "Sunny"},
 						},
 					},
 				},

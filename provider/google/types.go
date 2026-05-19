@@ -78,7 +78,7 @@ type geminiFileData struct {
 }
 
 type geminiFunctionCall struct {
-	Name string         `json:"name"`
+	Name string `json:"name"`
 	// Args may be omitted on no-args calls. Vertex emits `{name: "X"}`
 	// without args/partialArgs/willContinue for zero-arg tools; ai-sdk
 	// #14968. We default to "{}" on the wire.
@@ -181,12 +181,12 @@ type geminiCandidate struct {
 // geminiGroundingMetadata mirrors Gemini's groundingMetadata response field.
 // Surfaced via providerMetadata.google.groundingMetadata.
 type geminiGroundingMetadata struct {
-	WebSearchQueries  []string                   `json:"webSearchQueries,omitempty"`
-	RetrievalQueries  []string                   `json:"retrievalQueries,omitempty"`
-	SearchEntryPoint  *geminiSearchEntryPoint    `json:"searchEntryPoint,omitempty"`
-	GroundingChunks   []geminiGroundingChunk     `json:"groundingChunks,omitempty"`
-	GroundingSupports []geminiGroundingSupport   `json:"groundingSupports,omitempty"`
-	RetrievalMetadata *geminiRetrievalMetadata   `json:"retrievalMetadata,omitempty"`
+	WebSearchQueries  []string                 `json:"webSearchQueries,omitempty"`
+	RetrievalQueries  []string                 `json:"retrievalQueries,omitempty"`
+	SearchEntryPoint  *geminiSearchEntryPoint  `json:"searchEntryPoint,omitempty"`
+	GroundingChunks   []geminiGroundingChunk   `json:"groundingChunks,omitempty"`
+	GroundingSupports []geminiGroundingSupport `json:"groundingSupports,omitempty"`
+	RetrievalMetadata *geminiRetrievalMetadata `json:"retrievalMetadata,omitempty"`
 }
 
 type geminiSearchEntryPoint struct {
@@ -194,9 +194,9 @@ type geminiSearchEntryPoint struct {
 }
 
 type geminiGroundingChunk struct {
-	Web              *geminiGroundingWeb        `json:"web,omitempty"`
-	RetrievedContext *geminiRetrievedContext    `json:"retrievedContext,omitempty"`
-	Maps             *geminiGroundingMapsChunk  `json:"maps,omitempty"`
+	Web              *geminiGroundingWeb       `json:"web,omitempty"`
+	RetrievedContext *geminiRetrievedContext   `json:"retrievedContext,omitempty"`
+	Maps             *geminiGroundingMapsChunk `json:"maps,omitempty"`
 }
 
 type geminiGroundingWeb struct {
@@ -241,8 +241,8 @@ type geminiURLContextMetadata struct {
 }
 
 type geminiURLMetadataEntry struct {
-	RetrievedURL        string `json:"retrievedUrl,omitempty"`
-	URLRetrievalStatus  string `json:"urlRetrievalStatus,omitempty"`
+	RetrievedURL       string `json:"retrievedUrl,omitempty"`
+	URLRetrievalStatus string `json:"urlRetrievalStatus,omitempty"`
 }
 
 type geminiUsageMetadata struct {

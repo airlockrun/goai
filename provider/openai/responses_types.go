@@ -531,16 +531,7 @@ func convertToResponsesInputWithWarnings(messages []message.Message, systemMessa
 			for _, part := range msg.Content.Parts {
 				switch p := part.(type) {
 				case message.ToolResultPart:
-					textOutput := ""
-					switch v := p.Result.(type) {
-					case string:
-						textOutput = v
-					default:
-						if b, err := json.Marshal(v); err == nil {
-							textOutput = string(b)
-						}
-					}
-					toolOutputs = append(toolOutputs, toolOutput{callID: p.ToolCallID, text: textOutput})
+					toolOutputs = append(toolOutputs, toolOutput{callID: p.ToolCallID, text: message.ToolOutputWire(p.Output)})
 				case message.ImagePart:
 					imageURL := p.Image
 					if !strings.HasPrefix(imageURL, "http") && !strings.HasPrefix(imageURL, "data:") {

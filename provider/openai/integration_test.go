@@ -503,7 +503,7 @@ func TestIntegration_Base64ImageResponses(t *testing.T) {
 					Role: message.RoleTool,
 					Content: message.Content{
 						Parts: []message.Part{
-							message.ToolResultPart{ToolCallID: "call_123", ToolName: "run_js", Result: ""},
+							message.ToolResultPart{ToolCallID: "call_123", ToolName: "run_js", Output: message.TextOutput{Value: ""}},
 							message.ImagePart{Image: b64, MimeType: "image/png"},
 						},
 					},

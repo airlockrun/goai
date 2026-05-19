@@ -19,17 +19,17 @@ const (
 // the Responses implementation; all other IDs fall through to the Chat
 // Completions / openaicompat path.
 var responsesModelCatalog = map[string]bool{
-	"grok-4":                         true,
-	"grok-4-0709":                    true,
-	"grok-4-latest":                  true,
-	"grok-4-1-fast-reasoning":        true,
-	"grok-4-1-fast-non-reasoning":    true,
-	"grok-4-fast-reasoning":          true,
-	"grok-4-fast-non-reasoning":      true,
-	"grok-4.20-0309-reasoning":       true,
-	"grok-4.20-0309-non-reasoning":   true,
-	"grok-4.20-multi-agent-0309":     true,
-	"grok-code-fast-1":               true,
+	"grok-4":                       true,
+	"grok-4-0709":                  true,
+	"grok-4-latest":                true,
+	"grok-4-1-fast-reasoning":      true,
+	"grok-4-1-fast-non-reasoning":  true,
+	"grok-4-fast-reasoning":        true,
+	"grok-4-fast-non-reasoning":    true,
+	"grok-4.20-0309-reasoning":     true,
+	"grok-4.20-0309-non-reasoning": true,
+	"grok-4.20-multi-agent-0309":   true,
+	"grok-code-fast-1":             true,
 }
 
 // isResponsesModel reports whether the given model ID should be routed

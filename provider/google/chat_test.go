@@ -1001,4 +1001,3 @@ func TestGoogleProvider_ModelsContainsLatest(t *testing.T) {
 		t.Error("Models() still lists retired gemini-1.0-pro")
 	}
 }
-

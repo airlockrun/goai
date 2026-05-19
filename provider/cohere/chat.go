@@ -129,18 +129,9 @@ func (m *CohereModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 		case message.RoleTool:
 			for _, part := range msg.Content.Parts {
 				if tr, ok := part.(message.ToolResultPart); ok {
-					resultStr := ""
-					switch v := tr.Result.(type) {
-					case string:
-						resultStr = v
-					default:
-						if b, err := json.Marshal(v); err == nil {
-							resultStr = string(b)
-						}
-					}
 					chatHistory = append(chatHistory, cohereMessage{
 						Role:    "TOOL",
-						Message: resultStr,
+						Message: message.ToolOutputWire(tr.Output),
 					})
 				}
 			}

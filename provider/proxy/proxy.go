@@ -98,7 +98,7 @@ type proxyModel struct {
 }
 
 func (m *proxyModel) ID() string       { return m.modelID }
-func (m *proxyModel) Provider() string  { return "proxy" }
+func (m *proxyModel) Provider() string { return "proxy" }
 
 func (m *proxyModel) Stream(ctx context.Context, options *stream.CallOptions) (<-chan stream.Event, error) {
 	events := make(chan stream.Event, 100)
@@ -261,19 +261,13 @@ func parseNDJSONEvent(line []byte) (stream.Event, error) {
 		json.Unmarshal(envelope.Data, &d)
 		data = d
 	case stream.EventToolError:
-		var d struct {
-			ToolCallID string          `json:"toolCallId"`
-			ToolName   string          `json:"toolName"`
-			Input      json.RawMessage `json:"input,omitempty"`
-			Error      string          `json:"error"`
-		}
+		var d stream.ToolErrorEvent
 		json.Unmarshal(envelope.Data, &d)
-		data = stream.ToolErrorEvent{
-			ToolCallID: d.ToolCallID,
-			ToolName:   d.ToolName,
-			Input:      d.Input,
-			Error:      fmt.Errorf("%s", d.Error),
-		}
+		data = d
+	case stream.EventToolOutputDenied:
+		var d stream.ToolOutputDeniedEvent
+		json.Unmarshal(envelope.Data, &d)
+		data = d
 	case stream.EventReasoningStart:
 		var d stream.ReasoningStartEvent
 		json.Unmarshal(envelope.Data, &d)

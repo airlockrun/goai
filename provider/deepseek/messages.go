@@ -2,7 +2,6 @@ package deepseek
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"strings"
 
 	"github.com/airlockrun/goai/message"
@@ -97,18 +96,9 @@ func convertMessages(modelID string, messages []message.Message) ([]any, error) 
 				if !ok {
 					continue
 				}
-				resultStr := ""
-				switch v := tr.Result.(type) {
-				case string:
-					resultStr = v
-				default:
-					if b, err := json.Marshal(v); err == nil {
-						resultStr = string(b)
-					}
-				}
 				out = append(out, map[string]any{
 					"role":         "tool",
-					"content":      resultStr,
+					"content":      message.ToolOutputWire(tr.Output),
 					"tool_call_id": tr.ToolCallID,
 				})
 			}

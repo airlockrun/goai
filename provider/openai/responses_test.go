@@ -975,7 +975,7 @@ func TestResponsesModel_Store(t *testing.T) {
 						Parts: []message.Part{
 							// Plain reasoning — no encrypted_content, should be dropped
 							message.ReasoningPart{
-								Text: "thinking",
+								Text:            "thinking",
 								ProviderOptions: map[string]any{"itemId": "rs_1"},
 							},
 							// Reasoning WITH encrypted_content — should survive

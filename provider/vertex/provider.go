@@ -302,11 +302,10 @@ func convertMessage(msg message.Message) map[string]any {
 					},
 				})
 			case message.ToolResultPart:
-				resultBytes, _ := json.Marshal(p.Result)
 				parts = append(parts, map[string]any{
 					"functionResponse": map[string]any{
 						"name":     p.ToolName,
-						"response": json.RawMessage(resultBytes),
+						"response": map[string]any{"result": message.ToolOutputWire(p.Output)},
 					},
 				})
 			}

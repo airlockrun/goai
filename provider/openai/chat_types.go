@@ -110,9 +110,9 @@ type chatCompletionChunk struct {
 }
 
 type chatChunkChoice struct {
-	Index        int              `json:"index"`
-	Delta        chatChunkDelta   `json:"delta"`
-	FinishReason string           `json:"finish_reason,omitempty"`
+	Index        int                `json:"index"`
+	Delta        chatChunkDelta     `json:"delta"`
+	FinishReason string             `json:"finish_reason,omitempty"`
 	Logprobs     *chatChunkLogprobs `json:"logprobs,omitempty"`
 }
 
@@ -213,18 +213,9 @@ func convertToChatMessages(messages []message.Message) ([]chatMessage, error) {
 
 			for _, part := range msg.Content.Parts {
 				if tr, ok := part.(message.ToolResultPart); ok {
-					resultStr := ""
-					switch v := tr.Result.(type) {
-					case string:
-						resultStr = v
-					default:
-						if b, err := json.Marshal(v); err == nil {
-							resultStr = string(b)
-						}
-					}
 					result = append(result, chatMessage{
 						Role:       "tool",
-						Content:    resultStr,
+						Content:    message.ToolOutputWire(tr.Output),
 						ToolCallID: tr.ToolCallID,
 					})
 				}

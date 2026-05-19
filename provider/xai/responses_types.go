@@ -409,19 +409,10 @@ func convertToResponsesInput(messages []message.Message) []responsesInputItem {
 				if !ok {
 					continue
 				}
-				output := ""
-				switch v := tr.Result.(type) {
-				case string:
-					output = v
-				default:
-					if b, err := json.Marshal(v); err == nil {
-						output = string(b)
-					}
-				}
 				result = append(result, responsesInputItem{
 					Type:   "function_call_output",
 					CallID: tr.ToolCallID,
-					Output: output,
+					Output: message.ToolOutputWire(tr.Output),
 				})
 			}
 		}
