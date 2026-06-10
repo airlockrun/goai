@@ -139,18 +139,30 @@ func convertUserContent(content message.Content) any {
 		switch p := part.(type) {
 		case message.TextPart:
 			parts = append(parts, map[string]any{"type": "text", "text": p.Text})
-		case message.ImagePart:
-			parts = append(parts, map[string]any{
-				"type":      "image_url",
-				"image_url": map[string]any{"url": p.Image},
-			})
 		case message.FilePart:
-			if strings.HasPrefix(p.MimeType, "text/") {
-				decoded, err := base64.StdEncoding.DecodeString(p.Data)
-				if err != nil {
-					decoded = []byte(p.Data)
+			switch d := p.Data.(type) {
+			case message.FileDataBytes:
+				if strings.HasPrefix(p.MimeType, "image/") {
+					parts = append(parts, map[string]any{
+						"type":      "image_url",
+						"image_url": map[string]any{"url": "data:" + p.MimeType + ";base64," + d.Data},
+					})
+				} else if strings.HasPrefix(p.MimeType, "text/") {
+					decoded, err := base64.StdEncoding.DecodeString(d.Data)
+					if err != nil {
+						decoded = []byte(d.Data)
+					}
+					parts = append(parts, map[string]any{"type": "text", "text": string(decoded)})
 				}
-				parts = append(parts, map[string]any{"type": "text", "text": string(decoded)})
+			case message.FileDataURL:
+				if strings.HasPrefix(p.MimeType, "image/") {
+					parts = append(parts, map[string]any{
+						"type":      "image_url",
+						"image_url": map[string]any{"url": d.URL},
+					})
+				}
+			case message.FileDataText:
+				parts = append(parts, map[string]any{"type": "text", "text": d.Text})
 			}
 		}
 	}

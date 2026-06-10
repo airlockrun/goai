@@ -4,8 +4,10 @@ package xai
 // These options match ai-sdk's XaiProviderOptions schema.
 // See: ai-sdk/packages/xai/src/xai-chat-options.ts
 type ChatOptions struct {
-	// ReasoningEffort controls the reasoning effort level.
-	// Values: "low", "high"
+	// ReasoningEffort constrains how hard a reasoning model thinks before
+	// responding. Values: "none" (disables reasoning entirely; grok-4.3 and
+	// newer), "low", "medium", "high". Not every Grok model accepts every
+	// value. See https://docs.x.ai/docs/guides/reasoning.
 	ReasoningEffort string `json:"reasoningEffort,omitempty"`
 
 	// ParallelFunctionCalling controls whether to enable parallel function calling.
@@ -14,7 +16,11 @@ type ChatOptions struct {
 	// Default is true.
 	ParallelFunctionCalling *bool `json:"parallel_function_calling,omitempty"`
 
-	// SearchParameters configures search behavior.
+	// SearchParameters configures Live Search behavior. xAI has retired
+	// Live Search: requests carrying search_parameters now return a "Live
+	// search is deprecated" error. Use the web_search / x_search hosted
+	// tools (WebSearch / XSearch) with a Responses-API model instead.
+	// See https://docs.x.ai/docs/guides/tools/overview.
 	SearchParameters *SearchParameters `json:"searchParameters,omitempty"`
 
 	// Logprobs requests per-token log probabilities alongside the
@@ -56,8 +62,10 @@ type SearchParameters struct {
 // xaiLanguageModelResponsesOptions schema.
 // See: ai-sdk/packages/xai/src/responses/xai-responses-options.ts
 type ResponsesOptions struct {
-	// ReasoningEffort controls the reasoning effort level.
-	// Values: "low", "medium", "high".
+	// ReasoningEffort constrains how hard a reasoning model thinks before
+	// responding. Values: "none" (disables reasoning entirely; grok-4.3 and
+	// newer), "low", "medium", "high". Not every Grok model accepts every
+	// value. See https://docs.x.ai/docs/guides/reasoning.
 	ReasoningEffort string `json:"reasoningEffort,omitempty"`
 
 	// Logprobs requests per-token log probabilities alongside the

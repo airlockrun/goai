@@ -253,39 +253,60 @@ func convertUserContent(content message.Content) any {
 				Type: "text",
 				Text: p.Text,
 			})
-		case message.ImagePart:
-			result = append(result, chatContentPart{
-				Type: "image_url",
-				ImageURL: &chatImageURL{
-					URL: p.Image,
-				},
-			})
 		case message.FilePart:
-			if strings.HasPrefix(p.MimeType, "text/") {
-				decoded, err := base64.StdEncoding.DecodeString(p.Data)
-				if err != nil {
-					decoded = []byte(p.Data)
+			switch d := p.Data.(type) {
+			case message.FileDataBytes:
+				if strings.HasPrefix(p.MimeType, "image/") {
+					result = append(result, chatContentPart{
+						Type: "image_url",
+						ImageURL: &chatImageURL{
+							URL: d.Data,
+						},
+					})
+				} else if strings.HasPrefix(p.MimeType, "text/") {
+					decoded, err := base64.StdEncoding.DecodeString(d.Data)
+					if err != nil {
+						decoded = []byte(d.Data)
+					}
+					result = append(result, chatContentPart{
+						Type: "text",
+						Text: string(decoded),
+					})
 				}
-				result = append(result, chatContentPart{
-					Type: "text",
-					Text: string(decoded),
-				})
+				// Other byte media types are skipped: the openai-compatible
+				// chat surface only carries images and inline text.
+			case message.FileDataURL:
+				if strings.HasPrefix(p.MimeType, "image/") {
+					result = append(result, chatContentPart{
+						Type: "image_url",
+						ImageURL: &chatImageURL{
+							URL: d.URL,
+						},
+					})
+				}
+				// Non-image remote files have no representation here; skip.
 			}
+			// FileDataText / FileDataReference are skipped: no generic
+			// openai-compatible chat content part carries them.
 		}
 	}
 	return result
 }
 
-func convertToTools(tools []tool.Tool) []chatTool {
+func convertToTools(tools []tool.Tool, schemaTransformer func(json.RawMessage) json.RawMessage) []chatTool {
 	result := make([]chatTool, 0, len(tools))
 
 	for _, t := range tools {
+		params := t.InputSchema
+		if schemaTransformer != nil {
+			params = schemaTransformer(params)
+		}
 		result = append(result, chatTool{
 			Type: "function",
 			Function: chatFunctionDef{
 				Name:        t.Name,
 				Description: t.Description,
-				Parameters:  t.InputSchema,
+				Parameters:  params,
 			},
 		})
 	}

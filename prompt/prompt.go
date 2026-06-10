@@ -299,26 +299,27 @@ func convertUserPart(part message.Part, downloadedAssets map[string]*DownloadedA
 			Text: p.Text,
 		}
 
-	case message.ImagePart:
-		data, mediaType := processDataContent(p.Image, p.MimeType, downloadedAssets)
-		// Detect media type from data if not provided or is a wildcard
-		if mediaType == "" || mediaType == "image/*" {
+	case message.FilePart:
+		var raw string
+		switch d := p.Data.(type) {
+		case message.FileDataBytes:
+			raw = d.Data
+		case message.FileDataURL:
+			raw = d.URL
+		default:
+			return LanguageModelPart{Type: "file", MediaType: p.MimeType, Filename: p.Filename}
+		}
+		data, mediaType := processDataContent(raw, p.MimeType, downloadedAssets)
+		if mediaType == "" && p.MimeType != "" {
+			mediaType = p.MimeType
+		}
+		// Detect an image media type from the bytes when absent or a wildcard.
+		if strings.HasPrefix(p.MimeType, "image/") && (mediaType == "" || mediaType == "image/*") {
 			if detected := detectImageMediaType(data); detected != "" {
 				mediaType = detected
 			} else if mediaType == "" {
 				mediaType = "image/*"
 			}
-		}
-		return LanguageModelPart{
-			Type:      "file",
-			Data:      data,
-			MediaType: mediaType,
-		}
-
-	case message.FilePart:
-		data, mediaType := processDataContent(p.Data, p.MimeType, downloadedAssets)
-		if mediaType == "" && p.MimeType != "" {
-			mediaType = p.MimeType
 		}
 		return LanguageModelPart{
 			Type:      "file",
@@ -572,15 +573,19 @@ func downloadAssets(ctx context.Context, messages []message.Message, download Do
 			var mediaType string
 
 			switch p := part.(type) {
-			case message.ImagePart:
-				data = p.Image
+			case message.FilePart:
+				switch d := p.Data.(type) {
+				case message.FileDataBytes:
+					data = d.Data
+				case message.FileDataURL:
+					data = d.URL
+				default:
+					continue
+				}
 				mediaType = p.MimeType
-				if mediaType == "" {
+				if mediaType == "" && strings.HasPrefix(p.MimeType, "image/") {
 					mediaType = "image/*"
 				}
-			case message.FilePart:
-				data = p.Data
-				mediaType = p.MimeType
 			default:
 				continue
 			}

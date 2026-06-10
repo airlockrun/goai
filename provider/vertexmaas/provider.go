@@ -69,8 +69,8 @@ func New(opts Options) *Provider {
 	baseURL := strings.TrimRight(opts.BaseURL, "/")
 	if baseURL == "" {
 		baseURL = fmt.Sprintf(
-			"https://aiplatform.googleapis.com/v1/projects/%s/locations/%s/endpoints/openapi",
-			opts.Project, opts.Location,
+			"https://%s/v1/projects/%s/locations/%s/endpoints/openapi",
+			vertexHost(opts.Location), opts.Project, opts.Location,
 		)
 	}
 	headers := maps.Clone(opts.Headers)
@@ -88,6 +88,21 @@ func New(opts Options) *Provider {
 			// AuthScheme values are irrelevant when APIKey is unset; Bearer is
 			// already on Headers.
 		}),
+	}
+}
+
+// vertexHost maps a Vertex location to its API host. "global" uses the
+// region-less host, the "eu" and "us" multi-region locations use the
+// dedicated `.rep.` hosts, and every other location is region-prefixed.
+// Mirrors ai-sdk's getHost (#ec2e752).
+func vertexHost(location string) string {
+	switch location {
+	case "global":
+		return "aiplatform.googleapis.com"
+	case "eu", "us":
+		return fmt.Sprintf("aiplatform.%s.rep.googleapis.com", location)
+	default:
+		return fmt.Sprintf("%s-aiplatform.googleapis.com", location)
 	}
 }
 

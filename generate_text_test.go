@@ -395,7 +395,7 @@ func TestGenerateText_MultiStep(t *testing.T) {
 					},
 				},
 			},
-			OnStepFinish: func(step stream.StepResultData) {
+			OnStepEnd: func(step stream.StepResultData) {
 				stepFinishCount++
 			},
 		})
@@ -413,7 +413,7 @@ func TestGenerateText_MultiStep(t *testing.T) {
 			t.Errorf("expected final text 'The weather in NYC is sunny.', got '%s'", result.Text)
 		}
 
-		// OnStepFinish should be called twice
+		// OnStepEnd should be called twice
 		if stepFinishCount != 2 {
 			t.Errorf("expected onStepFinish to be called 2 times, got %d", stepFinishCount)
 		}
@@ -616,7 +616,7 @@ func TestStreamText_MultiStep(t *testing.T) {
 					},
 				},
 			},
-			OnStepFinish: func(step stream.StepResultData) {
+			OnStepEnd: func(step stream.StepResultData) {
 				stepFinishCount++
 			},
 		})
@@ -653,7 +653,7 @@ func TestStreamText_MultiStep(t *testing.T) {
 			t.Errorf("expected 'The time is 12:00', got '%s'", result.Text())
 		}
 
-		// OnStepFinish should be called twice
+		// OnStepEnd should be called twice
 		if stepFinishCount != 2 {
 			t.Errorf("expected onStepFinish to be called 2 times, got %d", stepFinishCount)
 		}

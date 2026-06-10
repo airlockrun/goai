@@ -228,6 +228,11 @@ func (m *ChatModel) processStream(ctx context.Context, body io.Reader, tools []t
 	var usage stream.Usage
 	var finishReason stream.FinishReason
 	var logprobTokens []chatLogprobToken
+	// outputStarted gates early-error handling (ai-sdk #15922): OpenAI can
+	// return HTTP 200 and then emit a top-level error frame before any output
+	// (e.g. insufficient_quota). Such pre-output errors terminate the stream
+	// so retry/fallback logic sees the failure; later errors stay streamed.
+	var outputStarted bool
 
 	events <- stream.Event{Type: stream.EventStartStep, Data: stream.StartStepEvent{}}
 
@@ -258,6 +263,25 @@ func (m *ChatModel) processStream(ctx context.Context, body io.Reader, tools []t
 			continue
 		}
 
+		// A top-level error frame is fatal when it arrives before any output
+		// (ai-sdk #15922): surface it and stop so the failure propagates.
+		if chunk.Error != nil {
+			code := ""
+			if cs, ok := chunk.Error.Code.(string); ok {
+				code = cs
+			}
+			events <- stream.Event{
+				Type: stream.EventError,
+				Data: stream.ErrorEvent{
+					Error: fmt.Errorf("OpenAI API error: [%s] %s", code, chunk.Error.Message),
+				},
+			}
+			if !outputStarted {
+				return
+			}
+			continue
+		}
+
 		// Handle usage in final chunk
 		if chunk.Usage != nil {
 			usage = stream.UsageFrom(chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens)
@@ -284,6 +308,7 @@ func (m *ChatModel) processStream(ctx context.Context, body io.Reader, tools []t
 
 		// Handle text content
 		if delta.Content != "" {
+			outputStarted = true
 			if !textStarted {
 				textStarted = true
 				events <- stream.Event{Type: stream.EventTextStart, Data: stream.TextStartEvent{}}
@@ -292,6 +317,9 @@ func (m *ChatModel) processStream(ctx context.Context, body io.Reader, tools []t
 		}
 
 		// Handle tool calls
+		if len(delta.ToolCalls) > 0 {
+			outputStarted = true
+		}
 		for _, tc := range delta.ToolCalls {
 			acc, exists := currentToolCalls[tc.Index]
 			if !exists {

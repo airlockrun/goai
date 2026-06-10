@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -271,6 +272,79 @@ func TestHTTPTransport_404HelpfulMessage(t *testing.T) {
 	}
 }
 
+func TestHTTPTransport_MCPClientErrorHTTPFields(t *testing.T) {
+	tests := []struct {
+		name       string
+		postFn     func(w http.ResponseWriter, r *http.Request)
+		wantStatus int
+		wantBody   string
+		wantMsg    string
+	}{
+		{
+			name: "500 carries status, url, body",
+			postFn: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte("Internal Server Error"))
+			},
+			wantStatus: 500,
+			wantBody:   "Internal Server Error",
+			wantMsg:    "POSTing to endpoint",
+		},
+		{
+			name: "404 carries status, url, body and sse hint",
+			postFn: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+				w.Write([]byte("Not Found"))
+			},
+			wantStatus: 404,
+			wantBody:   "Not Found",
+			wantMsg:    "does not support HTTP transport",
+		},
+		{
+			name: "unexpected content type carries status and url",
+			postFn: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/plain")
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte("nope"))
+			},
+			wantStatus: 200,
+			wantBody:   "",
+			wantMsg:    "unexpected content type",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hts := newHTTPTestServer(t)
+			defer hts.Close()
+			hts.postFn = tt.postFn
+			tr := NewHTTPTransport(hts.URL, nil, nil)
+			if err := tr.Connect(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			defer tr.Close()
+
+			_, err := tr.Send(context.Background(), "tools/list", nil)
+			var mcpErr *MCPClientError
+			if !errors.As(err, &mcpErr) {
+				t.Fatalf("expected *MCPClientError, got %T: %v", err, err)
+			}
+			if mcpErr.StatusCode != tt.wantStatus {
+				t.Errorf("StatusCode = %d, want %d", mcpErr.StatusCode, tt.wantStatus)
+			}
+			if mcpErr.URL != hts.URL {
+				t.Errorf("URL = %q, want %q", mcpErr.URL, hts.URL)
+			}
+			if mcpErr.ResponseBody != tt.wantBody {
+				t.Errorf("ResponseBody = %q, want %q", mcpErr.ResponseBody, tt.wantBody)
+			}
+			if !strings.Contains(mcpErr.Message, tt.wantMsg) {
+				t.Errorf("Message = %q, want substring %q", mcpErr.Message, tt.wantMsg)
+			}
+		})
+	}
+}
+
 // fakeAuthProvider is a minimal token-bearing OAuthClientProvider that
 // flips its access token on every Refresh, so we can verify auth-retry
 // actually re-issued the request with new credentials.
@@ -374,6 +448,99 @@ func TestHTTPTransport_AuthOn401Retry(t *testing.T) {
 	}
 	if prov.tokens.AccessToken != "fresh" {
 		t.Errorf("expected token refresh, got %s", prov.tokens.AccessToken)
+	}
+}
+
+// TestHTTPTransport_AuthDedup drives the POST and inbound-GET 401 paths
+// concurrently and asserts authorizeOnce collapses them into a single token
+// refresh, mirroring ai-sdk's deduplicate-auth-refresh fix.
+func TestHTTPTransport_AuthDedup(t *testing.T) {
+	var tokenCalls atomic.Int32
+	// release gates the token endpoint so both 401 paths are in-flight
+	// before either refresh completes.
+	release := make(chan struct{})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer stale" {
+			w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="http://`+r.Host+`/.well-known/oauth-protected-resource"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if r.Method == "GET" {
+			// Hold the authorized inbound GET open until the test ends.
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			<-r.Context().Done()
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		reply(w, body, "ok")
+	})
+	mux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"resource":              "http://" + r.Host + "/mcp",
+			"authorization_servers": []string{"http://" + r.Host},
+		})
+	})
+	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(AuthorizationServerMetadata{
+			Issuer:                        "http://" + r.Host,
+			AuthorizationEndpoint:         "http://" + r.Host + "/auth",
+			TokenEndpoint:                 "http://" + r.Host + "/token",
+			ResponseTypesSupported:        []string{"code"},
+			CodeChallengeMethodsSupported: []string{"S256"},
+		})
+	})
+	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		tokenCalls.Add(1)
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(OAuthTokens{AccessToken: "fresh", TokenType: "Bearer", RefreshToken: "rt2"})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	prov := &fakeAuthProvider{tokens: &OAuthTokens{AccessToken: "stale", TokenType: "Bearer", RefreshToken: "rt"}}
+
+	tr := NewHTTPTransport(srv.URL+"/mcp", nil, prov)
+	// Connect kicks off the inbound GET, which hits 401 and starts a refresh.
+	if err := tr.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer tr.Close()
+
+	// Fire a POST concurrently; it also hits 401 and should join the
+	// in-flight refresh rather than start its own.
+	sendErr := make(chan error, 1)
+	go func() {
+		_, err := tr.Send(context.Background(), "tools/list", nil)
+		sendErr <- err
+	}()
+
+	// Wait until at least one refresh is parked at the token endpoint, then
+	// give the second 401 path time to attempt joining before releasing.
+	deadline := time.After(2 * time.Second)
+	for tokenCalls.Load() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("token endpoint never called")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+
+	if err := <-sendErr; err != nil {
+		t.Fatalf("POST after dedup auth failed: %v", err)
+	}
+	if got := tokenCalls.Load(); got != 1 {
+		t.Errorf("token endpoint called %d times, want 1 (dedup)", got)
 	}
 }
 

@@ -191,30 +191,9 @@ func TestContentJSON_ReasoningPart(t *testing.T) {
 	}
 }
 
-func TestContentJSON_ImagePart(t *testing.T) {
+func TestContentJSON_ImageFilePart(t *testing.T) {
 	msg := NewUserMessageWithParts(
-		ImagePart{Image: "base64data", MimeType: "image/png"},
-	)
-
-	data, err := json.Marshal(msg)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var got Message
-	if err := json.Unmarshal(data, &got); err != nil {
-		t.Fatal(err)
-	}
-
-	ip := got.Content.Parts[0].(ImagePart)
-	if ip.Image != "base64data" || ip.MimeType != "image/png" {
-		t.Errorf("image part = %+v", ip)
-	}
-}
-
-func TestContentJSON_FilePart(t *testing.T) {
-	msg := NewUserMessageWithParts(
-		FilePart{Data: "base64pdf", MimeType: "application/pdf", Filename: "doc.pdf"},
+		FilePart{Data: FileDataBytes{Data: "base64data"}, MimeType: "image/png"},
 	)
 
 	data, err := json.Marshal(msg)
@@ -228,8 +207,42 @@ func TestContentJSON_FilePart(t *testing.T) {
 	}
 
 	fp := got.Content.Parts[0].(FilePart)
-	if fp.Data != "base64pdf" || fp.MimeType != "application/pdf" || fp.Filename != "doc.pdf" {
-		t.Errorf("file part = %+v", fp)
+	if fp.Data.(FileDataBytes).Data != "base64data" || fp.MimeType != "image/png" {
+		t.Errorf("image file part = %+v", fp)
+	}
+}
+
+func TestContentJSON_FilePart(t *testing.T) {
+	tests := []struct {
+		name string
+		data FileData
+	}{
+		{"bytes", FileDataBytes{Data: "base64pdf"}},
+		{"url", FileDataURL{URL: "https://example.com/doc.pdf"}},
+		{"reference", FileDataReference{Reference: map[string]any{"fileId": "f_1"}}},
+		{"text", FileDataText{Text: "hello"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := NewUserMessageWithParts(
+				FilePart{Data: tt.data, MimeType: "application/pdf", Filename: "doc.pdf"},
+			)
+			data, err := json.Marshal(msg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got Message
+			if err := json.Unmarshal(data, &got); err != nil {
+				t.Fatal(err)
+			}
+			fp := got.Content.Parts[0].(FilePart)
+			if fp.MimeType != "application/pdf" || fp.Filename != "doc.pdf" {
+				t.Errorf("file part = %+v", fp)
+			}
+			if fp.Data.fileDataType() != tt.data.fileDataType() {
+				t.Errorf("data variant = %q, want %q", fp.Data.fileDataType(), tt.data.fileDataType())
+			}
+		})
 	}
 }
 

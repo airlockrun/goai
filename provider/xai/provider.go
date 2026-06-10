@@ -15,21 +15,13 @@ const (
 
 // responsesModelCatalog lists the xAI model IDs that speak the
 // Responses API (/v1/responses). Mirrors ai-sdk's XaiResponsesModelId
-// union plus goai-preferred reasoning IDs. Model() routes these IDs to
-// the Responses implementation; all other IDs fall through to the Chat
-// Completions / openaicompat path.
+// union. Model() routes these IDs to the Responses implementation; all
+// other IDs fall through to the Chat Completions / openaicompat path.
 var responsesModelCatalog = map[string]bool{
-	"grok-4":                       true,
-	"grok-4-0709":                  true,
-	"grok-4-latest":                true,
-	"grok-4-1-fast-reasoning":      true,
-	"grok-4-1-fast-non-reasoning":  true,
-	"grok-4-fast-reasoning":        true,
-	"grok-4-fast-non-reasoning":    true,
-	"grok-4.20-0309-reasoning":     true,
-	"grok-4.20-0309-non-reasoning": true,
-	"grok-4.20-multi-agent-0309":   true,
-	"grok-code-fast-1":             true,
+	"grok-4.20-non-reasoning": true,
+	"grok-4.20-reasoning":     true,
+	"grok-4.3":                true,
+	"grok-latest":             true,
 }
 
 // isResponsesModel reports whether the given model ID should be routed
@@ -61,12 +53,13 @@ func New(opts Options) *Provider {
 	}
 	return &Provider{
 		compat: openaicompat.New(openaicompat.Options{
-			ProviderID:      "xai",
-			BaseURL:         baseURL,
-			APIKey:          opts.APIKey,
-			Headers:         opts.Headers,
-			RequestModifier: xaiRequestModifier,
-			CallWarner:      xaiChatCallWarner,
+			ProviderID:            "xai",
+			BaseURL:               baseURL,
+			APIKey:                opts.APIKey,
+			Headers:               opts.Headers,
+			RequestModifier:       xaiRequestModifier,
+			CallWarner:            xaiChatCallWarner,
+			ToolSchemaTransformer: sanitizeToolSchema,
 		}),
 		baseURL: baseURL,
 		apiKey:  opts.APIKey,
@@ -151,10 +144,9 @@ func xaiRequestModifier(providerOptions map[string]any) (map[string]any, []strea
 
 func (p *Provider) ID() string { return "xai" }
 
-// Model returns a language model for the given ID. Grok 4 reasoning
-// models (and grok-code-fast-1) are routed to the Responses API; all
-// other models continue to flow through the Chat Completions / openaicompat
-// path for backward compatibility with Grok 3 callers.
+// Model returns a language model for the given ID. The curated
+// Responses-API lineup is routed to /v1/responses; all other IDs flow
+// through the Chat Completions / openaicompat path.
 func (p *Provider) Model(modelID string) stream.Model {
 	if isResponsesModel(modelID) {
 		return p.Responses(modelID)
@@ -190,35 +182,16 @@ func (p *Provider) SpeechModel(modelID string) model.SpeechModel               {
 func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel { return nil }
 func (p *Provider) RerankingModel(modelID string) model.RerankingModel         { return nil }
 
-// Models returns available model IDs. Mirrors ai-sdk's XaiChatModelId
-// union in packages/xai/src/xai-chat-options.ts.
-//
-// Obsolete Grok 2 and beta variants (grok-2, grok-2-mini, grok-beta) are
-// pruned per ai-sdk #55ccbe2 + #64a8fae. The `grok-4-1` bare ID is
-// NOT listed — only -fast-reasoning / -fast-non-reasoning exist
-// (ai-sdk #05f3f36 corrected this).
+// Models returns available model IDs. Mirrors ai-sdk's XaiChatModelId /
+// XaiResponsesModelId autocomplete unions, curated to xAI's current
+// lineup (ai-sdk #15276). The model ID type stays open, so passing any
+// ID the xAI API accepts still works; this list only seeds autocomplete.
 func (p *Provider) Models() []string {
 	return []string{
-		// Grok 4.20 (latest)
-		"grok-4.20-0309-non-reasoning",
-		"grok-4.20-0309-reasoning",
-		"grok-4.20-multi-agent-0309",
-		// Grok 4.1 family
-		"grok-4-1-fast-reasoning",
-		"grok-4-1-fast-non-reasoning",
-		// Grok 4 family
-		"grok-4",
-		"grok-4-0709",
-		"grok-4-latest",
-		"grok-4-fast-reasoning",
-		"grok-4-fast-non-reasoning",
-		// Grok 3 family
-		"grok-3",
-		"grok-3-latest",
-		"grok-3-mini",
-		"grok-3-mini-latest",
-		// Grok code fast
-		"grok-code-fast-1",
+		"grok-4.20-non-reasoning",
+		"grok-4.20-reasoning",
+		"grok-4.3",
+		"grok-latest",
 	}
 }
 

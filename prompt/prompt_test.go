@@ -191,7 +191,7 @@ func TestConvertToLanguageModelPrompt_ImageParts(t *testing.T) {
 				Messages: []message.Message{{
 					Role: message.RoleUser,
 					Content: message.Content{Parts: []message.Part{
-						message.ImagePart{Image: "https://example.com/image.png"},
+						message.FilePart{Data: message.FileDataURL{URL: "https://example.com/image.png"}, MimeType: "image/png"},
 					}},
 				}},
 			},
@@ -239,7 +239,7 @@ func TestConvertToLanguageModelPrompt_ImageParts(t *testing.T) {
 				Messages: []message.Message{{
 					Role: message.RoleUser,
 					Content: message.Content{Parts: []message.Part{
-						message.ImagePart{Image: "https://example.com/image.png", MimeType: "image/png"},
+						message.FilePart{Data: message.FileDataURL{URL: "https://example.com/image.png"}, MimeType: "image/png"},
 					}},
 				}},
 			},
@@ -279,7 +279,7 @@ func TestConvertToLanguageModelPrompt_FileParts(t *testing.T) {
 				Messages: []message.Message{{
 					Role: message.RoleUser,
 					Content: message.Content{Parts: []message.Part{
-						message.FilePart{Data: base64Data, MimeType: "text/plain"},
+						message.FilePart{Data: message.FileDataBytes{Data: base64Data}, MimeType: "text/plain"},
 					}},
 				}},
 			},
@@ -313,7 +313,7 @@ func TestConvertToLanguageModelPrompt_FileParts(t *testing.T) {
 				Messages: []message.Message{{
 					Role: message.RoleUser,
 					Content: message.Content{Parts: []message.Part{
-						message.FilePart{Data: "SGVsbG8=", MimeType: "text/plain", Filename: "hello.txt"},
+						message.FilePart{Data: message.FileDataBytes{Data: "SGVsbG8="}, MimeType: "text/plain", Filename: "hello.txt"},
 					}},
 				}},
 			},
@@ -409,7 +409,7 @@ func TestConvertToLanguageModelPrompt_DataURL(t *testing.T) {
 				Messages: []message.Message{{
 					Role: message.RoleUser,
 					Content: message.Content{Parts: []message.Part{
-						message.ImagePart{Image: "data:image/jpg;base64,/9j/3Q=="},
+						message.FilePart{Data: message.FileDataBytes{Data: "data:image/jpg;base64,/9j/3Q=="}, MimeType: "image/jpeg"},
 					}},
 				}},
 			},

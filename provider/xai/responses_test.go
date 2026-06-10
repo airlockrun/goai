@@ -161,16 +161,14 @@ func TestXaiResponses_ModelID(t *testing.T) {
 	}
 }
 
-// Ensures grok-4* routes to Responses and grok-3* routes to Chat via compat.
+// Ensures the curated Responses lineup routes to Responses and other IDs
+// route to Chat via compat.
 func TestXaiResponses_ModelRouting(t *testing.T) {
 	p := newTestProvider("http://localhost")
 
 	responsesIDs := []string{
-		"grok-4", "grok-4-0709", "grok-4-latest",
-		"grok-4-fast-reasoning", "grok-4-fast-non-reasoning",
-		"grok-4-1-fast-reasoning", "grok-4-1-fast-non-reasoning",
-		"grok-4.20-0309-reasoning", "grok-4.20-0309-non-reasoning",
-		"grok-4.20-multi-agent-0309", "grok-code-fast-1",
+		"grok-4.20-non-reasoning", "grok-4.20-reasoning",
+		"grok-4.3", "grok-latest",
 	}
 	for _, id := range responsesIDs {
 		m := p.Model(id)
@@ -179,7 +177,7 @@ func TestXaiResponses_ModelRouting(t *testing.T) {
 		}
 	}
 
-	chatIDs := []string{"grok-3", "grok-3-mini", "grok-3-latest", "grok-beta"}
+	chatIDs := []string{"grok-4", "grok-3-mini", "grok-code-fast-1", "grok-beta"}
 	for _, id := range chatIDs {
 		m := p.Model(id)
 		if _, ok := m.(*XaiResponsesModel); ok {

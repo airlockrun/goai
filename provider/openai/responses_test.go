@@ -1592,3 +1592,204 @@ func TestResponsesModel_ResponseFailed(t *testing.T) {
 		}
 	})
 }
+
+// allowedTools provider option (ai-sdk #15038): restricts the callable subset
+// via tool_choice without removing tools from the request, and overrides any
+// request-level toolChoice.
+func TestResponsesModel_AllowedTools(t *testing.T) {
+	t.Run("emits allowed_tools tool_choice and overrides toolChoice", func(t *testing.T) {
+		var capturedBody map[string]any
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			json.Unmarshal(body, &capturedBody)
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(createResponsesStreamChunks("Hi", "")))
+		}))
+		defer server.Close()
+
+		model := createTestProvider(server.URL).Responses("gpt-4o")
+		events, _ := model.Stream(context.Background(), &stream.CallOptions{
+			Messages:   []message.Message{message.NewUserMessage("hi")},
+			ToolChoice: "required",
+			ProviderOptions: map[string]any{
+				"allowedTools": map[string]any{
+					"toolNames": []any{"alpha", "beta"},
+					"mode":      "required",
+				},
+			},
+		})
+		for range events {
+		}
+
+		tc, ok := capturedBody["tool_choice"].(map[string]any)
+		if !ok {
+			t.Fatalf("tool_choice not an object: %v", capturedBody["tool_choice"])
+		}
+		if tc["type"] != "allowed_tools" {
+			t.Errorf("type = %v, want allowed_tools", tc["type"])
+		}
+		if tc["mode"] != "required" {
+			t.Errorf("mode = %v, want required", tc["mode"])
+		}
+		tools, _ := tc["tools"].([]any)
+		if len(tools) != 2 {
+			t.Fatalf("expected 2 tools, got %v", tc["tools"])
+		}
+		first, _ := tools[0].(map[string]any)
+		if first["type"] != "function" || first["name"] != "alpha" {
+			t.Errorf("first tool = %v, want {function, alpha}", first)
+		}
+	})
+
+	t.Run("defaults mode to auto", func(t *testing.T) {
+		var capturedBody map[string]any
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			json.Unmarshal(body, &capturedBody)
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(createResponsesStreamChunks("Hi", "")))
+		}))
+		defer server.Close()
+
+		model := createTestProvider(server.URL).Responses("gpt-4o")
+		events, _ := model.Stream(context.Background(), &stream.CallOptions{
+			Messages: []message.Message{message.NewUserMessage("hi")},
+			ProviderOptions: map[string]any{
+				"allowedTools": map[string]any{"toolNames": []any{"alpha"}},
+			},
+		})
+		for range events {
+		}
+
+		tc, _ := capturedBody["tool_choice"].(map[string]any)
+		if tc["mode"] != "auto" {
+			t.Errorf("mode = %v, want auto", tc["mode"])
+		}
+	})
+}
+
+// Early stream error handling for Responses (ai-sdk #15922).
+func TestResponsesModel_EarlyStreamError(t *testing.T) {
+	t.Run("top-level error before output terminates the stream", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			chunks := []string{
+				`{"type":"response.created","response":{"id":"r","model":"gpt-4o"}}`,
+				`{"type":"error","error":{"type":"insufficient_quota","code":"insufficient_quota","message":"You exceeded your current quota"}}`,
+				`{"type":"response.output_text.delta","delta":"should not be seen"}`,
+			}
+			for _, c := range chunks {
+				fmt.Fprintf(w, "data: %s\n\n", c)
+			}
+		}))
+		defer server.Close()
+
+		model := createTestProvider(server.URL).Responses("gpt-4o")
+		events, _ := model.Stream(context.Background(), &stream.CallOptions{
+			Messages: []message.Message{message.NewUserMessage("hi")},
+		})
+
+		var gotErr error
+		var sawTextDelta bool
+		for ev := range events {
+			switch e := ev.Data.(type) {
+			case stream.ErrorEvent:
+				gotErr = e.Error
+			case stream.TextDeltaEvent:
+				sawTextDelta = true
+			}
+		}
+		if gotErr == nil {
+			t.Fatal("expected an error event")
+		}
+		if !strings.Contains(gotErr.Error(), "insufficient_quota") {
+			t.Errorf("error = %v, want insufficient_quota", gotErr)
+		}
+		if sawTextDelta {
+			t.Error("processing should have stopped before the post-error delta")
+		}
+	})
+
+	t.Run("response.failed with error before output terminates the stream", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			chunks := []string{
+				`{"type":"response.created","response":{"id":"r","model":"gpt-4o"}}`,
+				`{"type":"response.failed","response":{"id":"r","error":{"code":"server_error","message":"boom"}}}`,
+			}
+			for _, c := range chunks {
+				fmt.Fprintf(w, "data: %s\n\n", c)
+			}
+		}))
+		defer server.Close()
+
+		model := createTestProvider(server.URL).Responses("gpt-4o")
+		events, _ := model.Stream(context.Background(), &stream.CallOptions{
+			Messages: []message.Message{message.NewUserMessage("hi")},
+		})
+
+		var gotErr error
+		var sawFinish bool
+		for ev := range events {
+			switch e := ev.Data.(type) {
+			case stream.ErrorEvent:
+				gotErr = e.Error
+			case stream.FinishEvent:
+				sawFinish = true
+			}
+		}
+		if gotErr == nil {
+			t.Fatal("expected an error event")
+		}
+		if !strings.Contains(gotErr.Error(), "boom") {
+			t.Errorf("error = %v, want boom", gotErr)
+		}
+		if sawFinish {
+			t.Error("early failure should terminate before finish events")
+		}
+	})
+
+	t.Run("error after output stays a streamed error part", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			chunks := []string{
+				`{"type":"response.created","response":{"id":"r","model":"gpt-4o"}}`,
+				`{"type":"response.output_item.added","output_index":0,"item":{"type":"message"}}`,
+				`{"type":"response.output_text.delta","delta":"hello"}`,
+				`{"type":"error","error":{"type":"server_error","code":"server_error","message":"late boom"}}`,
+				`{"type":"response.completed","response":{"id":"r","usage":{"input_tokens":1,"output_tokens":1}}}`,
+			}
+			for _, c := range chunks {
+				fmt.Fprintf(w, "data: %s\n\n", c)
+			}
+		}))
+		defer server.Close()
+
+		model := createTestProvider(server.URL).Responses("gpt-4o")
+		events, _ := model.Stream(context.Background(), &stream.CallOptions{
+			Messages: []message.Message{message.NewUserMessage("hi")},
+		})
+
+		var gotErr error
+		var sawFinish bool
+		for ev := range events {
+			switch e := ev.Data.(type) {
+			case stream.ErrorEvent:
+				gotErr = e.Error
+			case stream.FinishEvent:
+				sawFinish = true
+			}
+		}
+		if gotErr == nil {
+			t.Fatal("expected a streamed error event")
+		}
+		if !sawFinish {
+			t.Error("a late error should not abort the stream; finish should still arrive")
+		}
+	})
+}

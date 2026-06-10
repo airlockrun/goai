@@ -328,3 +328,80 @@ func TestResponsesTool_MarshalJSON(t *testing.T) {
 // - openai.mcp
 //
 // See: ai-sdk/packages/openai/src/responses/openai-responses-prepare-tools.test.ts
+
+// Namespace tool definitions (ai-sdk #15904). Function tools carrying
+// providerOptions.openai.namespace are grouped under a single namespace tool.
+// Source: ai-sdk/packages/openai/src/responses/openai-responses-prepare-tools.test.ts
+func TestConvertToResponsesTools_Namespace(t *testing.T) {
+	t.Run("groups function tools by namespace", func(t *testing.T) {
+		ns := map[string]any{
+			"openai": map[string]any{
+				"namespace": map[string]any{"name": "search", "description": "search tools"},
+			},
+		}
+		tools := []tool.Tool{
+			{Name: "alpha", Description: "a", InputSchema: json.RawMessage(`{"type":"object","properties":{}}`), ProviderOptions: ns},
+			{Name: "beta", Description: "b", InputSchema: json.RawMessage(`{"type":"object","properties":{}}`), ProviderOptions: ns},
+			{Name: "loose", Description: "c", InputSchema: json.RawMessage(`{"type":"object","properties":{}}`)},
+		}
+
+		result, warnings := convertToResponsesToolsWithWarnings(tools, true)
+		if len(warnings) != 0 {
+			t.Fatalf("unexpected warnings: %v", warnings)
+		}
+		if len(result) != 2 {
+			t.Fatalf("expected 2 wire tools (1 namespace + 1 loose), got %d", len(result))
+		}
+		nsTool, ok := result[0].(*responsesNamespaceTool)
+		if !ok {
+			t.Fatalf("expected *responsesNamespaceTool, got %T", result[0])
+		}
+		if nsTool.Type != "namespace" || nsTool.Name != "search" || nsTool.Description != "search tools" {
+			t.Errorf("unexpected namespace tool: %+v", nsTool)
+		}
+		if len(nsTool.Tools) != 2 || nsTool.Tools[0].Name != "alpha" || nsTool.Tools[1].Name != "beta" {
+			t.Errorf("expected [alpha beta] grouped, got %+v", nsTool.Tools)
+		}
+		if _, ok := result[1].(responsesTool); !ok {
+			t.Errorf("expected loose tool as responsesTool, got %T", result[1])
+		}
+
+		// Namespace tool serializes with nested tools array.
+		b, err := json.Marshal(nsTool)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatal(err)
+		}
+		if m["type"] != "namespace" {
+			t.Errorf("type = %v, want namespace", m["type"])
+		}
+		if inner, _ := m["tools"].([]any); len(inner) != 2 {
+			t.Errorf("expected 2 nested tools in JSON, got %v", m["tools"])
+		}
+	})
+
+	t.Run("warns on conflicting namespace descriptions", func(t *testing.T) {
+		tools := []tool.Tool{
+			{Name: "alpha", InputSchema: json.RawMessage(`{"type":"object","properties":{}}`), ProviderOptions: map[string]any{
+				"openai": map[string]any{"namespace": map[string]any{"name": "x", "description": "first"}},
+			}},
+			{Name: "beta", InputSchema: json.RawMessage(`{"type":"object","properties":{}}`), ProviderOptions: map[string]any{
+				"openai": map[string]any{"namespace": map[string]any{"name": "x", "description": "second"}},
+			}},
+		}
+		result, warnings := convertToResponsesToolsWithWarnings(tools, true)
+		if len(warnings) != 1 {
+			t.Fatalf("expected 1 warning, got %d", len(warnings))
+		}
+		nsTool := result[0].(*responsesNamespaceTool)
+		if nsTool.Description != "first" {
+			t.Errorf("first description should win, got %q", nsTool.Description)
+		}
+		if len(nsTool.Tools) != 2 {
+			t.Errorf("both tools should still be grouped, got %d", len(nsTool.Tools))
+		}
+	})
+}

@@ -4,6 +4,7 @@ package message
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -23,7 +24,6 @@ type ContentType string
 
 const (
 	ContentTypeText                 ContentType = "text"
-	ContentTypeImage                ContentType = "image"
 	ContentTypeFile                 ContentType = "file"
 	ContentTypeToolCall             ContentType = "tool-call"
 	ContentTypeToolResult           ContentType = "tool-result"
@@ -45,28 +45,59 @@ type TextPart struct {
 
 func (TextPart) partType() ContentType { return ContentTypeText }
 
-// ImagePart represents image content.
-type ImagePart struct {
-	Image           string         `json:"image"`              // base64 or URL
-	MimeType        string         `json:"mimeType,omitempty"` // e.g., "image/png"
-	ProviderOptions map[string]any `json:"providerOptions,omitempty"`
-}
-
-func (ImagePart) partType() ContentType { return ContentTypeImage }
-
-// FilePart represents file content. Exactly one of Data or URL should
-// be set: Data carries base64-encoded bytes; URL points to a remote file
-// the provider should fetch (matches ai-sdk's file-url content part and
-// the Anthropic/Gemini url-source variants).
+// FilePart represents file content, including images. Data is a tagged union
+// (inline bytes / remote URL / provider reference / text) mirroring ai-sdk's
+// unified FilePart. Images are file parts whose MimeType has an "image/"
+// prefix.
 type FilePart struct {
-	Data            string         `json:"data,omitempty"`     // base64 encoded (when inline)
-	URL             string         `json:"url,omitempty"`      // remote URL (when hosted)
-	MimeType        string         `json:"mimeType"`           // e.g., "application/pdf"
+	Data            FileData       `json:"data"`
+	MimeType        string         `json:"mimeType"`           // e.g., "application/pdf", "image/png"
 	Filename        string         `json:"filename,omitempty"` // optional filename
 	ProviderOptions map[string]any `json:"providerOptions,omitempty"`
 }
 
 func (FilePart) partType() ContentType { return ContentTypeFile }
+
+// MarshalJSON serializes the part, encoding the nested data union with its
+// "type" discriminant.
+func (p FilePart) MarshalJSON() ([]byte, error) {
+	d, err := marshalFileData(p.Data)
+	if err != nil {
+		return nil, err
+	}
+	type alias struct {
+		Data            json.RawMessage `json:"data"`
+		MimeType        string          `json:"mimeType"`
+		Filename        string          `json:"filename,omitempty"`
+		ProviderOptions map[string]any  `json:"providerOptions,omitempty"`
+	}
+	return json.Marshal(alias{d, p.MimeType, p.Filename, p.ProviderOptions})
+}
+
+// UnmarshalJSON deserializes the part, decoding the discriminated data union.
+func (p *FilePart) UnmarshalJSON(data []byte) error {
+	var a struct {
+		Data            json.RawMessage `json:"data"`
+		MimeType        string          `json:"mimeType"`
+		Filename        string          `json:"filename,omitempty"`
+		ProviderOptions map[string]any  `json:"providerOptions,omitempty"`
+	}
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	p.MimeType = a.MimeType
+	p.Filename = a.Filename
+	p.ProviderOptions = a.ProviderOptions
+	if len(a.Data) == 0 || string(a.Data) == "null" {
+		return errors.New("file part: missing data")
+	}
+	d, err := unmarshalFileData(a.Data)
+	if err != nil {
+		return err
+	}
+	p.Data = d
+	return nil
+}
 
 // ToolCallPart represents a tool invocation by the assistant.
 type ToolCallPart struct {
@@ -460,12 +491,6 @@ func (c *Content) UnmarshalJSON(data []byte) error {
 		switch ContentType(peek.Type) {
 		case ContentTypeText:
 			var p TextPart
-			if err := json.Unmarshal(raw, &p); err != nil {
-				return err
-			}
-			part = p
-		case ContentTypeImage:
-			var p ImagePart
 			if err := json.Unmarshal(raw, &p); err != nil {
 				return err
 			}

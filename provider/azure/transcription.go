@@ -79,7 +79,9 @@ func (m *AzureTranscriptionModel) Transcribe(ctx context.Context, opts model.Tra
 	}
 
 	req.Header.Set("Content-Type", writer.FormDataContentType())
-	req.Header.Set("api-key", m.provider.opts.APIKey)
+	if err := m.provider.setAuth(req); err != nil {
+		return nil, err
+	}
 	for k, v := range opts.Headers {
 		req.Header.Set(k, v)
 	}

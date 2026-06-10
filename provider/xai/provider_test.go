@@ -535,8 +535,8 @@ func TestXaiRequestModifier_Logprobs(t *testing.T) {
 	}
 }
 
-// Verify the Grok 4.x catalog and obsolete-variant prune (ai-sdk
-// #55ccbe2, #64a8fae, #05f3f36).
+// Verify the curated Grok lineup (ai-sdk #15276): only the current
+// autocomplete IDs are advertised, retired variants are gone.
 func TestXaiProvider_ModelsContainsLatest(t *testing.T) {
 	p := New(Options{APIKey: "k"})
 	have := map[string]bool{}
@@ -544,18 +544,22 @@ func TestXaiProvider_ModelsContainsLatest(t *testing.T) {
 		have[m] = true
 	}
 	for _, w := range []string{
-		"grok-4.20-0309-reasoning",
-		"grok-4-1-fast-reasoning",
-		"grok-4",
-		"grok-3-mini",
+		"grok-4.20-non-reasoning",
+		"grok-4.20-reasoning",
+		"grok-4.3",
+		"grok-latest",
 	} {
 		if !have[w] {
 			t.Errorf("Models() missing %q", w)
 		}
 	}
-	for _, obsolete := range []string{"grok-2", "grok-2-mini", "grok-beta", "grok-4-1"} {
-		if have[obsolete] {
-			t.Errorf("Models() still lists obsolete %q", obsolete)
+	for _, retired := range []string{
+		"grok-2", "grok-beta", "grok-3", "grok-3-mini",
+		"grok-4", "grok-4-1-fast-reasoning", "grok-code-fast-1",
+		"grok-4.20-0309-reasoning", "grok-4.20-multi-agent-0309",
+	} {
+		if have[retired] {
+			t.Errorf("Models() still lists retired %q", retired)
 		}
 	}
 }

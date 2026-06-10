@@ -64,6 +64,10 @@ type anthropicRequest struct {
 	// structuredOutputMode == "outputFormat" (ai-sdk #d98d9ba migrated
 	// this from `output_format` → `output_config.format`).
 	OutputConfig *anthropicOutputConfig `json:"output_config,omitempty"`
+
+	// Fallbacks is the server-side fallback chain (ai-sdk #15928), passed
+	// through verbatim from MessagesOptions.Fallbacks.
+	Fallbacks []Fallback `json:"fallbacks,omitempty"`
 }
 
 // anthropicTaskBudget is the wire shape for task_budget.
@@ -412,7 +416,7 @@ func toolMessageToBlocks(msg message.Message) []anthropicContentBlock {
 	var attachments []message.Part
 	for _, part := range msg.Content.Parts {
 		switch part.(type) {
-		case message.TextPart, message.ImagePart, message.FilePart:
+		case message.TextPart, message.FilePart:
 			attachments = append(attachments, part)
 		}
 	}
@@ -449,8 +453,14 @@ func toolMessageToBlocks(msg message.Message) []anthropicContentBlock {
 			block.Content = message.ToolOutputWire(tr.Output)
 		}
 
-		// Part-level cache control, message-level fallback on last tool result.
+		// Cache control precedence: part → tool-result output (set via
+		// tool.toModelOutput's providerOptions, including inner content
+		// parts) → message (last tool result only). Mirrors ai-sdk
+		// PR #15284 (convert-to-anthropic-prompt.ts).
 		cc := getCacheControl(tr.ProviderOptions)
+		if cc == nil {
+			cc = getCacheControl(toolOutputProviderOptions(tr.Output))
+		}
 		if cc == nil && i == len(toolResults)-1 {
 			cc = getCacheControl(msg.ProviderOptions)
 		}
@@ -474,6 +484,33 @@ func convertToolMessages(msg message.Message) []anthropicMessage {
 	return []anthropicMessage{{Role: "user", Content: blocks}}
 }
 
+// toolOutputProviderOptions returns the provider options carried on a
+// tool-result output (set via tool.toModelOutput). The success/error scalar
+// variants carry options at the top level; a ContentOutput carries them on
+// inner items, so return the first item's options. Mirrors ai-sdk PR #15284's
+// outputProviderOptions resolution.
+func toolOutputProviderOptions(o message.ToolResultOutput) map[string]any {
+	switch out := o.(type) {
+	case message.TextOutput:
+		return out.ProviderOptions
+	case message.JSONOutput:
+		return out.ProviderOptions
+	case message.ErrorTextOutput:
+		return out.ProviderOptions
+	case message.ErrorJSONOutput:
+		return out.ProviderOptions
+	case message.ExecutionDeniedOutput:
+		return out.ProviderOptions
+	case message.ContentOutput:
+		for _, it := range out.Value {
+			if len(it.ProviderOptions) > 0 {
+				return it.ProviderOptions
+			}
+		}
+	}
+	return nil
+}
+
 // toolOutputContentParts converts a ContentOutput's items into message
 // parts so the existing convertToAnthropicContent block builder handles
 // images/files identically to other content. Non-content outputs return
@@ -489,13 +526,13 @@ func toolOutputContentParts(o message.ToolResultOutput) []message.Part {
 		case "text":
 			parts = append(parts, message.TextPart{Text: it.Text})
 		case "image-data":
-			parts = append(parts, message.ImagePart{Image: it.Data, MimeType: it.MediaType})
+			parts = append(parts, message.FilePart{Data: message.FileDataBytes{Data: it.Data}, MimeType: it.MediaType})
 		case "image-url":
-			parts = append(parts, message.ImagePart{Image: it.URL})
+			parts = append(parts, message.FilePart{Data: message.FileDataURL{URL: it.URL}})
 		case "file-data":
-			parts = append(parts, message.FilePart{Data: it.Data, MimeType: it.MediaType, Filename: it.Filename})
+			parts = append(parts, message.FilePart{Data: message.FileDataBytes{Data: it.Data}, MimeType: it.MediaType, Filename: it.Filename})
 		case "file-url":
-			parts = append(parts, message.FilePart{URL: it.URL, MimeType: it.MediaType, Filename: it.Filename})
+			parts = append(parts, message.FilePart{Data: message.FileDataURL{URL: it.URL}, MimeType: it.MediaType, Filename: it.Filename})
 		}
 	}
 	return parts
@@ -523,36 +560,30 @@ func convertToAnthropicContent(content message.Content, msgOpts map[string]any) 
 				Type: "text",
 				Text: p.Text,
 			}
-		case message.ImagePart:
-			partOpts = p.ProviderOptions
-			src := &anthropicSource{Type: "base64", MediaType: p.MimeType, Data: p.Image}
-			if strings.HasPrefix(p.Image, "http://") || strings.HasPrefix(p.Image, "https://") {
-				src = &anthropicSource{Type: "url", URL: p.Image}
-			}
-			block = anthropicContentBlock{Type: "image", Source: src}
 		case message.FilePart:
 			partOpts = p.ProviderOptions
+			// Choose the wire source by data variant: inline bytes encode as a
+			// base64/text source, a remote URL encodes as a url source. MimeType
+			// selects image-vs-document block shape; reference/text payloads have
+			// no Anthropic equivalent and are skipped.
+			var src *anthropicSource
+			switch d := p.Data.(type) {
+			case message.FileDataBytes:
+				if p.MimeType == "text/plain" {
+					src = &anthropicSource{Type: "text", MediaType: "text/plain", Data: d.Data}
+				} else {
+					src = &anthropicSource{Type: "base64", MediaType: p.MimeType, Data: d.Data}
+				}
+			case message.FileDataURL:
+				src = &anthropicSource{Type: "url", URL: d.URL}
+			default:
+				// FileDataText and FileDataReference: no Anthropic support.
+				continue
+			}
+
 			if strings.HasPrefix(p.MimeType, "image/") {
-				src := &anthropicSource{Type: "base64", MediaType: p.MimeType, Data: p.Data}
-				if p.URL != "" {
-					src = &anthropicSource{Type: "url", URL: p.URL}
-				}
 				block = anthropicContentBlock{Type: "image", Source: src}
-			} else if p.MimeType == "application/pdf" {
-				src := &anthropicSource{Type: "base64", MediaType: "application/pdf", Data: p.Data}
-				if p.URL != "" {
-					src = &anthropicSource{Type: "url", URL: p.URL}
-				}
-				block = anthropicContentBlock{
-					Type:   "document",
-					Source: src,
-					Title:  p.Filename,
-				}
-			} else if p.MimeType == "text/plain" {
-				src := &anthropicSource{Type: "text", MediaType: "text/plain", Data: p.Data}
-				if p.URL != "" {
-					src = &anthropicSource{Type: "url", URL: p.URL}
-				}
+			} else if p.MimeType == "application/pdf" || p.MimeType == "text/plain" {
 				block = anthropicContentBlock{
 					Type:   "document",
 					Source: src,
@@ -637,7 +668,7 @@ func convertToAnthropicToolsWithWarnings(tools []tool.Tool) ([]any, []string, []
 	var warnings []stream.Warning
 
 	for _, t := range tools {
-		if t.Type == "provider" {
+		if t.IsProviderTool() {
 			hosted, betaHeader, ok := ConvertProviderTool(t)
 			if !ok {
 				warnings = append(warnings, stream.UnsupportedWarning(

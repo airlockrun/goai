@@ -120,17 +120,39 @@ func TestVertexProvider_DefaultLocation(t *testing.T) {
 }
 
 func TestVertexProvider_BaseURL(t *testing.T) {
-	provider := New(Options{
-		ProjectID:   "my-project",
-		Location:    "europe-west4",
-		AccessToken: "test-token",
-	})
-
-	baseURL := provider.baseURL()
-	expected := "https://europe-west4-aiplatform.googleapis.com/v1/projects/my-project/locations/europe-west4"
-
-	if baseURL != expected {
-		t.Errorf("expected base URL %s, got %s", expected, baseURL)
+	tests := []struct {
+		name     string
+		location string
+		want     string
+	}{
+		{
+			name:     "regional location is region-prefixed",
+			location: "europe-west4",
+			want:     "https://europe-west4-aiplatform.googleapis.com/v1/projects/my-project/locations/europe-west4",
+		},
+		{
+			name:     "global location omits region prefix",
+			location: "global",
+			want:     "https://aiplatform.googleapis.com/v1/projects/my-project/locations/global",
+		},
+		{
+			name:     "eu multi-region uses rep host",
+			location: "eu",
+			want:     "https://aiplatform.eu.rep.googleapis.com/v1/projects/my-project/locations/eu",
+		},
+		{
+			name:     "us multi-region uses rep host",
+			location: "us",
+			want:     "https://aiplatform.us.rep.googleapis.com/v1/projects/my-project/locations/us",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := New(Options{ProjectID: "my-project", Location: tc.location, AccessToken: "test-token"})
+			if got := p.baseURL(); got != tc.want {
+				t.Errorf("baseURL() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

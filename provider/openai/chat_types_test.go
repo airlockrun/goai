@@ -58,8 +58,8 @@ func TestConvertToChatMessages_ToolResults(t *testing.T) {
 							ToolName:   "screenshot",
 							Output:     message.TextOutput{Value: "screenshot taken"},
 						},
-						message.ImagePart{
-							Image:    "base64data",
+						message.FilePart{
+							Data:     message.FileDataBytes{Data: "base64data"},
 							MimeType: "image/png",
 						},
 					},
@@ -85,7 +85,7 @@ func TestConvertToChatMessages_ToolResults(t *testing.T) {
 							Output:     message.TextOutput{Value: "contents"},
 						},
 						message.FilePart{
-							Data:     "JVBERi0=",
+							Data:     message.FileDataBytes{Data: "JVBERi0="},
 							MimeType: "application/pdf",
 						},
 					},

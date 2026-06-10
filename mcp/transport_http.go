@@ -46,8 +46,23 @@ type HTTPTransport struct {
 	inboundCancel context.CancelFunc
 	inboundWG     sync.WaitGroup
 
+	// authMu guards authInflight, the single-flight OAuth recovery shared
+	// by the POST and inbound-GET 401 paths so concurrent 401s don't kick
+	// off competing refreshes (rotating refresh tokens would race and
+	// force re-auth). Mirrors ai-sdk's authorizeOnce (mcp-http-transport.ts).
+	authMu       sync.Mutex
+	authInflight *authResult
+
 	closed bool
 	mu     sync.Mutex
+}
+
+// authResult holds the outcome of a shared OAuth recovery; done is closed
+// when the flow completes.
+type authResult struct {
+	done   chan struct{}
+	result AuthResult
+	err    error
 }
 
 // NewHTTPTransport creates a new HTTP transport. authProvider is optional;
@@ -173,6 +188,39 @@ func (t *HTTPTransport) commonHeaders(ctx context.Context, extra http.Header) (h
 	return h, nil
 }
 
+// authorizeOnce runs a single OAuth recovery flow shared across concurrent
+// 401 responses. The first caller starts the flow; later callers block on
+// the same result until it completes, then the slot clears so a future 401
+// can recover again.
+func (t *HTTPTransport) authorizeOnce(ctx context.Context, resourceMetadataURL *url.URL) (AuthResult, error) {
+	t.authMu.Lock()
+	if t.authInflight != nil {
+		inflight := t.authInflight
+		t.authMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-inflight.done:
+			return inflight.result, inflight.err
+		}
+	}
+	inflight := &authResult{done: make(chan struct{})}
+	t.authInflight = inflight
+	t.authMu.Unlock()
+
+	inflight.result, inflight.err = Auth(ctx, t.authProvider, AuthOptions{
+		ServerURL:           t.url,
+		ResourceMetadataURL: resourceMetadataURL,
+	})
+	close(inflight.done)
+
+	t.authMu.Lock()
+	t.authInflight = nil
+	t.authMu.Unlock()
+
+	return inflight.result, inflight.err
+}
+
 // Send posts a JSON-RPC request to the server. Notifications skip the
 // response wait; non-notifications return either the inline result (JSON
 // or SSE) or an error.
@@ -254,7 +302,11 @@ func (t *HTTPTransport) Send(ctx context.Context, method string, params any) (js
 	case strings.Contains(contentType, "text/event-stream"):
 		return t.parseSSEResponse(resp.Body, requestID)
 	default:
-		return nil, fmt.Errorf("MCP HTTP Transport Error: unexpected content type: %s", contentType)
+		return nil, &MCPClientError{
+			Message:    fmt.Sprintf("MCP HTTP Transport Error: unexpected content type: %s", contentType),
+			StatusCode: resp.StatusCode,
+			URL:        t.url,
+		}
 	}
 }
 
@@ -264,7 +316,12 @@ func (t *HTTPTransport) statusError(resp *http.Response) error {
 	if resp.StatusCode == http.StatusNotFound {
 		msg += ". This server does not support HTTP transport. Try using `sse` transport instead"
 	}
-	return errors.New(msg)
+	return &MCPClientError{
+		Message:      msg,
+		StatusCode:   resp.StatusCode,
+		URL:          t.url,
+		ResponseBody: string(body),
+	}
 }
 
 // postWithAuthRetry runs one POST plus, optionally, one auth-on-401 retry
@@ -279,10 +336,7 @@ func (t *HTTPTransport) postWithAuthRetry(ctx context.Context, body []byte) (*ht
 	}
 	resourceMetaURL := ExtractResourceMetadataURL(resp)
 	resp.Body.Close()
-	res, err := Auth(ctx, t.authProvider, AuthOptions{
-		ServerURL:           t.url,
-		ResourceMetadataURL: resourceMetaURL,
-	})
+	res, err := t.authorizeOnce(ctx, resourceMetaURL)
 	if err != nil {
 		return nil, err
 	}
@@ -505,10 +559,7 @@ func (t *HTTPTransport) openInboundOnce(ctx context.Context, resumeID string) (s
 	if resp.StatusCode == http.StatusUnauthorized && t.authProvider != nil {
 		resourceMetaURL := ExtractResourceMetadataURL(resp)
 		resp.Body.Close()
-		res, err := Auth(ctx, t.authProvider, AuthOptions{
-			ServerURL:           t.url,
-			ResourceMetadataURL: resourceMetaURL,
-		})
+		res, err := t.authorizeOnce(ctx, resourceMetaURL)
 		if err != nil || res != AuthResultAuthorized {
 			return "", inboundUnsupported
 		}

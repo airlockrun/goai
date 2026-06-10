@@ -200,17 +200,39 @@ func BuildRequestBody(cfg Config, modelID string, options *stream.CallOptions) (
 	// anthropic message per goai message breaks that pairing.
 	var system string
 	var systemProviderOpts map[string]any
+	var systemSeen bool
+	var midConvSystem bool
 	var messages []anthropicMessage
 
 	for _, block := range groupIntoBlocks(inputMessages) {
 		switch block.Type {
 		case blockSystem:
-			// goai's legacy behavior: last system message wins (silent
-			// overwrite, unlike ai-sdk which throws on multiple).
-			for _, msg := range block.Messages {
+			// First system block flows into the top-level `system` field;
+			// any later block (separated by user/assistant messages) is
+			// emitted inline as a {role:"system"} message, which requires
+			// the mid-conversation-system-2026-04-07 beta. Mirrors ai-sdk's
+			// convert-to-anthropic-prompt.ts system-block handling
+			// (references/ai-sdk PR #15674).
+			if !systemSeen {
+				systemSeen = true
+				msg := block.Messages[0]
 				system = getTextFromContent(msg.Content)
 				systemProviderOpts = msg.ProviderOptions
+				break
 			}
+			midConvSystem = true
+			var content []anthropicContentBlock
+			for _, msg := range block.Messages {
+				content = append(content, anthropicContentBlock{
+					Type:         "text",
+					Text:         getTextFromContent(msg.Content),
+					CacheControl: getCacheControl(msg.ProviderOptions),
+				})
+			}
+			messages = append(messages, anthropicMessage{
+				Role:    "system",
+				Content: content,
+			})
 
 		case blockUser:
 			// Combine all user and tool messages in this block into a
@@ -415,6 +437,14 @@ func BuildRequestBody(cfg Config, modelID string, options *stream.CallOptions) (
 		}
 	}
 
+	// fallbacks — server-side fallback chain (ai-sdk #15928). Passed
+	// through as-is; sets the server-side-fallback-2026-06-01 beta below.
+	fallbacksBeta := false
+	if len(opts.Fallbacks) > 0 {
+		req.Fallbacks = opts.Fallbacks
+		fallbacksBeta = true
+	}
+
 	// structuredOutputMode=outputFormat → output_config.format
 	// (ai-sdk #d98d9ba renamed this from output_format). Only honored when
 	// the configured provider supports native structured output.
@@ -469,6 +499,12 @@ func BuildRequestBody(cfg Config, modelID string, options *stream.CallOptions) (
 		betas = append(betas, opts.AnthropicBeta...)
 	}
 	betas = append(betas, toolBetas...)
+	if midConvSystem {
+		betas = append(betas, "mid-conversation-system-2026-04-07")
+	}
+	if fallbacksBeta {
+		betas = append(betas, "server-side-fallback-2026-06-01")
+	}
 	if len(cfg.ToolBetaMap) > 0 {
 		for _, t := range req.Tools {
 			if typeStr := toolWireType(t); typeStr != "" {

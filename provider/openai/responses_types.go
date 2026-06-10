@@ -84,6 +84,12 @@ type responsesInputItem struct {
 	CallID    string `json:"call_id,omitempty"`
 	Name      string `json:"name,omitempty"`
 	Arguments string `json:"arguments,omitempty"`
+	// Namespace round-trips a deferred tool's logical grouping back to the
+	// model. OpenAI rejects a follow-up function_call that omits the
+	// namespace it originally assigned ("Missing namespace for function_call
+	// ... Round-trip the model's function_call item with its namespace field
+	// included"). ai-sdk #15193.
+	Namespace string `json:"namespace,omitempty"`
 
 	// For function_call_output — string for text, []responsesContentPart for multipart
 	Output any `json:"output,omitempty"`
@@ -143,6 +149,9 @@ func (r responsesInputItem) MarshalJSON() ([]byte, error) {
 		}
 		if r.ID != "" {
 			m["id"] = r.ID
+		}
+		if r.Namespace != "" {
+			m["namespace"] = r.Namespace
 		}
 		return json.Marshal(m)
 	}
@@ -214,7 +223,17 @@ type responsesTool struct {
 	Strict      *bool           `json:"strict,omitempty"` // Pointer to allow explicit false
 }
 
+// responsesNamespaceTool groups function tools under a named namespace so the
+// model can reference them as a logical unit. ai-sdk #15904.
+type responsesNamespaceTool struct {
+	Type        string          `json:"type"` // "namespace"
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Tools       []responsesTool `json:"tools"`
+}
+
 func (responsesTool) isResponsesToolWire()          {}
+func (responsesNamespaceTool) isResponsesToolWire() {}
 func (openaiHostedWebSearch) isResponsesToolWire()  {}
 func (openaiHostedCustom) isResponsesToolWire()     {}
 func (openaiHostedToolSearch) isResponsesToolWire() {}
@@ -249,6 +268,10 @@ type responsesData struct {
 	IncompleteDetails *struct {
 		Reason string `json:"reason"`
 	} `json:"incomplete_details,omitempty"`
+	// Error rides on a response.failed event (ai-sdk #15922). When present
+	// before any output, the stream failed early and surfaces as a
+	// terminating error rather than a streamed error part.
+	Error *responsesError `json:"error,omitempty"`
 }
 
 type responsesItem struct {
@@ -338,15 +361,15 @@ type ConversionResult struct {
 	Warnings []ConversionWarning
 }
 
-func convertToResponsesInput(messages []message.Message, systemMessageMode string) []responsesInputItem {
-	result := convertToResponsesInputWithWarnings(messages, systemMessageMode)
+func convertToResponsesInput(messages []message.Message, systemMessageMode string, passThroughUnsupportedFiles bool) []responsesInputItem {
+	result := convertToResponsesInputWithWarnings(messages, systemMessageMode, passThroughUnsupportedFiles)
 	return result.Input
 }
 
 // convertToResponsesInputWithWarnings converts messages to Responses API input format
 // and returns any warnings generated during conversion.
 // This matches ai-sdk's convertToOpenAIResponsesInput behavior.
-func convertToResponsesInputWithWarnings(messages []message.Message, systemMessageMode string) ConversionResult {
+func convertToResponsesInputWithWarnings(messages []message.Message, systemMessageMode string, passThroughUnsupportedFiles bool) ConversionResult {
 	result := make([]responsesInputItem, 0, len(messages))
 	var warnings []ConversionWarning
 
@@ -383,7 +406,7 @@ func convertToResponsesInputWithWarnings(messages []message.Message, systemMessa
 			item := responsesInputItem{
 				Role: "user",
 			}
-			item.ContentParts = convertToResponsesContentParts(msg.Content)
+			item.ContentParts = convertToResponsesContentParts(msg.Content, passThroughUnsupportedFiles)
 			result = append(result, item)
 		case message.RoleAssistant:
 			// Process parts in order (matching ai-sdk behavior)
@@ -500,11 +523,22 @@ func convertToResponsesInputWithWarnings(messages []message.Message, systemMessa
 					if args == "" {
 						args = "{}"
 					}
+					// Round-trip the namespace the model assigned to a deferred
+					// tool. The read side surfaces it on
+					// providerMetadata.openai.namespace; the write side must
+					// echo it or OpenAI rejects the follow-up. ai-sdk #15193.
+					var namespace string
+					if openaiOpts, ok := p.ProviderOptions["openai"].(map[string]any); ok {
+						if ns, ok := openaiOpts["namespace"].(string); ok {
+							namespace = ns
+						}
+					}
 					result = append(result, responsesInputItem{
 						Type:      "function_call",
 						CallID:    p.ID,
 						Name:      p.Name,
 						Arguments: args,
+						Namespace: namespace,
 					})
 				}
 			}
@@ -532,41 +566,46 @@ func convertToResponsesInputWithWarnings(messages []message.Message, systemMessa
 				switch p := part.(type) {
 				case message.ToolResultPart:
 					toolOutputs = append(toolOutputs, toolOutput{callID: p.ToolCallID, text: message.ToolOutputWire(p.Output)})
-				case message.ImagePart:
-					imageURL := p.Image
-					if !strings.HasPrefix(imageURL, "http") && !strings.HasPrefix(imageURL, "data:") {
-						mime := p.MimeType
-						if mime == "" {
-							mime = "image/png"
-						}
-						imageURL = "data:" + mime + ";base64," + imageURL
-					}
-					attachments = append(attachments, responsesContentPart{
-						Type:     "input_image",
-						ImageURL: imageURL,
-						Detail:   openaiImageDetail(p.ProviderOptions),
-					})
 				case message.FilePart:
-					// ai-sdk #bc01093: file-url in tool output. A FilePart
-					// with URL becomes an input_file with file_url; base64
-					// PDFs still emit file_data.
-					if p.URL != "" {
-						attachments = append(attachments, responsesContentPart{
-							Type:     "input_file",
-							Filename: p.Filename,
-							FileURL:  p.URL,
-						})
-					} else if p.MimeType == "application/pdf" {
-						filename := p.Filename
-						if filename == "" {
-							filename = "document.pdf"
+					switch d := p.Data.(type) {
+					case message.FileDataBytes:
+						if strings.HasPrefix(p.MimeType, "image/") {
+							attachments = append(attachments, responsesContentPart{
+								Type:     "input_image",
+								ImageURL: "data:" + p.MimeType + ";base64," + d.Data,
+								Detail:   openaiImageDetail(p.ProviderOptions),
+							})
+						} else if p.MimeType == "application/pdf" {
+							filename := p.Filename
+							if filename == "" {
+								filename = "document.pdf"
+							}
+							attachments = append(attachments, responsesContentPart{
+								Type:     "input_file",
+								Filename: filename,
+								FileData: "data:application/pdf;base64," + d.Data,
+							})
 						}
-						attachments = append(attachments, responsesContentPart{
-							Type:     "input_file",
-							Filename: filename,
-							FileData: "data:application/pdf;base64," + p.Data,
-						})
+					case message.FileDataURL:
+						// ai-sdk #bc01093: a URL-bearing file in tool output
+						// becomes an input_file with file_url for any media
+						// type; an image URL becomes an input_image.
+						if strings.HasPrefix(p.MimeType, "image/") {
+							attachments = append(attachments, responsesContentPart{
+								Type:     "input_image",
+								ImageURL: d.URL,
+								Detail:   openaiImageDetail(p.ProviderOptions),
+							})
+						} else {
+							attachments = append(attachments, responsesContentPart{
+								Type:     "input_file",
+								Filename: p.Filename,
+								FileURL:  d.URL,
+							})
+						}
 					}
+					// FileDataText / FileDataReference have no Responses tool-
+					// output representation; skip.
 				}
 			}
 
@@ -598,7 +637,7 @@ func convertToResponsesInputWithWarnings(messages []message.Message, systemMessa
 	}
 }
 
-func convertToResponsesContentParts(content message.Content) []responsesContentPart {
+func convertToResponsesContentParts(content message.Content, passThroughUnsupportedFiles bool) []responsesContentPart {
 	// If simple text, return single text part
 	if content.Text != "" && len(content.Parts) == 0 {
 		return []responsesContentPart{
@@ -614,43 +653,59 @@ func convertToResponsesContentParts(content message.Content) []responsesContentP
 				Type: "input_text",
 				Text: p.Text,
 			})
-		case message.ImagePart:
-			imageURL := p.Image
-			// If not already a URL or data URI, wrap base64 data in a data URI.
-			if !strings.HasPrefix(imageURL, "http") && !strings.HasPrefix(imageURL, "data:") {
-				mime := p.MimeType
-				if mime == "" {
-					mime = "image/png"
-				}
-				imageURL = "data:" + mime + ";base64," + imageURL
-			}
-			result = append(result, responsesContentPart{
-				Type:     "input_image",
-				ImageURL: imageURL,
-				Detail:   openaiImageDetail(p.ProviderOptions),
-			})
 		case message.FilePart:
-			// A URL-bearing FilePart maps to input_file with file_url
-			// regardless of mediaType (#bc01093). Base64 file parts are
-			// still restricted to PDF since that's all OpenAI Responses
-			// accepts as file_data.
-			if p.URL != "" {
-				result = append(result, responsesContentPart{
-					Type:     "input_file",
-					Filename: p.Filename,
-					FileURL:  p.URL,
-				})
-			} else if p.MimeType == "application/pdf" {
-				filename := p.Filename
-				if filename == "" {
-					filename = "document.pdf"
+			switch d := p.Data.(type) {
+			case message.FileDataBytes:
+				// Inline bytes. Images become input_image; PDFs become an
+				// input_file with file_data. Base64 file parts are otherwise
+				// restricted to PDF since that's all OpenAI Responses accepts
+				// as file_data, unless passThroughUnsupportedFiles forwards
+				// other media types using their real media type (ai-sdk
+				// #15297).
+				if strings.HasPrefix(p.MimeType, "image/") {
+					result = append(result, responsesContentPart{
+						Type:     "input_image",
+						ImageURL: "data:" + p.MimeType + ";base64," + d.Data,
+						Detail:   openaiImageDetail(p.ProviderOptions),
+					})
+				} else if p.MimeType == "application/pdf" {
+					filename := p.Filename
+					if filename == "" {
+						filename = "document.pdf"
+					}
+					result = append(result, responsesContentPart{
+						Type:     "input_file",
+						Filename: filename,
+						FileData: "data:application/pdf;base64," + d.Data,
+					})
+				} else if passThroughUnsupportedFiles {
+					result = append(result, responsesContentPart{
+						Type:     "input_file",
+						Filename: p.Filename,
+						FileData: "data:" + p.MimeType + ";base64," + d.Data,
+					})
 				}
-				result = append(result, responsesContentPart{
-					Type:     "input_file",
-					Filename: filename,
-					FileData: "data:application/pdf;base64," + p.Data,
-				})
+			case message.FileDataURL:
+				// A URL-bearing file maps to input_file with file_url
+				// regardless of media type (#bc01093); an image URL becomes
+				// input_image.
+				if strings.HasPrefix(p.MimeType, "image/") {
+					result = append(result, responsesContentPart{
+						Type:     "input_image",
+						ImageURL: d.URL,
+						Detail:   openaiImageDetail(p.ProviderOptions),
+					})
+				} else {
+					result = append(result, responsesContentPart{
+						Type:     "input_file",
+						Filename: p.Filename,
+						FileURL:  d.URL,
+					})
+				}
 			}
+			// FileDataText / FileDataReference are not forwarded; even with
+			// passThroughUnsupportedFiles there is no file_data/file_url
+			// bytes to emit. Skip.
 		}
 	}
 	return result
@@ -667,9 +722,13 @@ func convertToResponsesTools(tools []tool.Tool, strictJsonSchema bool) []respons
 func convertToResponsesToolsWithWarnings(tools []tool.Tool, strictJsonSchema bool) ([]responsesToolWire, []stream.Warning) {
 	result := make([]responsesToolWire, 0, len(tools))
 	var warnings []stream.Warning
+	// Function tools carrying providerOptions.openai.namespace are grouped
+	// into a single namespace tool. Tracks each namespace's wire item by
+	// name so subsequent tools append to it. ai-sdk #15904.
+	namespaceTools := make(map[string]*responsesNamespaceTool)
 
 	for _, t := range tools {
-		if t.Type == "provider" {
+		if t.IsProviderTool() {
 			hosted, ok := convertOpenAIProviderTool(t)
 			if !ok {
 				warnings = append(warnings, stream.UnsupportedWarning(
@@ -691,16 +750,60 @@ func convertToResponsesToolsWithWarnings(tools []tool.Tool, strictJsonSchema boo
 		}
 
 		strict := strictJsonSchema
-		result = append(result, responsesTool{
+		fn := responsesTool{
 			Type:        "function",
 			Name:        t.Name,
 			Description: t.Description,
 			Parameters:  schema,
 			Strict:      &strict,
-		})
+		}
+
+		nsName, nsDesc, hasNamespace := toolNamespace(t.ProviderOptions)
+		if !hasNamespace {
+			result = append(result, fn)
+			continue
+		}
+
+		ns, exists := namespaceTools[nsName]
+		if !exists {
+			ns = &responsesNamespaceTool{
+				Type:        "namespace",
+				Name:        nsName,
+				Description: nsDesc,
+			}
+			namespaceTools[nsName] = ns
+			result = append(result, ns)
+		} else if ns.Description != nsDesc {
+			warnings = append(warnings, stream.UnsupportedWarning(
+				"tool",
+				fmt.Sprintf("conflicting descriptions for OpenAI tool namespace %q", nsName),
+			))
+		}
+		ns.Tools = append(ns.Tools, fn)
 	}
 
+	// namespaceTools entries are stored by pointer in result, so the appended
+	// tools above are reflected without a second pass.
 	return result, warnings
+}
+
+// toolNamespace extracts a function tool's namespace grouping from
+// providerOptions.openai.namespace ({name, description}). ai-sdk #15904.
+func toolNamespace(providerOptions map[string]any) (name, description string, ok bool) {
+	openaiOpts, ok := providerOptions["openai"].(map[string]any)
+	if !ok {
+		return "", "", false
+	}
+	ns, ok := openaiOpts["namespace"].(map[string]any)
+	if !ok {
+		return "", "", false
+	}
+	name, _ = ns["name"].(string)
+	description, _ = ns["description"].(string)
+	if name == "" {
+		return "", "", false
+	}
+	return name, description, true
 }
 
 // ensureStrictSchema modifies a JSON schema to be compatible with OpenAI's strict mode:

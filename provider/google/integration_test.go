@@ -195,7 +195,7 @@ func TestIntegration_ImageInput(t *testing.T) {
 				Content: message.Content{
 					Parts: []message.Part{
 						message.TextPart{Text: "What animal is in this image? Answer in one word."},
-						message.ImagePart{Image: imageURL},
+						message.FilePart{Data: message.FileDataURL{URL: imageURL}, MimeType: "image/png"},
 					},
 				},
 			},

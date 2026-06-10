@@ -21,9 +21,12 @@ const (
 // WebSearchOptions configures the xai.web_search hosted tool.
 // Mirrors the ai-sdk argsSchema at packages/xai/src/tool/web-search.ts.
 type WebSearchOptions struct {
-	AllowedDomains           []string `json:"allowedDomains,omitempty"`
-	ExcludedDomains          []string `json:"excludedDomains,omitempty"`
-	EnableImageUnderstanding *bool    `json:"enableImageUnderstanding,omitempty"`
+	AllowedDomains  []string `json:"allowedDomains,omitempty"`
+	ExcludedDomains []string `json:"excludedDomains,omitempty"`
+	// EnableImageSearch lets the model run image search as a separate Web
+	// Search mode, embedding results back as Markdown image embeds.
+	EnableImageSearch        *bool `json:"enableImageSearch,omitempty"`
+	EnableImageUnderstanding *bool `json:"enableImageUnderstanding,omitempty"`
 }
 
 // WebSearch returns a provider-defined xAI web_search tool. Use
@@ -136,6 +139,7 @@ type xaiHostedWebSearch struct {
 	Type                     string   `json:"type"`
 	AllowedDomains           []string `json:"allowed_domains,omitempty"`
 	ExcludedDomains          []string `json:"excluded_domains,omitempty"`
+	EnableImageSearch        *bool    `json:"enable_image_search,omitempty"`
 	EnableImageUnderstanding *bool    `json:"enable_image_understanding,omitempty"`
 }
 
@@ -190,6 +194,7 @@ func convertXaiProviderTool(t tool.Tool) (responsesToolWire, bool) {
 			Type:                     "web_search",
 			AllowedDomains:           args.AllowedDomains,
 			ExcludedDomains:          args.ExcludedDomains,
+			EnableImageSearch:        args.EnableImageSearch,
 			EnableImageUnderstanding: args.EnableImageUnderstanding,
 		}, true
 	case ToolIDXSearch:

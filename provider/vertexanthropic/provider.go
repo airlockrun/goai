@@ -56,23 +56,32 @@ func (p *Provider) ID() string { return "vertex.anthropic" }
 // baseURL returns the Vertex Anthropic endpoint for this provider
 // instance. Mirrors ai-sdk's getBaseURL:
 //
-//	https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/anthropic/models
+//	https://{host}/v1/projects/{project}/locations/{location}/publishers/anthropic/models
 //
-// When Location is "global" the region prefix is omitted.
+// where {host} is derived from Location by vertexHost.
 func (p *Provider) baseURL() string {
 	if p.opts.BaseURL != "" {
 		return strings.TrimRight(p.opts.BaseURL, "/")
 	}
-	if p.opts.Location == "global" {
-		return fmt.Sprintf(
-			"https://aiplatform.googleapis.com/v1/projects/%s/locations/global/publishers/anthropic/models",
-			p.opts.Project,
-		)
-	}
 	return fmt.Sprintf(
-		"https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/anthropic/models",
-		p.opts.Location, p.opts.Project, p.opts.Location,
+		"https://%s/v1/projects/%s/locations/%s/publishers/anthropic/models",
+		vertexHost(p.opts.Location), p.opts.Project, p.opts.Location,
 	)
+}
+
+// vertexHost maps a Vertex location to its API host. "global" uses the
+// region-less host, the "eu" and "us" multi-region locations use the
+// dedicated `.rep.` hosts, and every other location is region-prefixed.
+// Mirrors ai-sdk's getHost (#bb93832).
+func vertexHost(location string) string {
+	switch location {
+	case "global":
+		return "aiplatform.googleapis.com"
+	case "eu", "us":
+		return fmt.Sprintf("aiplatform.%s.rep.googleapis.com", location)
+	default:
+		return fmt.Sprintf("%s-aiplatform.googleapis.com", location)
+	}
 }
 
 // config builds the per-call anthropic.Config with Vertex hooks. Captured

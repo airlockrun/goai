@@ -745,7 +745,7 @@ func TestAnthropicModel_CacheControl_PerPart(t *testing.T) {
 	t.Run("user image part with cache control", func(t *testing.T) {
 		content := message.Content{
 			Parts: []message.Part{
-				message.ImagePart{Image: "abc", MimeType: "image/png", ProviderOptions: ephemeralOpts},
+				message.FilePart{Data: message.FileDataBytes{Data: "abc"}, MimeType: "image/png", ProviderOptions: ephemeralOpts},
 			},
 		}
 		result := convertToAnthropicContent(content, nil)
@@ -1355,5 +1355,157 @@ func TestAnthropicProvider_ModelsContainsLatest(t *testing.T) {
 		if have[obsolete] {
 			t.Errorf("Models() still lists obsolete %q", obsolete)
 		}
+	}
+	// New IDs (ai-sdk PRs #15674 opus-4-8, #15928 fable-5).
+	for _, latest := range []string{"claude-opus-4-8", "claude-fable-5"} {
+		if !have[latest] {
+			t.Errorf("Models() missing %q", latest)
+		}
+	}
+}
+
+// TestAnthropicModel_MidConversationSystem covers ai-sdk PR #15674: the first
+// system block flows into the top-level `system` field; a second system block
+// separated by user/assistant messages is emitted inline as a {role:"system"}
+// message and sets the mid-conversation-system-2026-04-07 beta.
+func TestAnthropicModel_MidConversationSystem(t *testing.T) {
+	t.Run("single system block stays top-level, no beta", func(t *testing.T) {
+		var capturedBody map[string]any
+		var capturedBeta string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedBeta = r.Header.Get("anthropic-beta")
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &capturedBody)
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`data: {"type":"message_stop"}` + "\n\n"))
+		}))
+		defer server.Close()
+
+		model := createTestProvider(server.URL).Model("claude-opus-4-8")
+		events, err := model.Stream(context.Background(), &stream.CallOptions{
+			Messages: []message.Message{
+				message.NewSystemMessage("first system"),
+				message.NewUserMessage("hi"),
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for range events {
+		}
+
+		if capturedBody["system"] != "first system" {
+			t.Errorf("system = %v, want %q", capturedBody["system"], "first system")
+		}
+		msgs, _ := capturedBody["messages"].([]any)
+		for _, m := range msgs {
+			if mm, ok := m.(map[string]any); ok && mm["role"] == "system" {
+				t.Errorf("unexpected inline system message: %v", mm)
+			}
+		}
+		if strings.Contains(capturedBeta, "mid-conversation-system") {
+			t.Errorf("did not expect mid-conversation-system beta, got %q", capturedBeta)
+		}
+	})
+
+	t.Run("second system block goes inline with beta", func(t *testing.T) {
+		var capturedBody map[string]any
+		var capturedBeta string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedBeta = r.Header.Get("anthropic-beta")
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &capturedBody)
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`data: {"type":"message_stop"}` + "\n\n"))
+		}))
+		defer server.Close()
+
+		model := createTestProvider(server.URL).Model("claude-opus-4-8")
+		events, err := model.Stream(context.Background(), &stream.CallOptions{
+			Messages: []message.Message{
+				message.NewSystemMessage("first system"),
+				message.NewUserMessage("hi"),
+				message.NewSystemMessage("second system"),
+				message.NewUserMessage("bye"),
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for range events {
+		}
+
+		if capturedBody["system"] != "first system" {
+			t.Errorf("system = %v, want %q", capturedBody["system"], "first system")
+		}
+		msgs, _ := capturedBody["messages"].([]any)
+		var inlineSystem map[string]any
+		for _, m := range msgs {
+			if mm, ok := m.(map[string]any); ok && mm["role"] == "system" {
+				inlineSystem = mm
+			}
+		}
+		if inlineSystem == nil {
+			t.Fatalf("expected an inline {role:system} message, got %v", msgs)
+		}
+		content, _ := inlineSystem["content"].([]any)
+		if len(content) != 1 {
+			t.Fatalf("inline system content = %v, want one text block", content)
+		}
+		first, _ := content[0].(map[string]any)
+		if first["type"] != "text" || first["text"] != "second system" {
+			t.Errorf("inline system block = %v, want text 'second system'", first)
+		}
+		if !strings.Contains(capturedBeta, "mid-conversation-system-2026-04-07") {
+			t.Errorf("expected mid-conversation-system-2026-04-07 beta, got %q", capturedBeta)
+		}
+	})
+}
+
+// TestAnthropicModel_Fallbacks covers ai-sdk PR #15928: the fallbacks chain is
+// passed through to the wire and sets the server-side-fallback-2026-06-01 beta.
+func TestAnthropicModel_Fallbacks(t *testing.T) {
+	var capturedBody map[string]any
+	var capturedBeta string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedBeta = r.Header.Get("anthropic-beta")
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &capturedBody)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`data: {"type":"message_stop"}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	model := createTestProvider(server.URL).Model("claude-opus-4-8")
+	events, err := model.Stream(context.Background(), &stream.CallOptions{
+		Messages: []message.Message{message.NewUserMessage("hi")},
+		ProviderOptions: map[string]any{
+			"fallbacks": []any{
+				map[string]any{"model": "claude-opus-4-7", "max_tokens": 1000},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range events {
+	}
+
+	fb, ok := capturedBody["fallbacks"].([]any)
+	if !ok || len(fb) != 1 {
+		t.Fatalf("fallbacks = %v, want one entry", capturedBody["fallbacks"])
+	}
+	entry, _ := fb[0].(map[string]any)
+	if entry["model"] != "claude-opus-4-7" {
+		t.Errorf("fallback model = %v, want claude-opus-4-7", entry["model"])
+	}
+	if entry["max_tokens"] != float64(1000) {
+		t.Errorf("fallback max_tokens = %v, want 1000", entry["max_tokens"])
+	}
+	if !strings.Contains(capturedBeta, "server-side-fallback-2026-06-01") {
+		t.Errorf("expected server-side-fallback-2026-06-01 beta, got %q", capturedBeta)
 	}
 }

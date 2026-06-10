@@ -55,8 +55,8 @@ func TestConvertToAnthropicContent_UserMessages(t *testing.T) {
 		content := message.Content{
 			Parts: []message.Part{
 				message.TextPart{Text: "Look at this:"},
-				message.ImagePart{
-					Image:    "base64encodeddata",
+				message.FilePart{
+					Data:     message.FileDataBytes{Data: "base64encodeddata"},
 					MimeType: "image/png",
 				},
 			},
@@ -95,7 +95,7 @@ func TestConvertToAnthropicContent_UserMessages(t *testing.T) {
 		content := message.Content{
 			Parts: []message.Part{
 				message.FilePart{
-					Data:     "cGRmZGF0YQ==",
+					Data:     message.FileDataBytes{Data: "cGRmZGF0YQ=="},
 					MimeType: "application/pdf",
 					Filename: "report.pdf",
 				},
@@ -136,7 +136,7 @@ func TestConvertToAnthropicContent_UserMessages(t *testing.T) {
 		content := message.Content{
 			Parts: []message.Part{
 				message.FilePart{
-					Data:     "Hello, this is a text document.",
+					Data:     message.FileDataBytes{Data: "Hello, this is a text document."},
 					MimeType: "text/plain",
 					Filename: "notes.txt",
 				},
@@ -166,7 +166,7 @@ func TestConvertToAnthropicContent_UserMessages(t *testing.T) {
 		content := message.Content{
 			Parts: []message.Part{
 				message.FilePart{
-					Data:     "aW1hZ2VkYXRh",
+					Data:     message.FileDataBytes{Data: "aW1hZ2VkYXRh"},
 					MimeType: "image/png",
 					Filename: "photo.png",
 				},
@@ -318,8 +318,8 @@ func TestConvertToolMessages(t *testing.T) {
 						ToolName:   "screenshot",
 						Output:     message.TextOutput{Value: "Here is the screenshot"},
 					},
-					message.ImagePart{
-						Image:    "iVBORw0KGgo=",
+					message.FilePart{
+						Data:     message.FileDataBytes{Data: "iVBORw0KGgo="},
 						MimeType: "image/png",
 					},
 				},
@@ -382,7 +382,7 @@ func TestConvertToolMessages(t *testing.T) {
 						Output:     message.TextOutput{Value: "PDF contents"},
 					},
 					message.FilePart{
-						Data:     "JVBERi0xLjQ=",
+						Data:     message.FileDataBytes{Data: "JVBERi0xLjQ="},
 						MimeType: "application/pdf",
 						Filename: "report.pdf",
 					},
@@ -424,8 +424,8 @@ func TestConvertToolMessages(t *testing.T) {
 						Output:     message.TextOutput{Value: "Analysis complete"},
 					},
 					message.TextPart{Text: "Additional context"},
-					message.ImagePart{
-						Image:    "base64data",
+					message.FilePart{
+						Data:     message.FileDataBytes{Data: "base64data"},
 						MimeType: "image/jpeg",
 					},
 				},
@@ -439,7 +439,7 @@ func TestConvertToolMessages(t *testing.T) {
 		if !ok {
 			t.Fatalf("expected content to be []anthropicContentBlock, got %T", block.Content)
 		}
-		// text result + TextPart + ImagePart = 3 blocks
+		// text result + TextPart + image FilePart = 3 blocks
 		if len(contentBlocks) != 3 {
 			t.Fatalf("expected 3 content blocks, got %d", len(contentBlocks))
 		}
@@ -486,8 +486,8 @@ func TestConvertToolMessages(t *testing.T) {
 						ToolName:   "screenshot",
 						Output:     message.TextOutput{Value: "Result text"},
 					},
-					message.ImagePart{
-						Image:    "aW1hZ2U=",
+					message.FilePart{
+						Data:     message.FileDataBytes{Data: "aW1hZ2U="},
 						MimeType: "image/png",
 					},
 				},
@@ -600,6 +600,73 @@ func TestConvertToolMessages_OutputVariantWire(t *testing.T) {
 	})
 }
 
+// TestConvertToolMessages_OutputProviderOptionsCacheControl covers ai-sdk
+// PR #15284: cache_control set on a tool-result output (via
+// tool.toModelOutput's providerOptions, including inner content-output items)
+// is propagated to the anthropic tool_result block.
+func TestConvertToolMessages_OutputProviderOptionsCacheControl(t *testing.T) {
+	ephemeral := map[string]any{
+		"anthropic": map[string]any{"cacheControl": map[string]any{"type": "ephemeral"}},
+	}
+
+	t.Run("scalar output providerOptions", func(t *testing.T) {
+		msg := message.Message{
+			Role: message.RoleTool,
+			Content: message.Content{Parts: []message.Part{
+				message.ToolResultPart{
+					ToolCallID: "id",
+					ToolName:   "t",
+					Output:     message.TextOutput{Value: "cached", ProviderOptions: ephemeral},
+				},
+			}},
+		}
+		block := convertToolMessages(msg)[0].Content[0]
+		if block.CacheControl == nil || block.CacheControl.Type != "ephemeral" {
+			t.Errorf("CacheControl = %+v, want ephemeral", block.CacheControl)
+		}
+	})
+
+	t.Run("content output inner item providerOptions", func(t *testing.T) {
+		msg := message.Message{
+			Role: message.RoleTool,
+			Content: message.Content{Parts: []message.Part{
+				message.ToolResultPart{
+					ToolCallID: "id",
+					ToolName:   "t",
+					Output: message.ContentOutput{Value: []message.ToolContentItem{
+						{Type: "text", Text: "hi", ProviderOptions: ephemeral},
+					}},
+				},
+			}},
+		}
+		block := convertToolMessages(msg)[0].Content[0]
+		if block.CacheControl == nil || block.CacheControl.Type != "ephemeral" {
+			t.Errorf("CacheControl = %+v, want ephemeral", block.CacheControl)
+		}
+	})
+
+	t.Run("part providerOptions wins over output", func(t *testing.T) {
+		oneHour := map[string]any{
+			"anthropic": map[string]any{"cacheControl": map[string]any{"type": "ephemeral", "ttl": "1h"}},
+		}
+		msg := message.Message{
+			Role: message.RoleTool,
+			Content: message.Content{Parts: []message.Part{
+				message.ToolResultPart{
+					ToolCallID:      "id",
+					ToolName:        "t",
+					ProviderOptions: oneHour,
+					Output:          message.TextOutput{Value: "cached", ProviderOptions: ephemeral},
+				},
+			}},
+		}
+		block := convertToolMessages(msg)[0].Content[0]
+		if block.CacheControl == nil || block.CacheControl.TTL != "1h" {
+			t.Errorf("CacheControl = %+v, want part-level 1h", block.CacheControl)
+		}
+	})
+}
+
 // Tool conversion tests are in tools_test.go
 
 func TestGetTextFromContent(t *testing.T) {
@@ -630,7 +697,7 @@ func TestGetTextFromContent(t *testing.T) {
 	t.Run("should return empty string for no text", func(t *testing.T) {
 		content := message.Content{
 			Parts: []message.Part{
-				message.ImagePart{Image: "data"},
+				message.FilePart{Data: message.FileDataBytes{Data: "data"}, MimeType: "image/png"},
 			},
 		}
 
@@ -643,15 +710,14 @@ func TestGetTextFromContent(t *testing.T) {
 }
 
 // TestConvertToAnthropicContent_URLSources verifies the url-source
-// variants that ai-sdk emits for FilePart/ImagePart when the payload is
-// remotely hosted rather than inlined (a FilePart with URL set, or an
-// ImagePart whose Image is an http/https URL). Matches the switch in
+// variants that ai-sdk emits for a FilePart whose payload is remotely
+// hosted (FileDataURL) rather than inlined. Matches the switch in
 // ai-sdk/packages/anthropic/src/convert-to-anthropic-messages-prompt.ts
-// "case 'file'" / "case 'image'" url branches.
+// "case 'file'" url branches.
 func TestConvertToAnthropicContent_URLSources(t *testing.T) {
-	t.Run("ImagePart with http URL produces url source", func(t *testing.T) {
+	t.Run("image FilePart with URL produces image/url source", func(t *testing.T) {
 		content := message.Content{Parts: []message.Part{
-			message.ImagePart{Image: "https://example.com/cat.png", MimeType: "image/png"},
+			message.FilePart{Data: message.FileDataURL{URL: "https://example.com/cat.png"}, MimeType: "image/png"},
 		}}
 		blocks := convertToAnthropicContent(content, nil)
 		if len(blocks) != 1 || blocks[0].Type != "image" {
@@ -670,7 +736,7 @@ func TestConvertToAnthropicContent_URLSources(t *testing.T) {
 
 	t.Run("FilePart (pdf) with URL produces document/url source", func(t *testing.T) {
 		content := message.Content{Parts: []message.Part{
-			message.FilePart{URL: "https://example.com/doc.pdf", MimeType: "application/pdf", Filename: "doc.pdf"},
+			message.FilePart{Data: message.FileDataURL{URL: "https://example.com/doc.pdf"}, MimeType: "application/pdf", Filename: "doc.pdf"},
 		}}
 		blocks := convertToAnthropicContent(content, nil)
 		if len(blocks) != 1 || blocks[0].Type != "document" {
@@ -683,7 +749,7 @@ func TestConvertToAnthropicContent_URLSources(t *testing.T) {
 
 	t.Run("FilePart (image/*) with URL produces image/url source", func(t *testing.T) {
 		content := message.Content{Parts: []message.Part{
-			message.FilePart{URL: "https://example.com/pic.jpg", MimeType: "image/jpeg"},
+			message.FilePart{Data: message.FileDataURL{URL: "https://example.com/pic.jpg"}, MimeType: "image/jpeg"},
 		}}
 		blocks := convertToAnthropicContent(content, nil)
 		if len(blocks) != 1 || blocks[0].Type != "image" {
@@ -696,7 +762,7 @@ func TestConvertToAnthropicContent_URLSources(t *testing.T) {
 
 	t.Run("base64 FilePart still emits base64 source", func(t *testing.T) {
 		content := message.Content{Parts: []message.Part{
-			message.FilePart{Data: "base64data", MimeType: "application/pdf"},
+			message.FilePart{Data: message.FileDataBytes{Data: "base64data"}, MimeType: "application/pdf"},
 		}}
 		blocks := convertToAnthropicContent(content, nil)
 		if blocks[0].Source.Type != "base64" {
@@ -714,7 +780,7 @@ func TestConvertToolMessages_MultipartWithURLFile(t *testing.T) {
 		Role: message.RoleTool,
 		Content: message.Content{Parts: []message.Part{
 			message.ToolResultPart{ToolCallID: "call-1", ToolName: "fetch", Output: message.TextOutput{Value: "ok"}},
-			message.FilePart{URL: "https://example.com/report.pdf", MimeType: "application/pdf", Filename: "report.pdf"},
+			message.FilePart{Data: message.FileDataURL{URL: "https://example.com/report.pdf"}, MimeType: "application/pdf", Filename: "report.pdf"},
 		}},
 	}
 	out := convertToolMessages(msg)

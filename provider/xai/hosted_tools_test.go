@@ -22,7 +22,7 @@ func TestConvertXaiProviderTool_WebSearch(t *testing.T) {
 		if got["type"] != "web_search" {
 			t.Errorf("type: got %v, want 'web_search'", got["type"])
 		}
-		for _, k := range []string{"allowed_domains", "excluded_domains", "enable_image_understanding"} {
+		for _, k := range []string{"allowed_domains", "excluded_domains", "enable_image_search", "enable_image_understanding"} {
 			if _, present := got[k]; present {
 				t.Errorf("%q should be omitted, got %v", k, got[k])
 			}
@@ -34,6 +34,7 @@ func TestConvertXaiProviderTool_WebSearch(t *testing.T) {
 		wire, ok := convertXaiProviderTool(WebSearchWith(WebSearchOptions{
 			AllowedDomains:           []string{"example.com", "other.dev"},
 			ExcludedDomains:          []string{"blocked.com"},
+			EnableImageSearch:        &enable,
 			EnableImageUnderstanding: &enable,
 		}))
 		if !ok {
@@ -52,6 +53,9 @@ func TestConvertXaiProviderTool_WebSearch(t *testing.T) {
 		excluded, _ := got["excluded_domains"].([]any)
 		if len(excluded) != 1 || excluded[0] != "blocked.com" {
 			t.Errorf("excluded_domains: got %v", excluded)
+		}
+		if got["enable_image_search"] != true {
+			t.Errorf("enable_image_search: got %v", got["enable_image_search"])
 		}
 		if got["enable_image_understanding"] != true {
 			t.Errorf("enable_image_understanding: got %v", got["enable_image_understanding"])

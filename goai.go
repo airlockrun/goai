@@ -64,9 +64,18 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 		currentInput := input
 		currentInput.Messages = allMessages
 
+		if input.OnStart != nil {
+			input.OnStart(stream.StartData{Messages: allMessages})
+		}
+
+		stepNumber := 0
 		for {
 			// Build CallOptions from Input (this is what providers receive)
 			callOptions := buildCallOptions(&currentInput)
+
+			if input.OnStepStart != nil {
+				input.OnStepStart(stream.StepStartData{StepNumber: stepNumber, Messages: currentInput.Messages})
+			}
 
 			// Get events channel from model
 			events, err := currentInput.Model.Stream(ctx, callOptions)
@@ -225,9 +234,9 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 			// Append step messages to all messages
 			allMessages = append(allMessages, stepMessages...)
 
-			// Call OnStepFinish callback
-			if input.OnStepFinish != nil {
-				input.OnStepFinish(&stepResult)
+			// Call OnStepEnd callback
+			if input.OnStepEnd != nil {
+				input.OnStepEnd(&stepResult)
 			}
 
 			// Check stop conditions
@@ -251,6 +260,7 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 
 			// Update messages for next iteration
 			currentInput.Messages = allMessages
+			stepNumber++
 		}
 
 		// Parse output only if the last step was finished with "stop"
@@ -281,8 +291,8 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 			},
 		}
 
-		// Call OnFinish callback
-		if input.OnFinish != nil {
+		// Call OnEnd callback
+		if input.OnEnd != nil {
 			mu.Lock()
 			stepsData := make([]stream.StepResultData, len(allSteps))
 			for i := range allSteps {
@@ -291,7 +301,7 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 			finalStep := &allSteps[len(allSteps)-1]
 			mu.Unlock()
 
-			input.OnFinish(stream.OnFinishData{
+			input.OnEnd(stream.OnEndData{
 				Steps:      stepsData,
 				TotalUsage: totalUsage,
 				FinalStep:  finalStep,
@@ -425,9 +435,18 @@ func GenerateText(ctx context.Context, input stream.Input) (*GenerateTextResult,
 	currentInput := input
 	currentInput.Messages = allMessages
 
+	if input.OnStart != nil {
+		input.OnStart(stream.StartData{Messages: allMessages})
+	}
+
+	stepNumber := 0
 	for {
 		// Build CallOptions from Input (this is what providers receive)
 		callOptions := buildCallOptions(&currentInput)
+
+		if input.OnStepStart != nil {
+			input.OnStepStart(stream.StepStartData{StepNumber: stepNumber, Messages: currentInput.Messages})
+		}
 
 		// Get events channel from model
 		events, err := currentInput.Model.Stream(ctx, callOptions)
@@ -567,9 +586,9 @@ func GenerateText(ctx context.Context, input stream.Input) (*GenerateTextResult,
 		// Add step to list
 		allSteps = append(allSteps, stepResult)
 
-		// Call OnStepFinish callback
-		if input.OnStepFinish != nil {
-			input.OnStepFinish(&stepResult)
+		// Call OnStepEnd callback
+		if input.OnStepEnd != nil {
+			input.OnStepEnd(&stepResult)
 		}
 
 		// Check stop conditions
@@ -589,6 +608,7 @@ func GenerateText(ctx context.Context, input stream.Input) (*GenerateTextResult,
 
 		// Update messages for next iteration
 		currentInput.Messages = allMessages
+		stepNumber++
 	}
 
 	// Get final step
@@ -624,13 +644,13 @@ func GenerateText(ctx context.Context, input stream.Input) (*GenerateTextResult,
 		},
 	}
 
-	// Call OnFinish callback
-	if input.OnFinish != nil {
+	// Call OnEnd callback
+	if input.OnEnd != nil {
 		stepsData := make([]stream.StepResultData, len(allSteps))
 		for i := range allSteps {
 			stepsData[i] = &allSteps[i]
 		}
-		input.OnFinish(stream.OnFinishData{
+		input.OnEnd(stream.OnEndData{
 			Steps:      stepsData,
 			TotalUsage: totalUsage,
 			FinalStep:  &finalStep,
@@ -646,9 +666,15 @@ func GenerateText(ctx context.Context, input stream.Input) (*GenerateTextResult,
 // When Output is set, its ResponseFormat is sent on every step (matching
 // ai-sdk's generate-text.ts:578).
 func buildCallOptions(input *stream.Input) *stream.CallOptions {
+	messages := input.Messages
+	// Instructions reaches providers as the leading system message; goai's
+	// converters derive their system block from RoleSystem messages.
+	if input.Instructions != "" {
+		messages = append([]message.Message{message.NewSystemMessage(input.Instructions)}, messages...)
+	}
 	opts := &stream.CallOptions{
-		Messages:         input.Messages,
-		Tools:            input.Tools.Ordered(input.ActiveTools),
+		Messages:         messages,
+		Tools:            tool.ApplyToolOrder(input.Tools.Ordered(input.ActiveTools), input.ToolOrder),
 		ToolChoice:       input.ToolChoice,
 		Temperature:      input.Temperature,
 		TopP:             input.TopP,

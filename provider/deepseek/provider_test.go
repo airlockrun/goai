@@ -347,3 +347,58 @@ func TestDeepSeekRequestModifier_NoThinking(t *testing.T) {
 		t.Error("expected enable_thinking to not be set when thinking config is nil")
 	}
 }
+
+// Mirrors ai-sdk #14743 / #15235: reasoningEffort passes through to
+// reasoning_effort and is dropped when thinking is disabled.
+func TestDeepSeekRequestModifier_ReasoningEffort(t *testing.T) {
+	tests := []struct {
+		name      string
+		options   map[string]any
+		wantValue any
+		wantSet   bool
+	}{
+		{
+			name:      "passes effort through",
+			options:   map[string]any{"reasoningEffort": "max"},
+			wantValue: "max",
+			wantSet:   true,
+		},
+		{
+			name: "passes effort with thinking enabled",
+			options: map[string]any{
+				"reasoningEffort": "xhigh",
+				"thinking":        map[string]any{"type": "enabled"},
+			},
+			wantValue: "xhigh",
+			wantSet:   true,
+		},
+		{
+			name: "suppresses effort when thinking disabled",
+			options: map[string]any{
+				"reasoningEffort": "high",
+				"thinking":        map[string]any{"type": "disabled"},
+			},
+			wantSet: false,
+		},
+		{
+			name:    "no effort set",
+			options: map[string]any{},
+			wantSet: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			extra, _, err := deepseekRequestModifier(tt.options)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			got, ok := extra["reasoning_effort"]
+			if ok != tt.wantSet {
+				t.Fatalf("reasoning_effort set = %v, want %v", ok, tt.wantSet)
+			}
+			if tt.wantSet && got != tt.wantValue {
+				t.Errorf("reasoning_effort = %v, want %v", got, tt.wantValue)
+			}
+		})
+	}
+}

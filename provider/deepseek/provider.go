@@ -62,6 +62,12 @@ func deepseekRequestModifier(providerOptions map[string]any) (map[string]any, []
 		}
 	}
 
+	// reasoning_effort tunes thinking strength on V4 reasoning models. It is
+	// suppressed when thinking is disabled, matching ai-sdk #15235.
+	if opts.ReasoningEffort != "" && !(opts.Thinking != nil && opts.Thinking.Type == "disabled") {
+		extra["reasoning_effort"] = opts.ReasoningEffort
+	}
+
 	return extra, nil, nil
 }
 

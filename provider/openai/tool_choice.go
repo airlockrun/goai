@@ -167,7 +167,7 @@ func resolveResponsesToolChoiceByName(name string, tools []tool.Tool) any {
 		if t.Name != name && t.ProviderID != name {
 			continue
 		}
-		if t.Type == "provider" {
+		if t.IsProviderTool() {
 			switch t.ProviderID {
 			case ToolIDWebSearch:
 				return map[string]any{"type": "web_search"}

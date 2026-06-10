@@ -513,6 +513,47 @@ func TestBedrockModel_ResponseFormat(t *testing.T) {
 	})
 }
 
+// Bedrock rejects output_config.format for claude-opus-4-7, so it falls back
+// to the synthetic JSON tool even when structuredOutputMode=outputFormat is
+// requested. Other Anthropic models keep the native output_config.format path.
+// Mirrors ai-sdk #15288.
+func TestBedrockModel_StructuredOutputOpus47(t *testing.T) {
+	p := New(Options{AccessKeyID: "k", SecretAccessKey: "s", Region: "us-east-1"})
+	schema := json.RawMessage(`{"type":"object","properties":{"x":{"type":"string"}}}`)
+
+	hasOutputConfig := func(modelID string) bool {
+		m := p.Model(modelID).(*BedrockLanguageModel)
+		raw, _, err := m.buildAnthropicRequest(&stream.CallOptions{
+			Messages:        []message.Message{message.NewUserMessage("hi")},
+			ResponseFormat:  &stream.ResponseFormat{Type: "json", Schema: schema},
+			ProviderOptions: map[string]any{"structuredOutputMode": "outputFormat"},
+		})
+		if err != nil {
+			t.Fatalf("%s: %v", modelID, err)
+		}
+		var body map[string]any
+		json.Unmarshal(raw, &body)
+		_, ok := body["output_config"]
+		return ok
+	}
+
+	tests := []struct {
+		modelID       string
+		wantOutputCfg bool
+	}{
+		{"anthropic.claude-opus-4-7", false},
+		{"us.anthropic.claude-opus-4-7", false},
+		{"anthropic.claude-opus-4-6-v1", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.modelID, func(t *testing.T) {
+			if got := hasOutputConfig(tt.modelID); got != tt.wantOutputCfg {
+				t.Errorf("output_config present = %v, want %v", got, tt.wantOutputCfg)
+			}
+		})
+	}
+}
+
 // Exercises ai-sdk PRs #df099b9 (serviceTier), #b128d9b (cacheControl TTL),
 // #91f8777 (tool strict mode), #a1a8091 (tool_choice passthrough).
 func TestBedrockAnthropic_RequestBodyWiring(t *testing.T) {

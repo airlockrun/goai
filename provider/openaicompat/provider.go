@@ -77,6 +77,12 @@ type Options struct {
 	// a schema request falls back to "json_object" plus prompt injection.
 	// Mirrors ai-sdk's OpenAICompatibleChatConfig.supportsStructuredOutputs.
 	SupportsStructuredOutputs bool
+
+	// ToolSchemaTransformer, when set, rewrites each tool's JSON-schema
+	// parameters before they reach the request body. Providers whose API
+	// rejects standard schema keywords use it to sanitize (e.g. xAI strips
+	// additionalProperties:false).
+	ToolSchemaTransformer func(json.RawMessage) json.RawMessage
 }
 
 // Provider implements an OpenAI-compatible provider.
@@ -269,7 +275,7 @@ func (m *CompatModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 
 	// Add tools (already ordered by core)
 	if len(options.Tools) > 0 {
-		req.Tools = convertToTools(options.Tools)
+		req.Tools = convertToTools(options.Tools, m.provider.opts.ToolSchemaTransformer)
 	}
 
 	// Translate goai's loose ToolChoice (bare strings or ai-sdk-shaped objects)
