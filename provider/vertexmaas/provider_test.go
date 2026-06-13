@@ -46,7 +46,17 @@ func TestProvider_BaseURL(t *testing.T) {
 		{
 			name: "regional location",
 			opts: Options{Project: "test-project", Location: "us-central1", AccessToken: "t"},
-			want: "https://aiplatform.googleapis.com/v1/projects/test-project/locations/us-central1/endpoints/openapi",
+			want: "https://us-central1-aiplatform.googleapis.com/v1/projects/test-project/locations/us-central1/endpoints/openapi",
+		},
+		{
+			name: "eu multi-region",
+			opts: Options{Project: "test-project", Location: "eu", AccessToken: "t"},
+			want: "https://aiplatform.eu.rep.googleapis.com/v1/projects/test-project/locations/eu/endpoints/openapi",
+		},
+		{
+			name: "us multi-region",
+			opts: Options{Project: "test-project", Location: "us", AccessToken: "t"},
+			want: "https://aiplatform.us.rep.googleapis.com/v1/projects/test-project/locations/us/endpoints/openapi",
 		},
 		{
 			name: "BaseURL override",

@@ -25,6 +25,7 @@ const (
 	ToolIDComputer20241022        = "anthropic.computer_20241022"
 	ToolIDComputer20250124        = "anthropic.computer_20250124"
 	ToolIDComputer20251124        = "anthropic.computer_20251124"
+	ToolIDAdvisor20260301         = "anthropic.advisor_20260301"
 )
 
 // CodeExecution returns a provider-defined tool that enables Anthropic's
@@ -249,6 +250,40 @@ func WebSearch20250305With(opts WebSearchOptions) tool.Tool {
 	}
 }
 
+// AdvisorOptions configures the anthropic.advisor_20260301 hosted tool.
+// Mirrors the ai-sdk argsSchema at
+// packages/anthropic/src/tool/advisor_20260301.ts. A faster, lower-cost
+// executor model consults a higher-intelligence advisor model mid-generation
+// for strategic guidance.
+type AdvisorOptions struct {
+	// Model is the advisor model ID (e.g. "claude-opus-4-7"). Required.
+	// The advisor must be at least as capable as the executor.
+	Model string `json:"model"`
+
+	// MaxUses caps the number of advisor calls in a single request.
+	MaxUses int `json:"maxUses,omitempty"`
+
+	// Caching configures ephemeral caching of the advisor's view.
+	Caching *AdvisorCaching `json:"caching,omitempty"`
+}
+
+// AdvisorCaching configures ephemeral caching for the advisor tool.
+type AdvisorCaching struct {
+	Type string `json:"type"` // "ephemeral"
+	TTL  string `json:"ttl"`  // "5m" | "1h"
+}
+
+// Advisor returns a provider-defined Anthropic advisor_20260301 tool
+// (requires the advisor-tool-2026-03-01 beta on the direct Anthropic API).
+func Advisor(opts AdvisorOptions) tool.Tool {
+	args, _ := json.Marshal(opts)
+	return tool.Tool{
+		Type:       "provider",
+		ProviderID: ToolIDAdvisor20260301,
+		Args:       args,
+	}
+}
+
 // Wire-format shapes for each hosted tool. Each type field is the
 // Anthropic API identifier; the `name` is the surface name the model
 // will invoke.
@@ -323,6 +358,14 @@ type anthropicHostedComputer20251124 struct {
 	DisplayHeightPx int    `json:"display_height_px"`
 	DisplayNumber   *int   `json:"display_number,omitempty"`
 	EnableZoom      *bool  `json:"enable_zoom,omitempty"`
+}
+
+type anthropicHostedAdvisor20260301 struct {
+	Type    string          `json:"type"`
+	Name    string          `json:"name"`
+	Model   string          `json:"model"`
+	MaxUses int             `json:"max_uses,omitempty"`
+	Caching *AdvisorCaching `json:"caching,omitempty"`
 }
 
 type anthropicHostedWebSearch20250305 struct {
@@ -449,6 +492,16 @@ func ConvertProviderTool(t tool.Tool) (any, string, bool) {
 			DisplayNumber:   args.DisplayNumber,
 			EnableZoom:      args.EnableZoom,
 		}, "computer-use-2025-11-24", true
+	case ToolIDAdvisor20260301:
+		var args AdvisorOptions
+		_ = json.Unmarshal(t.Args, &args)
+		return anthropicHostedAdvisor20260301{
+			Type:    "advisor_20260301",
+			Name:    "advisor",
+			Model:   args.Model,
+			MaxUses: args.MaxUses,
+			Caching: args.Caching,
+		}, "advisor-tool-2026-03-01", true
 	case ToolIDWebSearch20250305:
 		var args WebSearchOptions
 		_ = json.Unmarshal(t.Args, &args)

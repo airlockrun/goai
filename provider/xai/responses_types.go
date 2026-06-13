@@ -409,19 +409,10 @@ func convertToResponsesInput(messages []message.Message) []responsesInputItem {
 				if !ok {
 					continue
 				}
-				output := ""
-				switch v := tr.Result.(type) {
-				case string:
-					output = v
-				default:
-					if b, err := json.Marshal(v); err == nil {
-						output = string(b)
-					}
-				}
 				result = append(result, responsesInputItem{
 					Type:   "function_call_output",
 					CallID: tr.ToolCallID,
-					Output: output,
+					Output: message.ToolOutputWire(tr.Output),
 				})
 			}
 		}
@@ -443,33 +434,30 @@ func convertToResponsesContentParts(content message.Content) []responsesContentP
 				Type: "input_text",
 				Text: p.Text,
 			})
-		case message.ImagePart:
-			imageURL := p.Image
-			if !strings.HasPrefix(imageURL, "http") && !strings.HasPrefix(imageURL, "data:") {
-				mime := p.MimeType
-				if mime == "" {
-					mime = "image/jpeg"
-				}
-				imageURL = "data:" + mime + ";base64," + imageURL
-			}
-			result = append(result, responsesContentPart{
-				Type:     "input_image",
-				ImageURL: imageURL,
-			})
 		case message.FilePart:
-			// xAI Responses API: non-image documents (PDF, text, CSV, …)
-			// are supported only via URL or a Files-API reference; inline
-			// bytes for non-image files are rejected by the upstream API.
-			// ai-sdk #14805. URL-bearing FileParts emit `input_file`;
-			// inline-bytes non-image parts are dropped silently (no
-			// downstream error path from this helper today — same
-			// behavior as before this commit, which had no FilePart case
-			// at all).
-			if p.URL != "" {
-				result = append(result, responsesContentPart{
-					Type:    "input_file",
-					FileURL: p.URL,
-				})
+			isImage := strings.HasPrefix(p.MimeType, "image/")
+			switch d := p.Data.(type) {
+			case message.FileDataBytes:
+				// Inline images become a base64 data URL; xAI rejects inline
+				// bytes for non-image files (ai-sdk #14805), so they drop.
+				if isImage {
+					mime := p.MimeType
+					if mime == "" {
+						mime = "image/jpeg"
+					}
+					result = append(result, responsesContentPart{
+						Type:     "input_image",
+						ImageURL: "data:" + mime + ";base64," + d.Data,
+					})
+				}
+			case message.FileDataURL:
+				// Non-image documents (PDF, text, CSV, …) are supported via
+				// URL; images go through input_image. ai-sdk #14805.
+				if isImage {
+					result = append(result, responsesContentPart{Type: "input_image", ImageURL: d.URL})
+				} else {
+					result = append(result, responsesContentPart{Type: "input_file", FileURL: d.URL})
+				}
 			}
 		}
 	}
@@ -509,7 +497,7 @@ func normalizeResponsesToolChoiceWithWarnings(choice any, tools []tool.Tool) (an
 		if tl.Name != name && tl.ProviderID != name {
 			continue
 		}
-		if tl.Type == "provider" && isXaiHostedToolID(tl.ProviderID) {
+		if tl.IsProviderTool() && isXaiHostedToolID(tl.ProviderID) {
 			// xAI rejects a forced server-side hosted tool.
 			warning := stream.UnsupportedWarning(
 				"toolChoice",
@@ -532,7 +520,7 @@ func convertToResponsesToolsWithWarnings(tools []tool.Tool) ([]responsesToolWire
 	result := make([]responsesToolWire, 0, len(tools))
 	var warnings []stream.Warning
 	for _, t := range tools {
-		if t.Type == "provider" {
+		if t.IsProviderTool() {
 			hosted, ok := convertXaiProviderTool(t)
 			if !ok {
 				warnings = append(warnings, stream.UnsupportedWarning(
@@ -548,7 +536,7 @@ func convertToResponsesToolsWithWarnings(tools []tool.Tool) ([]responsesToolWire
 			Type:        "function",
 			Name:        t.Name,
 			Description: t.Description,
-			Parameters:  t.InputSchema,
+			Parameters:  sanitizeToolSchema(t.InputSchema),
 		})
 	}
 	return result, warnings

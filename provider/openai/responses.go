@@ -129,7 +129,7 @@ func (m *ResponsesModel) buildRequest(options *stream.CallOptions) ([]byte, []st
 	req := responsesRequest{
 		Model:  m.id,
 		Stream: true,
-		Input:  convertToResponsesInput(options.Messages, systemMessageMode),
+		Input:  convertToResponsesInput(options.Messages, systemMessageMode, opts.PassThroughUnsupportedFiles),
 	}
 
 	if options.Temperature != nil {
@@ -289,8 +289,33 @@ func (m *ResponsesModel) buildRequest(options *stream.CallOptions) ([]byte, []st
 		warnings = append(warnings, toolWarnings...)
 	}
 
+	// allowedTools restricts the callable subset while keeping the full tools
+	// list intact (prompt-caching friendly). It overrides any request-level
+	// tool_choice. ai-sdk #15038.
+	if opts.AllowedTools != nil {
+		req.ToolChoice = allowedToolsChoice(*opts.AllowedTools)
+	}
+
 	body, err := json.Marshal(req)
 	return body, warnings, err
+}
+
+// allowedToolsChoice builds the tool_choice: {type: "allowed_tools", ...} wire
+// shape. Mode defaults to "auto". ai-sdk #15038.
+func allowedToolsChoice(allowed AllowedTools) map[string]any {
+	mode := allowed.Mode
+	if mode == "" {
+		mode = "auto"
+	}
+	tools := make([]map[string]any, 0, len(allowed.ToolNames))
+	for _, name := range allowed.ToolNames {
+		tools = append(tools, map[string]any{"type": "function", "name": name})
+	}
+	return map[string]any{
+		"type":  "allowed_tools",
+		"mode":  mode,
+		"tools": tools,
+	}
 }
 
 func (m *ResponsesModel) processStream(ctx context.Context, body io.Reader, tools []tool.Tool, events chan<- stream.Event, includeRawChunks bool) {
@@ -315,6 +340,12 @@ func (m *ResponsesModel) processStream(ctx context.Context, body io.Reader, tool
 	// transport/server error (ai-sdk #bcb04df).
 	var rawFinishReason string
 	var hasFunctionCall bool
+	// outputStarted gates early-error handling (ai-sdk #15922): an OpenAI
+	// stream can return HTTP 200 and then emit an error/response.failed frame
+	// before any model output (e.g. insufficient_quota). Such pre-output
+	// errors are surfaced as a terminating error so retry/fallback logic can
+	// see a failed stream; errors after real output stay streamed error parts.
+	var outputStarted bool
 
 	events <- stream.Event{Type: stream.EventStartStep, Data: stream.StartStepEvent{}}
 
@@ -343,6 +374,15 @@ func (m *ResponsesModel) processStream(ctx context.Context, body io.Reader, tool
 		var chunk responsesChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			continue
+		}
+
+		// Mark output as started for any chunk that isn't a lifecycle-only or
+		// error frame (ai-sdk #15922 isResponseOutputChunk). Once true, error
+		// frames are treated as late (streamed) rather than early (fatal).
+		switch chunk.Type {
+		case "response.created", "response.failed", "error":
+		default:
+			outputStarted = true
 		}
 
 		switch chunk.Type {
@@ -497,6 +537,19 @@ func (m *ResponsesModel) processStream(ctx context.Context, body io.Reader, tool
 			}
 
 		case "response.completed", "response.incomplete", "response.failed":
+			// A response.failed carrying an error before any output is an
+			// early failure: surface it as a terminating error so retry/
+			// fallback logic sees a failed stream (ai-sdk #15922).
+			if chunk.Type == "response.failed" && chunk.Response != nil && chunk.Response.Error != nil && !outputStarted {
+				e := chunk.Response.Error
+				events <- stream.Event{
+					Type: stream.EventError,
+					Data: stream.ErrorEvent{
+						Error: fmt.Errorf("OpenAI Responses API error: [%s] %s", e.Code, e.Message),
+					},
+				}
+				return
+			}
 			if chunk.Response != nil {
 				// Handle usage
 				if chunk.Response.Usage != nil {
@@ -528,11 +581,12 @@ func (m *ResponsesModel) processStream(ctx context.Context, body io.Reader, tool
 
 		case "error":
 			if chunk.Error != nil {
-				events <- stream.Event{
-					Type: stream.EventError,
-					Data: stream.ErrorEvent{
-						Error: fmt.Errorf("OpenAI Responses API error: [%s] %s", chunk.Error.Code, chunk.Error.Message),
-					},
+				err := fmt.Errorf("OpenAI Responses API error: [%s] %s", chunk.Error.Code, chunk.Error.Message)
+				events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+				// A pre-output error frame is fatal: stop the stream so the
+				// failure propagates instead of a partial result (ai-sdk #15922).
+				if !outputStarted {
+					return
 				}
 			}
 		}

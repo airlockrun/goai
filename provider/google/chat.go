@@ -116,9 +116,11 @@ func (m *GoogleModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 				Parts: []geminiPart{{Text: getTextFromContent(msg.Content)}},
 			}
 		case message.RoleUser:
+			parts, partWarnings := convertToGeminiParts(msg.Content)
+			warnings = append(warnings, partWarnings...)
 			contents = append(contents, geminiContent{
 				Role:  "user",
-				Parts: convertToGeminiParts(msg.Content),
+				Parts: parts,
 			})
 		case message.RoleAssistant:
 			parts := convertAssistantParts(msg.Content)
@@ -128,51 +130,52 @@ func (m *GoogleModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 			})
 		case message.RoleTool:
 			// Tool results — emit one functionResponse part per ToolResultPart,
-			// then append any attachment parts (ImagePart/FilePart with URL)
-			// as sibling inline/fileData parts in the same user turn. This
-			// matches ai-sdk's multimodal functionResponse behavior
-			// (#47114a3): a remote file URL on a FilePart becomes a fileData
-			// part, base64 becomes inlineData, and a URL-bearing ImagePart
-			// becomes fileData rather than inlineData.
+			// then append any attachment FilePart as sibling inline/fileData
+			// parts in the same user turn. This matches ai-sdk's multimodal
+			// functionResponse behavior (#47114a3): a remote file URL becomes a
+			// fileData part, inline base64 becomes inlineData. An image FilePart
+			// also gets a synthetic explanatory text part.
 			var parts []geminiPart
 			for _, part := range msg.Content.Parts {
 				switch p := part.(type) {
 				case message.ToolResultPart:
 					parts = append(parts, geminiPart{
 						FunctionResponse: &geminiFunctionResponse{
+							ID:       p.ToolCallID,
 							Name:     p.ToolName,
-							Response: map[string]any{"result": p.Result},
+							Response: map[string]any{"result": message.ToolOutputWire(p.Output)},
 						},
 					})
 				case message.TextPart:
 					parts = append(parts, geminiPart{
 						FunctionResponse: &geminiFunctionResponse{
+							ID:       toolCallIDFromMessage(msg),
 							Name:     toolNameFromMessage(msg),
 							Response: map[string]any{"result": p.Text},
 						},
 					})
-				case message.ImagePart:
-					if strings.HasPrefix(p.Image, "http://") || strings.HasPrefix(p.Image, "https://") {
-						parts = append(parts, geminiPart{
-							FileData: &geminiFileData{MimeType: p.MimeType, FileURI: p.Image},
-						})
-					} else {
-						parts = append(parts, geminiPart{
-							InlineData: &geminiInlineData{MimeType: p.MimeType, Data: p.Image},
-						})
-					}
-					parts = append(parts, geminiPart{
-						Text: "Tool executed successfully and returned this image as a response",
-					})
 				case message.FilePart:
-					if p.URL != "" {
+					switch d := p.Data.(type) {
+					case message.FileDataURL:
 						parts = append(parts, geminiPart{
-							FileData: &geminiFileData{MimeType: p.MimeType, FileURI: p.URL},
+							FileData: &geminiFileData{MimeType: p.MimeType, FileURI: d.URL},
 						})
-					} else if p.Data != "" {
+						if isImageMimeType(p.MimeType) {
+							parts = append(parts, geminiPart{
+								Text: "Tool executed successfully and returned this image as a response",
+							})
+						}
+					case message.FileDataBytes:
 						parts = append(parts, geminiPart{
-							InlineData: &geminiInlineData{MimeType: p.MimeType, Data: p.Data},
+							InlineData: &geminiInlineData{MimeType: p.MimeType, Data: d.Data},
 						})
+						if isImageMimeType(p.MimeType) {
+							parts = append(parts, geminiPart{
+								Text: "Tool executed successfully and returned this image as a response",
+							})
+						}
+					case message.FileDataText, message.FileDataReference:
+						warnings = append(warnings, stream.UnsupportedWarning("filePart", "file data type not supported by Gemini"))
 					}
 				}
 			}
@@ -357,6 +360,7 @@ func (m *GoogleModel) processStream(ctx context.Context, body io.Reader, tools [
 	var pendingToolCalls []stream.ToolCallEvent
 	var groundingMetadata *geminiGroundingMetadata
 	var urlContextMetadata *geminiURLContextMetadata
+	var serviceTier string
 
 	events <- stream.Event{Type: stream.EventStartStep, Data: stream.StartStepEvent{}}
 
@@ -427,8 +431,14 @@ func (m *GoogleModel) processStream(ctx context.Context, body io.Reader, tools [
 						} else {
 							inputBytes = []byte("{}")
 						}
+						// Prefer the call id returned by the Gemini API; fall
+						// back to the function name when absent. ai-sdk #15317.
+						toolCallID := part.FunctionCall.ID
+						if toolCallID == "" {
+							toolCallID = part.FunctionCall.Name
+						}
 						tc := stream.ToolCallEvent{
-							ToolCallID: part.FunctionCall.Name, // Gemini uses function name as ID
+							ToolCallID: toolCallID,
 							ToolName:   part.FunctionCall.Name,
 							Input:      inputBytes,
 						}
@@ -449,6 +459,9 @@ func (m *GoogleModel) processStream(ctx context.Context, body io.Reader, tools [
 				chunk.UsageMetadata.PromptTokenCount,
 				chunk.UsageMetadata.CandidatesTokenCount,
 			)
+			if chunk.UsageMetadata.ServiceTier != "" {
+				serviceTier = chunk.UsageMetadata.ServiceTier
+			}
 		}
 	}
 
@@ -488,13 +501,16 @@ func (m *GoogleModel) processStream(ctx context.Context, body io.Reader, tools [
 	// Build provider metadata — surfaces groundingMetadata and
 	// urlContextMetadata under providerMetadata.google (mirrors ai-sdk).
 	var providerMetadata map[string]any
-	if groundingMetadata != nil || urlContextMetadata != nil {
+	if groundingMetadata != nil || urlContextMetadata != nil || serviceTier != "" {
 		google := map[string]any{}
 		if groundingMetadata != nil {
 			google["groundingMetadata"] = mapGroundingMetadata(groundingMetadata)
 		}
 		if urlContextMetadata != nil {
 			google["urlContextMetadata"] = mapURLContextMetadata(urlContextMetadata)
+		}
+		if serviceTier != "" {
+			google["serviceTier"] = serviceTier
 		}
 		providerMetadata = map[string]any{"google": google}
 	}

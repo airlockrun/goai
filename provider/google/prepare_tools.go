@@ -34,7 +34,7 @@ func prepareGeminiTools(tools []tool.Tool, modelID string) []geminiTool {
 	var functionTools []tool.Tool
 
 	for _, t := range tools {
-		if t.Type != "provider" {
+		if !t.IsProviderTool() {
 			functionTools = append(functionTools, t)
 			continue
 		}

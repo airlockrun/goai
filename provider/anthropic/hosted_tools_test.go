@@ -389,6 +389,44 @@ func TestHostedTool_WebSearch20260209_StillAnnouncesBeta(t *testing.T) {
 	}
 }
 
+// TestHostedTool_Advisor covers ai-sdk PR #15171: the advisor_20260301 tool
+// maps to {type, name, model, max_uses?, caching?} and sets the
+// advisor-tool-2026-03-01 beta.
+func TestHostedTool_Advisor(t *testing.T) {
+	tools := []tool.Tool{
+		Advisor(AdvisorOptions{
+			Model:   "claude-opus-4-7",
+			MaxUses: 3,
+			Caching: &AdvisorCaching{Type: "ephemeral", TTL: "5m"},
+		}),
+	}
+	result, betas := convertToAnthropicTools(tools)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 tool, got %d", len(result))
+	}
+	got := result[0].(anthropicHostedAdvisor20260301)
+	if got.Type != "advisor_20260301" || got.Name != "advisor" {
+		t.Errorf("wire shape mismatch: %+v", got)
+	}
+	if got.Model != "claude-opus-4-7" || got.MaxUses != 3 {
+		t.Errorf("model/max_uses mismatch: %+v", got)
+	}
+	if got.Caching == nil || got.Caching.TTL != "5m" {
+		t.Errorf("caching mismatch: %+v", got.Caching)
+	}
+	if len(betas) != 1 || betas[0] != "advisor-tool-2026-03-01" {
+		t.Errorf("expected advisor-tool-2026-03-01 beta, got %v", betas)
+	}
+
+	// Wire JSON must use snake_case keys.
+	wire, _ := json.Marshal(got)
+	var decoded map[string]any
+	_ = json.Unmarshal(wire, &decoded)
+	if _, ok := decoded["max_uses"]; !ok {
+		t.Errorf("wire missing snake_case max_uses: %s", wire)
+	}
+}
+
 func TestConvertProviderTool_BetaHeaders(t *testing.T) {
 	tests := []struct {
 		id       string
@@ -411,6 +449,9 @@ func TestConvertProviderTool_BetaHeaders(t *testing.T) {
 		{ToolIDComputer20251124, func() tool.Tool {
 			return Computer20251124With(ComputerOptions{DisplayWidthPx: 1, DisplayHeightPx: 1})
 		}, "computer-use-2025-11-24"},
+		{ToolIDAdvisor20260301, func() tool.Tool {
+			return Advisor(AdvisorOptions{Model: "claude-opus-4-7"})
+		}, "advisor-tool-2026-03-01"},
 	}
 
 	for _, tc := range tests {

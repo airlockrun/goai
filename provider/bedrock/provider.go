@@ -45,12 +45,21 @@ var bedrockToolBetaMap = map[string]string{
 // bedrockAnthropicConfig returns the anthropic.Config that customizes the
 // shared builder for Bedrock's InvokeModel endpoint (bedrock-2023-05-31
 // wire version, strict function tools, in-body anthropic_beta list).
-func bedrockAnthropicConfig() anthropic.Config {
+//
+// Bedrock rejects output_config.format for claude-opus-4-7 (including the
+// us./eu. cross-region inference profiles), so native structured output is
+// disabled for that model and the builder falls back to synthetic JSON-tool
+// injection. Mirrors ai-sdk's createAmazonBedrockAnthropic
+// supportsNativeStructuredOutput (references/ai-sdk/packages/amazon-bedrock/
+// src/anthropic/amazon-bedrock-anthropic-provider.ts).
+func bedrockAnthropicConfig(modelID string) anthropic.Config {
+	supportsNativeStructuredOutput := !strings.Contains(modelID, "claude-opus-4-7")
 	return anthropic.Config{
-		ProviderID:      "bedrock",
-		ToolBetaMap:     bedrockToolBetaMap,
-		ToolsStrict:     true,
-		EmitBetasInBody: true,
+		ProviderID:                     "bedrock",
+		ToolBetaMap:                    bedrockToolBetaMap,
+		ToolsStrict:                    true,
+		EmitBetasInBody:                true,
+		SupportsNativeStructuredOutput: &supportsNativeStructuredOutput,
 		TransformRequestBody: func(body map[string]any, betas []string) map[string]any {
 			// Bedrock's InvokeModel uses the model id from the URL path, not
 			// the body. Stripping here mirrors ai-sdk's bedrock-anthropic
@@ -351,7 +360,7 @@ func (m *BedrockLanguageModel) buildAnthropicRequest(options *stream.CallOptions
 		return nil, nil, fmt.Errorf("invalid provider options: %w", err)
 	}
 
-	cfg := bedrockAnthropicConfig()
+	cfg := bedrockAnthropicConfig(m.id)
 	baseTransform := cfg.TransformRequestBody
 	cfg.TransformRequestBody = func(body map[string]any, betas []string) map[string]any {
 		body = baseTransform(body, betas)

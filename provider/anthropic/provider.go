@@ -102,6 +102,7 @@ func (p *Provider) RerankingModel(modelID string) model.RerankingModel {
 // packages/anthropic/src/anthropic-messages-options.ts.
 func (p *Provider) Models() []string {
 	return []string{
+		"claude-opus-4-8",
 		"claude-opus-4-7",
 		"claude-opus-4-6",
 		"claude-opus-4-5",
@@ -121,5 +122,6 @@ func (p *Provider) Models() []string {
 		"claude-3-5-sonnet-20241022",
 		"claude-3-5-haiku-20241022",
 		"claude-3-haiku-20240307",
+		"claude-fable-5",
 	}
 }

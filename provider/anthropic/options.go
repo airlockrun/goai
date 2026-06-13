@@ -69,6 +69,26 @@ type MessagesOptions struct {
 	// `anthropic-beta` HTTP header (ai-sdk #e49c34d). Use only when you
 	// need a beta that goai doesn't set automatically.
 	AnthropicBeta []string `json:"anthropicBeta,omitempty"`
+
+	// Fallbacks is a server-side fallback chain (ai-sdk #15928). When the
+	// primary model's safety classifiers block a turn, the API retries it
+	// on the next model in the chain server-side. Each entry is a direct
+	// request to that model and is passed through to the wire as-is, so it
+	// must be formatted accordingly: `model` is required, and an entry may
+	// override `maxTokens`, `thinking`, `outputConfig`, and `speed` for
+	// that attempt only. The required server-side-fallback-2026-06-01 beta
+	// is added automatically when this option is set.
+	Fallbacks []Fallback `json:"fallbacks,omitempty"`
+}
+
+// Fallback is one entry in a server-side fallback chain. Mirrors ai-sdk's
+// anthropic-language-model-options.ts fallbacks schema.
+type Fallback struct {
+	Model        string         `json:"model"`
+	MaxTokens    int            `json:"max_tokens,omitempty"`
+	Thinking     map[string]any `json:"thinking,omitempty"`
+	OutputConfig map[string]any `json:"output_config,omitempty"`
+	Speed        string         `json:"speed,omitempty"`
 }
 
 // CacheControlConfig mirrors ai-sdk's cacheControl option at the request

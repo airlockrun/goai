@@ -108,12 +108,31 @@ type Input struct {
 	// Messages is the conversation history.
 	Messages []message.Message
 
+	// Instructions is the system prompt, supplied out-of-band from Messages.
+	// When set, it is sent to the provider as the leading system message.
+	// Preferring this over a RoleSystem entry in Messages keeps the trusted
+	// system channel separate from conversation content. Mirrors ai-sdk's
+	// instructions option (renamed from system).
+	Instructions string
+
+	// AllowSystemInMessages opts into accepting RoleSystem entries inside
+	// Messages. It is reserved for the future default-reject behavior; today
+	// RoleSystem messages are always accepted.
+	AllowSystemInMessages bool
+
 	// Tools is the set of available tools (user-facing).
 	// The core converts this to an ordered slice before passing to providers.
 	Tools tool.Set
 
 	// ActiveTools limits which tools the model can use (optional).
 	ActiveTools []string
+
+	// ToolOrder controls the order tool definitions are sent to the provider.
+	// Tools named here are sent first in this order; the rest follow in their
+	// default (alphabetical) order. ActiveTools filters first, then ToolOrder
+	// orders the survivors. A stable order helps providers reuse cached
+	// request prefixes. Mirrors ai-sdk's toolOrder option.
+	ToolOrder []string
 
 	// ToolChoice controls how the model selects tools.
 	// Can be "auto", "none", "required", or a specific tool name.
@@ -188,21 +207,41 @@ type Input struct {
 	// until a stop condition is met or MaxSteps is reached.
 	MaxSteps int
 
-	// OnStepFinish is called after each step completes.
-	// Receives the step result with all content, tool calls, and tool results.
-	OnStepFinish func(step StepResultData)
+	// OnStart is called once before the first step, with the resolved request.
+	OnStart func(data StartData)
 
-	// OnFinish is called after all steps complete.
+	// OnStepStart is called before each step's model call.
+	OnStepStart func(data StepStartData)
+
+	// OnStepEnd is called after each step completes.
+	// Receives the step result with all content, tool calls, and tool results.
+	OnStepEnd func(step StepResultData)
+
+	// OnEnd is called after all steps complete.
 	// Receives the final step result plus all accumulated steps and total usage.
-	OnFinish func(result OnFinishData)
+	OnEnd func(result OnEndData)
 
 	// Executor handles tool execution. If nil, tools are executed locally
 	// using their Execute functions. Set this to use remote execution.
 	Executor tool.Executor
 }
 
-// OnFinishData contains data passed to the OnFinish callback.
-type OnFinishData struct {
+// StartData is passed to the OnStart callback before the first step.
+type StartData struct {
+	// Messages is the conversation history the generation starts from.
+	Messages []message.Message
+}
+
+// StepStartData is passed to the OnStepStart callback before each step.
+type StepStartData struct {
+	// StepNumber is the zero-based index of the step about to run.
+	StepNumber int
+	// Messages is the conversation history sent to the model for this step.
+	Messages []message.Message
+}
+
+// OnEndData contains data passed to the OnEnd callback.
+type OnEndData struct {
 	// Steps contains all step results from the generation.
 	Steps []StepResultData
 	// TotalUsage is the accumulated token usage across all steps.

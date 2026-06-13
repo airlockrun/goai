@@ -64,9 +64,18 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 		currentInput := input
 		currentInput.Messages = allMessages
 
+		if input.OnStart != nil {
+			input.OnStart(stream.StartData{Messages: allMessages})
+		}
+
+		stepNumber := 0
 		for {
 			// Build CallOptions from Input (this is what providers receive)
 			callOptions := buildCallOptions(&currentInput)
+
+			if input.OnStepStart != nil {
+				input.OnStepStart(stream.StepStartData{StepNumber: stepNumber, Messages: currentInput.Messages})
+			}
 
 			// Get events channel from model
 			events, err := currentInput.Model.Stream(ctx, callOptions)
@@ -179,7 +188,7 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 				if toolExecErr != nil {
 					// Emit partial results first (tools completed before the error)
 					for _, tr := range stepToolResults {
-						fullStream <- stream.Event{Type: stream.EventToolResult, Data: tr}
+						fullStream <- toolOutcomeEvent(tr)
 					}
 					fullStream <- stream.Event{
 						Type: stream.EventError,
@@ -188,12 +197,9 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 					return
 				}
 
-				// Emit tool result events
+				// Emit tool result events (kind reflects the outcome variant)
 				for _, tr := range stepToolResults {
-					fullStream <- stream.Event{
-						Type: stream.EventToolResult,
-						Data: tr,
-					}
+					fullStream <- toolOutcomeEvent(tr)
 				}
 
 				// Add tool results to content
@@ -228,9 +234,9 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 			// Append step messages to all messages
 			allMessages = append(allMessages, stepMessages...)
 
-			// Call OnStepFinish callback
-			if input.OnStepFinish != nil {
-				input.OnStepFinish(&stepResult)
+			// Call OnStepEnd callback
+			if input.OnStepEnd != nil {
+				input.OnStepEnd(&stepResult)
 			}
 
 			// Check stop conditions
@@ -254,6 +260,7 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 
 			// Update messages for next iteration
 			currentInput.Messages = allMessages
+			stepNumber++
 		}
 
 		// Parse output only if the last step was finished with "stop"
@@ -284,8 +291,8 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 			},
 		}
 
-		// Call OnFinish callback
-		if input.OnFinish != nil {
+		// Call OnEnd callback
+		if input.OnEnd != nil {
 			mu.Lock()
 			stepsData := make([]stream.StepResultData, len(allSteps))
 			for i := range allSteps {
@@ -294,7 +301,7 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 			finalStep := &allSteps[len(allSteps)-1]
 			mu.Unlock()
 
-			input.OnFinish(stream.OnFinishData{
+			input.OnEnd(stream.OnEndData{
 				Steps:      stepsData,
 				TotalUsage: totalUsage,
 				FinalStep:  finalStep,
@@ -428,9 +435,18 @@ func GenerateText(ctx context.Context, input stream.Input) (*GenerateTextResult,
 	currentInput := input
 	currentInput.Messages = allMessages
 
+	if input.OnStart != nil {
+		input.OnStart(stream.StartData{Messages: allMessages})
+	}
+
+	stepNumber := 0
 	for {
 		// Build CallOptions from Input (this is what providers receive)
 		callOptions := buildCallOptions(&currentInput)
+
+		if input.OnStepStart != nil {
+			input.OnStepStart(stream.StepStartData{StepNumber: stepNumber, Messages: currentInput.Messages})
+		}
 
 		// Get events channel from model
 		events, err := currentInput.Model.Stream(ctx, callOptions)
@@ -570,9 +586,9 @@ func GenerateText(ctx context.Context, input stream.Input) (*GenerateTextResult,
 		// Add step to list
 		allSteps = append(allSteps, stepResult)
 
-		// Call OnStepFinish callback
-		if input.OnStepFinish != nil {
-			input.OnStepFinish(&stepResult)
+		// Call OnStepEnd callback
+		if input.OnStepEnd != nil {
+			input.OnStepEnd(&stepResult)
 		}
 
 		// Check stop conditions
@@ -592,6 +608,7 @@ func GenerateText(ctx context.Context, input stream.Input) (*GenerateTextResult,
 
 		// Update messages for next iteration
 		currentInput.Messages = allMessages
+		stepNumber++
 	}
 
 	// Get final step
@@ -627,13 +644,13 @@ func GenerateText(ctx context.Context, input stream.Input) (*GenerateTextResult,
 		},
 	}
 
-	// Call OnFinish callback
-	if input.OnFinish != nil {
+	// Call OnEnd callback
+	if input.OnEnd != nil {
 		stepsData := make([]stream.StepResultData, len(allSteps))
 		for i := range allSteps {
 			stepsData[i] = &allSteps[i]
 		}
-		input.OnFinish(stream.OnFinishData{
+		input.OnEnd(stream.OnEndData{
 			Steps:      stepsData,
 			TotalUsage: totalUsage,
 			FinalStep:  &finalStep,
@@ -649,9 +666,15 @@ func GenerateText(ctx context.Context, input stream.Input) (*GenerateTextResult,
 // When Output is set, its ResponseFormat is sent on every step (matching
 // ai-sdk's generate-text.ts:578).
 func buildCallOptions(input *stream.Input) *stream.CallOptions {
+	messages := input.Messages
+	// Instructions reaches providers as the leading system message; goai's
+	// converters derive their system block from RoleSystem messages.
+	if input.Instructions != "" {
+		messages = append([]message.Message{message.NewSystemMessage(input.Instructions)}, messages...)
+	}
 	opts := &stream.CallOptions{
-		Messages:         input.Messages,
-		Tools:            input.Tools.Ordered(input.ActiveTools),
+		Messages:         messages,
+		Tools:            tool.ApplyToolOrder(input.Tools.Ordered(input.ActiveTools), input.ToolOrder),
 		ToolChoice:       input.ToolChoice,
 		Temperature:      input.Temperature,
 		TopP:             input.TopP,
@@ -691,14 +714,13 @@ func executeTools(ctx context.Context, executor tool.Executor, toolCalls []strea
 				return results, err
 			}
 
-			// Normal executor errors: wrap as tool result for model feedback
+			// Normal executor errors: classify (denied vs error) and feed
+			// the discriminated outcome back to the model.
 			results = append(results, stream.ToolResultEvent{
 				ToolCallID: tc.ID,
 				ToolName:   tc.Name,
 				Input:      tc.Input,
-				Output: stream.ToolOutput{
-					Output: "Error: " + err.Error(),
-				},
+				Output:     tool.OutputForError(err),
 			})
 			continue
 		}
@@ -713,32 +735,42 @@ func executeTools(ctx context.Context, executor tool.Executor, toolCalls []strea
 			ToolCallID: tc.ID,
 			ToolName:   tc.Name,
 			Input:      tc.Input,
-			Output: stream.ToolOutput{
-				Output:      resp.Output,
-				Title:       resp.Title,
-				Metadata:    resp.Metadata,
-				Attachments: convertAttachments(resp.Attachments),
-			},
+			Output:     outputFromResponse(resp),
 		})
 	}
 
 	return results, nil
 }
 
-// convertAttachments converts tool attachments to stream attachments.
-func convertAttachments(attachments []tool.Attachment) []stream.Attachment {
-	if len(attachments) == 0 {
-		return nil
+// outputFromResponse maps a tool.Response to the discriminated
+// ToolResultOutput: denied → execution-denied; is-error → error-text;
+// otherwise the success output (text or multipart content).
+func outputFromResponse(resp tool.Response) message.ToolResultOutput {
+	if resp.Denied {
+		return message.ExecutionDeniedOutput{Reason: resp.DeniedReason}
 	}
-	result := make([]stream.Attachment, len(attachments))
-	for i, a := range attachments {
-		result[i] = stream.Attachment{
-			Data:     a.Data,
-			MimeType: a.MimeType,
-			Filename: a.Filename,
+	if resp.IsError {
+		v := resp.Error
+		if v == "" {
+			v = resp.Output
 		}
+		return message.ErrorTextOutput{Value: v}
 	}
-	return result
+	return tool.SuccessOutput(tool.Result{
+		Output:      resp.Output,
+		Title:       resp.Title,
+		Metadata:    resp.Metadata,
+		Attachments: resp.Attachments,
+	})
+}
+
+// toolOutcomeEvent wraps a collected tool result into the live stream event
+// whose kind matches its discriminated outcome: success → tool-result,
+// error → tool-error, execution-denied → tool-output-denied. Consumers that
+// branch on event type (UI, audit) get the right signal; the persisted
+// message keeps the full union in ToolResultPart.Output regardless.
+func toolOutcomeEvent(tr stream.ToolResultEvent) stream.Event {
+	return stream.ToolOutcomeEvent(tr.ToolCallID, tr.ToolName, tr.Input, tr.Output)
 }
 
 // buildStepMessages builds the messages for a step result.
@@ -787,25 +819,12 @@ func buildStepMessages(text string, reasoning []ReasoningContentPart, toolCalls 
 		msgs = append(msgs, message.NewAssistantMessage(text))
 	}
 
-	// Add tool results as tool messages
+	// Add tool results as tool messages — the discriminated Output (text /
+	// json / content / error-* / execution-denied) is carried as-is, so a
+	// content output keeps its file/image items inside the tool-result part
+	// rather than being flattened into separate message parts.
 	for _, tr := range toolResults {
-		toolMsg := message.NewToolMessage(
-			tr.ToolCallID,
-			tr.ToolName,
-			tr.Output.Output,
-			false,
-		)
-		// Convert tool result attachments to message content parts.
-		for _, att := range tr.Output.Attachments {
-			if strings.HasPrefix(att.MimeType, "image/") {
-				toolMsg.Content.Parts = append(toolMsg.Content.Parts,
-					message.ImagePart{Image: att.Data, MimeType: att.MimeType})
-			} else {
-				toolMsg.Content.Parts = append(toolMsg.Content.Parts,
-					message.FilePart{Data: att.Data, MimeType: att.MimeType, Filename: att.Filename})
-			}
-		}
-		msgs = append(msgs, toolMsg)
+		msgs = append(msgs, message.NewToolMessage(tr.ToolCallID, tr.ToolName, tr.Output))
 	}
 
 	return msgs
@@ -824,15 +843,24 @@ func Tool(name, description string, schema json.RawMessage, execute tool.Execute
 
 // Re-export commonly used types for convenience
 type (
-	Message       = message.Message
-	Part          = message.Part
-	TextPart      = message.TextPart
-	ToolCallPart  = message.ToolCallPart
-	ReasoningPart = message.ReasoningPart
-	ToolSet       = tool.Set
-	StreamResult  = stream.Result
-	StreamEvent   = stream.Event
-	EventType     = stream.EventType
+	Message               = message.Message
+	Part                  = message.Part
+	TextPart              = message.TextPart
+	ToolCallPart          = message.ToolCallPart
+	ToolResultPart        = message.ToolResultPart
+	ReasoningPart         = message.ReasoningPart
+	ToolResultOutput      = message.ToolResultOutput
+	TextOutput            = message.TextOutput
+	JSONOutput            = message.JSONOutput
+	ErrorTextOutput       = message.ErrorTextOutput
+	ErrorJSONOutput       = message.ErrorJSONOutput
+	ExecutionDeniedOutput = message.ExecutionDeniedOutput
+	ContentOutput         = message.ContentOutput
+	ToolContentItem       = message.ToolContentItem
+	ToolSet               = tool.Set
+	StreamResult          = stream.Result
+	StreamEvent           = stream.Event
+	EventType             = stream.EventType
 )
 
 // Message constructors
@@ -842,4 +870,15 @@ var (
 	NewAssistantMessage          = message.NewAssistantMessage
 	NewAssistantMessageWithParts = message.NewAssistantMessageWithParts
 	NewToolMessage               = message.NewToolMessage
+	NewToolResultText            = message.NewToolResultText
+	NewToolResultJSON            = message.NewToolResultJSON
+	NewToolResultDenied          = message.NewToolResultDenied
+)
+
+// Tool-output classifiers (heuristic-free, structured).
+var (
+	ToolOutputText    = message.ToolOutputText
+	ToolOutputWire    = message.ToolOutputWire
+	ToolOutputIsError = message.ToolOutputIsError
+	ToolOutcome       = message.ToolOutcome
 )

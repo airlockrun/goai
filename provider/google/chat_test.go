@@ -134,6 +134,76 @@ func TestGoogleModel_StreamText(t *testing.T) {
 			t.Errorf("expected completion tokens 5, got %d", usage.OutputTotal())
 		}
 	})
+
+	// serviceTier is read from usageMetadata.serviceTier and surfaced under
+	// providerMetadata.google.serviceTier. ai-sdk #15488.
+	t.Run("should read serviceTier from usageMetadata", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			chunk := `{"candidates":[{"content":{"parts":[{"text":"Blue"}],"role":"model"},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1,"totalTokenCount":11,"serviceTier":"priority"}}`
+			w.Write([]byte("data: " + chunk + "\n\n"))
+		}))
+		defer server.Close()
+
+		provider := createTestProvider(server.URL)
+		model := provider.Model("gemini-1.5-pro")
+
+		events, err := model.Stream(context.Background(), &stream.CallOptions{
+			Messages: []message.Message{message.NewUserMessage("color?")},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		var tier any
+		for event := range events {
+			if event.Type == stream.EventFinishStep {
+				if fs, ok := event.Data.(stream.FinishStepEvent); ok && fs.ProviderMetadata != nil {
+					if g, ok := fs.ProviderMetadata["google"].(map[string]any); ok {
+						tier = g["serviceTier"]
+					}
+				}
+			}
+		}
+		if tier != "priority" {
+			t.Errorf("expected serviceTier 'priority', got %v", tier)
+		}
+	})
+
+	// When the Gemini API returns functionCall.id, goai uses it as the
+	// ToolCallID instead of the function name. ai-sdk #15317.
+	t.Run("should use functionCall.id as tool call id when present", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			chunk := `{"candidates":[{"content":{"parts":[{"functionCall":{"id":"fc_abc","name":"get_weather","args":{"city":"NYC"}}}],"role":"model"},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":1,"totalTokenCount":6}}`
+			w.Write([]byte("data: " + chunk + "\n\n"))
+		}))
+		defer server.Close()
+
+		provider := createTestProvider(server.URL)
+		model := provider.Model("gemini-3-flash-preview")
+
+		events, err := model.Stream(context.Background(), &stream.CallOptions{
+			Messages: []message.Message{message.NewUserMessage("weather?")},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		var gotID string
+		for event := range events {
+			if event.Type == stream.EventToolCall {
+				if tc, ok := event.Data.(stream.ToolCallEvent); ok {
+					gotID = tc.ToolCallID
+				}
+			}
+		}
+		if gotID != "fc_abc" {
+			t.Errorf("expected tool call id 'fc_abc', got %q", gotID)
+		}
+	})
 }
 
 func TestGoogleModel_RequestBody(t *testing.T) {
@@ -1001,4 +1071,3 @@ func TestGoogleProvider_ModelsContainsLatest(t *testing.T) {
 		t.Error("Models() still lists retired gemini-1.0-pro")
 	}
 }
-

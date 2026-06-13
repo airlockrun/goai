@@ -134,7 +134,7 @@ type embedRequest struct {
 	Model           string   `json:"model"`
 	Texts           []string `json:"texts"`
 	OutputDimension int      `json:"output_dimension,omitempty"`
-	InputType string   `json:"input_type"`
+	InputType       string   `json:"input_type"`
 }
 
 type embedResponse struct {

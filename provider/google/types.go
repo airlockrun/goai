@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/airlockrun/goai/message"
+	"github.com/airlockrun/goai/stream"
 	"github.com/airlockrun/goai/tool"
 )
 
@@ -71,14 +72,18 @@ type geminiInlineData struct {
 
 // geminiFileData references a remotely-hosted file by URI. Mirrors the
 // fileData part in ai-sdk's convert-to-google-generative-ai-messages.ts;
-// used when a FilePart or ImagePart carries a URL instead of base64 data.
+// used when a FilePart carries a URL.
 type geminiFileData struct {
 	MimeType string `json:"mimeType,omitempty"`
 	FileURI  string `json:"fileUri"`
 }
 
 type geminiFunctionCall struct {
-	Name string         `json:"name"`
+	// ID is the call identifier when the Gemini API returns one. goai
+	// uses it as the ToolCallID on inbound calls and echoes it back as the
+	// matching functionResponse.id on outbound results. ai-sdk #15317.
+	ID   string `json:"id,omitempty"`
+	Name string `json:"name"`
 	// Args may be omitted on no-args calls. Vertex emits `{name: "X"}`
 	// without args/partialArgs/willContinue for zero-arg tools; ai-sdk
 	// #14968. We default to "{}" on the wire.
@@ -86,6 +91,9 @@ type geminiFunctionCall struct {
 }
 
 type geminiFunctionResponse struct {
+	// ID echoes the originating functionCall.id so Gemini can correlate the
+	// result with the call. ai-sdk #15317.
+	ID       string         `json:"id,omitempty"`
 	Name     string         `json:"name"`
 	Response map[string]any `json:"response"`
 }
@@ -181,12 +189,12 @@ type geminiCandidate struct {
 // geminiGroundingMetadata mirrors Gemini's groundingMetadata response field.
 // Surfaced via providerMetadata.google.groundingMetadata.
 type geminiGroundingMetadata struct {
-	WebSearchQueries  []string                   `json:"webSearchQueries,omitempty"`
-	RetrievalQueries  []string                   `json:"retrievalQueries,omitempty"`
-	SearchEntryPoint  *geminiSearchEntryPoint    `json:"searchEntryPoint,omitempty"`
-	GroundingChunks   []geminiGroundingChunk     `json:"groundingChunks,omitempty"`
-	GroundingSupports []geminiGroundingSupport   `json:"groundingSupports,omitempty"`
-	RetrievalMetadata *geminiRetrievalMetadata   `json:"retrievalMetadata,omitempty"`
+	WebSearchQueries  []string                 `json:"webSearchQueries,omitempty"`
+	RetrievalQueries  []string                 `json:"retrievalQueries,omitempty"`
+	SearchEntryPoint  *geminiSearchEntryPoint  `json:"searchEntryPoint,omitempty"`
+	GroundingChunks   []geminiGroundingChunk   `json:"groundingChunks,omitempty"`
+	GroundingSupports []geminiGroundingSupport `json:"groundingSupports,omitempty"`
+	RetrievalMetadata *geminiRetrievalMetadata `json:"retrievalMetadata,omitempty"`
 }
 
 type geminiSearchEntryPoint struct {
@@ -194,9 +202,9 @@ type geminiSearchEntryPoint struct {
 }
 
 type geminiGroundingChunk struct {
-	Web              *geminiGroundingWeb        `json:"web,omitempty"`
-	RetrievedContext *geminiRetrievedContext    `json:"retrievedContext,omitempty"`
-	Maps             *geminiGroundingMapsChunk  `json:"maps,omitempty"`
+	Web              *geminiGroundingWeb       `json:"web,omitempty"`
+	RetrievedContext *geminiRetrievedContext   `json:"retrievedContext,omitempty"`
+	Maps             *geminiGroundingMapsChunk `json:"maps,omitempty"`
 }
 
 type geminiGroundingWeb struct {
@@ -241,14 +249,17 @@ type geminiURLContextMetadata struct {
 }
 
 type geminiURLMetadataEntry struct {
-	RetrievedURL        string `json:"retrievedUrl,omitempty"`
-	URLRetrievalStatus  string `json:"urlRetrievalStatus,omitempty"`
+	RetrievedURL       string `json:"retrievedUrl,omitempty"`
+	URLRetrievalStatus string `json:"urlRetrievalStatus,omitempty"`
 }
 
 type geminiUsageMetadata struct {
 	PromptTokenCount     int `json:"promptTokenCount"`
 	CandidatesTokenCount int `json:"candidatesTokenCount"`
 	TotalTokenCount      int `json:"totalTokenCount"`
+	// ServiceTier is the tier that served the request. Surfaced via
+	// providerMetadata.google.serviceTier. ai-sdk #15488.
+	ServiceTier string `json:"serviceTier,omitempty"`
 }
 
 // Conversion functions
@@ -257,6 +268,15 @@ func toolNameFromMessage(msg message.Message) string {
 	for _, part := range msg.Content.Parts {
 		if tr, ok := part.(message.ToolResultPart); ok {
 			return tr.ToolName
+		}
+	}
+	return ""
+}
+
+func toolCallIDFromMessage(msg message.Message) string {
+	for _, part := range msg.Content.Parts {
+		if tr, ok := part.(message.ToolResultPart); ok {
+			return tr.ToolCallID
 		}
 	}
 	return ""
@@ -274,40 +294,45 @@ func getTextFromContent(content message.Content) string {
 	return ""
 }
 
-func convertToGeminiParts(content message.Content) []geminiPart {
+// isImageMimeType reports whether a FilePart carries an image, matching the
+// "image/" prefix convention the message package uses to fold images into
+// FilePart.
+func isImageMimeType(mimeType string) bool {
+	return strings.HasPrefix(mimeType, "image/")
+}
+
+// convertToGeminiParts maps message content parts to Gemini wire parts.
+// Inline base64 FileParts become inlineData; URL-backed FileParts become
+// fileData. Reference and text file data have no Gemini request mapping and
+// surface as unsupported warnings.
+func convertToGeminiParts(content message.Content) ([]geminiPart, []stream.Warning) {
 	// If simple text, return single text part
 	if content.Text != "" && len(content.Parts) == 0 {
-		return []geminiPart{{Text: content.Text}}
+		return []geminiPart{{Text: content.Text}}, nil
 	}
 
+	var warnings []stream.Warning
 	result := make([]geminiPart, 0, len(content.Parts))
 	for _, part := range content.Parts {
 		switch p := part.(type) {
 		case message.TextPart:
 			result = append(result, geminiPart{Text: p.Text})
-		case message.ImagePart:
-			if strings.HasPrefix(p.Image, "http://") || strings.HasPrefix(p.Image, "https://") {
-				result = append(result, geminiPart{
-					FileData: &geminiFileData{MimeType: p.MimeType, FileURI: p.Image},
-				})
-			} else {
-				result = append(result, geminiPart{
-					InlineData: &geminiInlineData{MimeType: p.MimeType, Data: p.Image},
-				})
-			}
 		case message.FilePart:
-			if p.URL != "" {
+			switch d := p.Data.(type) {
+			case message.FileDataURL:
 				result = append(result, geminiPart{
-					FileData: &geminiFileData{MimeType: p.MimeType, FileURI: p.URL},
+					FileData: &geminiFileData{MimeType: p.MimeType, FileURI: d.URL},
 				})
-			} else if p.Data != "" {
+			case message.FileDataBytes:
 				result = append(result, geminiPart{
-					InlineData: &geminiInlineData{MimeType: p.MimeType, Data: p.Data},
+					InlineData: &geminiInlineData{MimeType: p.MimeType, Data: d.Data},
 				})
+			case message.FileDataText, message.FileDataReference:
+				warnings = append(warnings, stream.UnsupportedWarning("filePart", "file data type not supported by Gemini"))
 			}
 		}
 	}
-	return result
+	return result, warnings
 }
 
 func convertAssistantParts(content message.Content) []geminiPart {
@@ -326,6 +351,7 @@ func convertAssistantParts(content message.Content) []geminiPart {
 			json.Unmarshal(tc.Input, &args)
 			result = append(result, geminiPart{
 				FunctionCall: &geminiFunctionCall{
+					ID:   tc.ID,
 					Name: tc.Name,
 					Args: args,
 				},

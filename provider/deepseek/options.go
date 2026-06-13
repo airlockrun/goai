@@ -11,10 +11,18 @@ type ChatOptions struct {
 	// Thinking configures the thinking/reasoning behavior.
 	// Default is enabled.
 	Thinking *ThinkingConfig `json:"thinking,omitempty"`
+
+	// ReasoningEffort controls the thinking strength for DeepSeek V4
+	// reasoning models. DeepSeek's API accepts "low", "medium", "high",
+	// "xhigh", and "max"; it maps "low"/"medium" to "high" and "xhigh" to
+	// "max" server-side for compatibility with other providers.
+	ReasoningEffort string `json:"reasoningEffort,omitempty"`
 }
 
 // ThinkingConfig configures DeepSeek's thinking behavior.
 type ThinkingConfig struct {
-	// Type can be "enabled" or "disabled". Default is "enabled".
+	// Type can be "adaptive", "enabled", or "disabled". "adaptive" lets the
+	// model decide when to think. Default is "enabled". See
+	// https://api-docs.deepseek.com/guides/thinking_mode.
 	Type string `json:"type,omitempty"`
 }

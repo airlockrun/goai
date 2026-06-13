@@ -40,9 +40,9 @@ type proxyImageModel struct {
 	opts Options
 }
 
-func (m *proxyImageModel) ID() string             { return "proxy" }
-func (m *proxyImageModel) Provider() string        { return "proxy" }
-func (m *proxyImageModel) MaxImagesPerCall() int   { return 4 }
+func (m *proxyImageModel) ID() string            { return "proxy" }
+func (m *proxyImageModel) Provider() string      { return "proxy" }
+func (m *proxyImageModel) MaxImagesPerCall() int { return 4 }
 
 func (m *proxyImageModel) Generate(ctx context.Context, callOpts model.ImageCallOptions) (*model.ImageResult, error) {
 	var result model.ImageResult
@@ -73,9 +73,9 @@ type proxyEmbeddingModel struct {
 }
 
 func (m *proxyEmbeddingModel) ID() string                { return "proxy" }
-func (m *proxyEmbeddingModel) Provider() string           { return "proxy" }
-func (m *proxyEmbeddingModel) MaxEmbeddingsPerCall() int  { return 100 }
-func (m *proxyEmbeddingModel) Dimensions() int            { return 0 }
+func (m *proxyEmbeddingModel) Provider() string          { return "proxy" }
+func (m *proxyEmbeddingModel) MaxEmbeddingsPerCall() int { return 100 }
+func (m *proxyEmbeddingModel) Dimensions() int           { return 0 }
 
 func (m *proxyEmbeddingModel) Embed(ctx context.Context, callOpts model.EmbedCallOptions) (*model.EmbedResult, error) {
 	var result model.EmbedResult
@@ -106,7 +106,7 @@ type proxySpeechModel struct {
 }
 
 func (m *proxySpeechModel) ID() string       { return "proxy" }
-func (m *proxySpeechModel) Provider() string  { return "proxy" }
+func (m *proxySpeechModel) Provider() string { return "proxy" }
 
 func (m *proxySpeechModel) Generate(ctx context.Context, callOpts model.SpeechCallOptions) (*model.SpeechResult, error) {
 	var result model.SpeechResult
@@ -137,7 +137,7 @@ type proxyTranscriptionModel struct {
 }
 
 func (m *proxyTranscriptionModel) ID() string       { return "proxy" }
-func (m *proxyTranscriptionModel) Provider() string  { return "proxy" }
+func (m *proxyTranscriptionModel) Provider() string { return "proxy" }
 
 func (m *proxyTranscriptionModel) Transcribe(ctx context.Context, callOpts model.TranscribeCallOptions) (*model.TranscriptionResult, error) {
 	var result model.TranscriptionResult
@@ -172,10 +172,7 @@ func doModelProxy(ctx context.Context, opts Options, capability string, callOpts
 		if err != nil {
 			return fmt.Errorf("proxy: create request: %w", err)
 		}
-		req.Header.Set("Content-Type", "application/json")
-		if opts.Token != "" {
-			req.Header.Set("Authorization", "Bearer "+opts.Token)
-		}
+		applyHeaders(req, opts)
 
 		resp, err := opts.Client.Do(req)
 		if err != nil {

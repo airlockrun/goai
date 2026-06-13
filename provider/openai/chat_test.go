@@ -607,3 +607,39 @@ func TestChatModel_FinishReasonContentFilter(t *testing.T) {
 		t.Errorf("expected finish_reason 'content_filter', got '%s'", finishReason)
 	}
 }
+
+// Early stream error handling (ai-sdk #15922): OpenAI can return HTTP 200 and
+// then emit a top-level error frame before any output. That pre-output error
+// must surface (and terminate) rather than be silently skipped.
+func TestChatModel_EarlyStreamError(t *testing.T) {
+	t.Run("surfaces error frame before any output", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, `data: {"error":{"message":"You exceeded your current quota","type":"insufficient_quota","code":"insufficient_quota"}}`+"\n\n")
+			fmt.Fprint(w, "data: [DONE]\n\n")
+		}))
+		defer server.Close()
+
+		model := createTestProvider(server.URL).Chat("gpt-4o")
+		events, err := model.Stream(context.Background(), &stream.CallOptions{
+			Messages: []message.Message{message.NewUserMessage("hi")},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var gotErr error
+		for ev := range events {
+			if e, ok := ev.Data.(stream.ErrorEvent); ok {
+				gotErr = e.Error
+			}
+		}
+		if gotErr == nil {
+			t.Fatal("expected an error event, got none")
+		}
+		if !strings.Contains(gotErr.Error(), "insufficient_quota") {
+			t.Errorf("error = %v, want it to mention insufficient_quota", gotErr)
+		}
+	})
+}

@@ -59,13 +59,13 @@ func TestGrouping_TwoConsecutiveToolMessages(t *testing.T) {
 			{
 				Role: message.RoleTool,
 				Content: message.Content{Parts: []message.Part{
-					message.ToolResultPart{ToolCallID: "toolu_a", ToolName: "search", Result: "result A"},
+					message.ToolResultPart{ToolCallID: "toolu_a", ToolName: "search", Output: message.TextOutput{Value: "result A"}},
 				}},
 			},
 			{
 				Role: message.RoleTool,
 				Content: message.Content{Parts: []message.Part{
-					message.ToolResultPart{ToolCallID: "toolu_b", ToolName: "search", Result: "result B"},
+					message.ToolResultPart{ToolCallID: "toolu_b", ToolName: "search", Output: message.TextOutput{Value: "result B"}},
 				}},
 			},
 		},
@@ -111,8 +111,8 @@ func TestGrouping_OneToolMessageMultipleResults(t *testing.T) {
 			{
 				Role: message.RoleTool,
 				Content: message.Content{Parts: []message.Part{
-					message.ToolResultPart{ToolCallID: "toolu_a", ToolName: "search", Result: "A"},
-					message.ToolResultPart{ToolCallID: "toolu_b", ToolName: "search", Result: "B"},
+					message.ToolResultPart{ToolCallID: "toolu_a", ToolName: "search", Output: message.TextOutput{Value: "A"}},
+					message.ToolResultPart{ToolCallID: "toolu_b", ToolName: "search", Output: message.TextOutput{Value: "B"}},
 				}},
 			},
 		},
@@ -144,7 +144,7 @@ func TestGrouping_UserPlusToolMergeIntoOneMessage(t *testing.T) {
 			{
 				Role: message.RoleTool,
 				Content: message.Content{Parts: []message.Part{
-					message.ToolResultPart{ToolCallID: "toolu_a", ToolName: "lookup", Result: "ok"},
+					message.ToolResultPart{ToolCallID: "toolu_a", ToolName: "lookup", Output: message.TextOutput{Value: "ok"}},
 				}},
 			},
 			message.NewUserMessage("now do the next step"),

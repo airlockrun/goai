@@ -45,7 +45,9 @@ func (m *AzureEmbeddingModel) Embed(ctx context.Context, opts model.EmbedCallOpt
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("api-key", m.provider.opts.APIKey)
+	if err := m.provider.setAuth(req); err != nil {
+		return nil, err
+	}
 	for k, v := range opts.Headers {
 		req.Header.Set(k, v)
 	}

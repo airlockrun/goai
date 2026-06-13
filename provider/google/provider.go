@@ -98,6 +98,7 @@ func (p *Provider) Models() []string {
 		"gemini-3.1-flash-image-preview",
 		"gemini-3.1-flash-lite-preview",
 		"gemini-3.1-flash-tts-preview",
+		"gemini-3.5-flash",
 		// Gemini 2.5
 		"gemini-2.5-pro",
 		"gemini-2.5-flash",
@@ -124,6 +125,8 @@ func (p *Provider) Models() []string {
 		"gemini-1.5-flash-8b",
 		// Specialty previews
 		"deep-research-pro-preview-12-2025",
+		"deep-research-max-preview-04-2026",
+		"deep-research-preview-04-2026",
 		"nano-banana-pro-preview",
 		// Gemma 3 open-weight family via Gemini API
 		"gemma-3-1b-it",
@@ -140,5 +143,6 @@ func (p *Provider) EmbeddingModels() []string {
 	return []string{
 		"text-embedding-004",
 		"embedding-001",
+		"gemini-embedding-2",
 	}
 }

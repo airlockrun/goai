@@ -59,8 +59,8 @@ func New(opts Options) *Provider {
 	}
 }
 
-func (p *Provider) ID() string                                 { return "fireworks" }
-func (p *Provider) Model(modelID string) stream.Model          { return p.compat.Model(modelID) }
+func (p *Provider) ID() string                                       { return "fireworks" }
+func (p *Provider) Model(modelID string) stream.Model                { return p.compat.Model(modelID) }
 func (p *Provider) LanguageModel(modelID string) model.LanguageModel { return p.Model(modelID) }
 
 // ImageModel returns a FireworksImageModel wired to the workflows /

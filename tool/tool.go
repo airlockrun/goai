@@ -47,6 +47,33 @@ type Tool struct {
 	ProviderOptions map[string]any     `json:"providerOptions,omitempty"`
 }
 
+// Kind classifies a Tool at the definition level. goai distinguishes the two
+// definition kinds it sends to providers; the dynamic / provider-executed
+// distinctions ai-sdk draws live on the tool *call* (see RawToolCall in
+// parse.go), not on the definition.
+type Kind string
+
+const (
+	// KindFunction is a user-defined function tool (Type==""): InputSchema +
+	// optional Execute, serialized as a function declaration.
+	KindFunction Kind = "function"
+	// KindProviderDefined is a built-in the provider runs server-side
+	// (Type=="provider"): ProviderID + Args, no Execute.
+	KindProviderDefined Kind = "provider"
+)
+
+// Kind returns the tool's definition kind.
+func (t Tool) Kind() Kind {
+	if t.Type == string(KindProviderDefined) {
+		return KindProviderDefined
+	}
+	return KindFunction
+}
+
+// IsProviderTool reports whether the tool is provider-defined (run server-side
+// by the provider rather than via a local Execute function).
+func (t Tool) IsProviderTool() bool { return t.Kind() == KindProviderDefined }
+
 // ToolInputExample is a single example input for a tool. Mirrors ai-sdk's
 // { input: JSONObject } shape.
 type ToolInputExample struct {
@@ -130,12 +157,21 @@ func (d *Definition) InputExamples(examples []ToolInputExample) *Definition {
 	return d
 }
 
+// defaultInputSchema is sent for a function tool declared without an explicit
+// input schema. The "type":"object" is required by OpenAI-compatible providers
+// that reject parameter schemas lacking it.
+var defaultInputSchema = json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`)
+
 // Build creates the final Tool.
 func (d *Definition) Build() Tool {
+	inputSchema := d.schema
+	if len(inputSchema) == 0 {
+		inputSchema = defaultInputSchema
+	}
 	return Tool{
 		Name:          d.name,
 		Description:   d.description,
-		InputSchema:   d.schema,
+		InputSchema:   inputSchema,
 		InputExamples: d.examples,
 		Execute:       d.execute,
 	}
@@ -185,6 +221,34 @@ func (s Set) Ordered(activeTools []string) []Tool {
 	result := make([]Tool, 0, len(s))
 	for _, name := range names {
 		result = append(result, s[name])
+	}
+	return result
+}
+
+// ApplyToolOrder reorders an already-ordered tool slice so the tools named in
+// toolOrder appear first in that order; tools not named keep their incoming
+// relative order after them. A stable provider request shape lets providers
+// reuse cached request prefixes. Mirrors ai-sdk's toolOrder option.
+func ApplyToolOrder(tools []Tool, toolOrder []string) []Tool {
+	if len(toolOrder) == 0 || len(tools) == 0 {
+		return tools
+	}
+	byName := make(map[string]Tool, len(tools))
+	for _, t := range tools {
+		byName[t.Name] = t
+	}
+	result := make([]Tool, 0, len(tools))
+	used := make(map[string]bool, len(toolOrder))
+	for _, name := range toolOrder {
+		if t, exists := byName[name]; exists && !used[name] {
+			result = append(result, t)
+			used[name] = true
+		}
+	}
+	for _, t := range tools {
+		if !used[t.Name] {
+			result = append(result, t)
+		}
 	}
 	return result
 }

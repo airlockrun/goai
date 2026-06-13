@@ -352,7 +352,7 @@ func TestIntegration_ImageInput(t *testing.T) {
 				Content: message.Content{
 					Parts: []message.Part{
 						message.TextPart{Text: "What animal is in this image? Answer in one word."},
-						message.ImagePart{Image: imageURL},
+						message.FilePart{Data: message.FileDataURL{URL: imageURL}, MimeType: "image/png"},
 					},
 				},
 			},
@@ -463,7 +463,7 @@ func TestIntegration_Base64ImageResponses(t *testing.T) {
 					Content: message.Content{
 						Parts: []message.Part{
 							message.TextPart{Text: "This image has 4 colored quadrants. Name the colors clockwise from top-left. Just the color names, comma-separated."},
-							message.ImagePart{Image: b64, MimeType: "image/png"},
+							message.FilePart{Data: message.FileDataBytes{Data: b64}, MimeType: "image/png"},
 						},
 					},
 				},
@@ -503,8 +503,8 @@ func TestIntegration_Base64ImageResponses(t *testing.T) {
 					Role: message.RoleTool,
 					Content: message.Content{
 						Parts: []message.Part{
-							message.ToolResultPart{ToolCallID: "call_123", ToolName: "run_js", Result: ""},
-							message.ImagePart{Image: b64, MimeType: "image/png"},
+							message.ToolResultPart{ToolCallID: "call_123", ToolName: "run_js", Output: message.TextOutput{Value: ""}},
+							message.FilePart{Data: message.FileDataBytes{Data: b64}, MimeType: "image/png"},
 						},
 					},
 				},

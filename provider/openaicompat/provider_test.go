@@ -665,7 +665,7 @@ func TestConvertUserContent_TextFilePartBase64(t *testing.T) {
 		Parts: []message.Part{
 			message.TextPart{Text: "Summarize this document"},
 			message.FilePart{
-				Data:     "UGxhaW4gdGV4dCBjb250ZW50", // base64("Plain text content")
+				Data:     message.FileDataBytes{Data: "UGxhaW4gdGV4dCBjb250ZW50"}, // base64("Plain text content")
 				MimeType: "text/plain",
 			},
 		},

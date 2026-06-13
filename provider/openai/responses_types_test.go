@@ -16,7 +16,7 @@ func TestConvertToResponsesInput_SystemMessages(t *testing.T) {
 			message.NewSystemMessage("Hello"),
 		}
 
-		result := convertToResponsesInput(messages, "system")
+		result := convertToResponsesInput(messages, "system", false)
 
 		if len(result) != 1 {
 			t.Fatalf("expected 1 item, got %d", len(result))
@@ -34,7 +34,7 @@ func TestConvertToResponsesInput_SystemMessages(t *testing.T) {
 			message.NewSystemMessage("Hello"),
 		}
 
-		result := convertToResponsesInput(messages, "developer")
+		result := convertToResponsesInput(messages, "developer", false)
 
 		if len(result) != 1 {
 			t.Fatalf("expected 1 item, got %d", len(result))
@@ -52,7 +52,7 @@ func TestConvertToResponsesInput_SystemMessages(t *testing.T) {
 			message.NewSystemMessage("Hello"),
 		}
 
-		result := convertToResponsesInput(messages, "remove")
+		result := convertToResponsesInput(messages, "remove", false)
 
 		if len(result) != 0 {
 			t.Fatalf("expected 0 items, got %d", len(result))
@@ -64,7 +64,7 @@ func TestConvertToResponsesInput_SystemMessages(t *testing.T) {
 			message.NewSystemMessage("Hello"),
 		}
 
-		result := convertToResponsesInput(messages, "unknown")
+		result := convertToResponsesInput(messages, "unknown", false)
 
 		if len(result) != 1 {
 			t.Fatalf("expected 1 item, got %d", len(result))
@@ -81,7 +81,7 @@ func TestConvertToResponsesInput_UserMessages(t *testing.T) {
 			message.NewUserMessage("Hello"),
 		}
 
-		result := convertToResponsesInput(messages, "system")
+		result := convertToResponsesInput(messages, "system", false)
 
 		if len(result) != 1 {
 			t.Fatalf("expected 1 item, got %d", len(result))
@@ -107,13 +107,13 @@ func TestConvertToResponsesInput_UserMessages(t *testing.T) {
 				Content: message.Content{
 					Parts: []message.Part{
 						message.TextPart{Text: "Hello"},
-						message.ImagePart{Image: "https://example.com/image.jpg"},
+						message.FilePart{Data: message.FileDataURL{URL: "https://example.com/image.jpg"}, MimeType: "image/jpeg"},
 					},
 				},
 			},
 		}
 
-		result := convertToResponsesInput(messages, "system")
+		result := convertToResponsesInput(messages, "system", false)
 
 		if len(result) != 1 {
 			t.Fatalf("expected 1 item, got %d", len(result))
@@ -136,7 +136,7 @@ func TestConvertToResponsesInput_AssistantMessages(t *testing.T) {
 			message.NewAssistantMessage("Hello"),
 		}
 
-		result := convertToResponsesInput(messages, "system")
+		result := convertToResponsesInput(messages, "system", false)
 
 		if len(result) != 1 {
 			t.Fatalf("expected 1 item, got %d", len(result))
@@ -171,7 +171,7 @@ func TestConvertToResponsesInput_AssistantMessages(t *testing.T) {
 			},
 		}
 
-		result := convertToResponsesInput(messages, "system")
+		result := convertToResponsesInput(messages, "system", false)
 
 		// Should have function_call item
 		if len(result) != 1 {
@@ -199,14 +199,14 @@ func TestConvertToResponsesInput_ToolMessages(t *testing.T) {
 						message.ToolResultPart{
 							ToolCallID: "call_123",
 							ToolName:   "get_weather",
-							Result:     "Sunny, 72°F",
+							Output:     message.TextOutput{Value: "Sunny, 72°F"},
 						},
 					},
 				},
 			},
 		}
 
-		result := convertToResponsesInput(messages, "system")
+		result := convertToResponsesInput(messages, "system", false)
 
 		if len(result) != 1 {
 			t.Fatalf("expected 1 item, got %d", len(result))
@@ -231,14 +231,14 @@ func TestConvertToResponsesInput_ToolMessages(t *testing.T) {
 						message.ToolResultPart{
 							ToolCallID: "call_123",
 							ToolName:   "get_weather",
-							Result:     map[string]any{"temp": 72, "condition": "sunny"},
+							Output:     message.JSONOutput{Value: map[string]any{"temp": 72, "condition": "sunny"}},
 						},
 					},
 				},
 			},
 		}
 
-		result := convertToResponsesInput(messages, "system")
+		result := convertToResponsesInput(messages, "system", false)
 
 		if len(result) != 1 {
 			t.Fatalf("expected 1 item, got %d", len(result))
@@ -271,10 +271,10 @@ func TestConvertToResponsesInput_ToolResultMultipart(t *testing.T) {
 						message.ToolResultPart{
 							ToolCallID: "call_123",
 							ToolName:   "search",
-							Result:     "",
+							Output:     message.TextOutput{Value: ""},
 						},
-						message.ImagePart{
-							Image:    "base64_data",
+						message.FilePart{
+							Data:     message.FileDataBytes{Data: "base64_data"},
 							MimeType: "image/png",
 						},
 					},
@@ -282,7 +282,7 @@ func TestConvertToResponsesInput_ToolResultMultipart(t *testing.T) {
 			},
 		}
 
-		result := convertToResponsesInput(messages, "system")
+		result := convertToResponsesInput(messages, "system", false)
 
 		if len(result) != 1 {
 			t.Fatalf("expected 1 item, got %d", len(result))
@@ -318,17 +318,18 @@ func TestConvertToResponsesInput_ToolResultMultipart(t *testing.T) {
 						message.ToolResultPart{
 							ToolCallID: "call_123",
 							ToolName:   "screenshot",
-							Result:     "",
+							Output:     message.TextOutput{Value: ""},
 						},
-						message.ImagePart{
-							Image: "https://example.com/screenshot.png",
+						message.FilePart{
+							Data:     message.FileDataURL{URL: "https://example.com/screenshot.png"},
+							MimeType: "image/png",
 						},
 					},
 				},
 			},
 		}
 
-		result := convertToResponsesInput(messages, "system")
+		result := convertToResponsesInput(messages, "system", false)
 
 		parts, ok := result[0].Output.([]responsesContentPart)
 		if !ok {
@@ -348,10 +349,10 @@ func TestConvertToResponsesInput_ToolResultMultipart(t *testing.T) {
 						message.ToolResultPart{
 							ToolCallID: "call_123",
 							ToolName:   "search",
-							Result:     "",
+							Output:     message.TextOutput{Value: ""},
 						},
 						message.FilePart{
-							Data:     "AQIDBAU=",
+							Data:     message.FileDataBytes{Data: "AQIDBAU="},
 							MimeType: "application/pdf",
 							Filename: "document.pdf",
 						},
@@ -360,7 +361,7 @@ func TestConvertToResponsesInput_ToolResultMultipart(t *testing.T) {
 			},
 		}
 
-		result := convertToResponsesInput(messages, "system")
+		result := convertToResponsesInput(messages, "system", false)
 
 		parts, ok := result[0].Output.([]responsesContentPart)
 		if !ok {
@@ -388,10 +389,10 @@ func TestConvertToResponsesInput_ToolResultMultipart(t *testing.T) {
 						message.ToolResultPart{
 							ToolCallID: "call_789",
 							ToolName:   "fetch_report",
-							Result:     "",
+							Output:     message.TextOutput{Value: ""},
 						},
 						message.FilePart{
-							URL:      "https://files.example.com/q4.pdf",
+							Data:     message.FileDataURL{URL: "https://files.example.com/q4.pdf"},
 							MimeType: "application/pdf",
 							Filename: "q4.pdf",
 						},
@@ -400,7 +401,7 @@ func TestConvertToResponsesInput_ToolResultMultipart(t *testing.T) {
 			},
 		}
 
-		result := convertToResponsesInput(messages, "system")
+		result := convertToResponsesInput(messages, "system", false)
 
 		parts, ok := result[0].Output.([]responsesContentPart)
 		if !ok {
@@ -429,14 +430,14 @@ func TestConvertToResponsesInput_ToolResultMultipart(t *testing.T) {
 						message.ToolResultPart{
 							ToolCallID: "call_123",
 							ToolName:   "search",
-							Result:     "The weather in San Francisco is 72°F",
+							Output:     message.TextOutput{Value: "The weather in San Francisco is 72°F"},
 						},
-						message.ImagePart{
-							Image:    "base64_data",
+						message.FilePart{
+							Data:     message.FileDataBytes{Data: "base64_data"},
 							MimeType: "image/png",
 						},
 						message.FilePart{
-							Data:     "AQIDBAU=",
+							Data:     message.FileDataBytes{Data: "AQIDBAU="},
 							MimeType: "application/pdf",
 						},
 					},
@@ -444,7 +445,7 @@ func TestConvertToResponsesInput_ToolResultMultipart(t *testing.T) {
 			},
 		}
 
-		result := convertToResponsesInput(messages, "system")
+		result := convertToResponsesInput(messages, "system", false)
 
 		parts, ok := result[0].Output.([]responsesContentPart)
 		if !ok {
@@ -489,7 +490,7 @@ func TestConvertToResponsesInput_MixedConversation(t *testing.T) {
 						message.ToolResultPart{
 							ToolCallID: "call_1",
 							ToolName:   "get_weather",
-							Result:     "Sunny",
+							Output:     message.TextOutput{Value: "Sunny"},
 						},
 					},
 				},
@@ -497,7 +498,7 @@ func TestConvertToResponsesInput_MixedConversation(t *testing.T) {
 			message.NewAssistantMessage("The weather is sunny!"),
 		}
 
-		result := convertToResponsesInput(messages, "system")
+		result := convertToResponsesInput(messages, "system", false)
 
 		// Should have: system, user, function_call, function_call_output, assistant
 		if len(result) != 5 {
@@ -653,7 +654,7 @@ func TestConvertToResponsesInput_ReasoningParts(t *testing.T) {
 			},
 		}
 
-		result := convertToResponsesInputWithWarnings(messages, "system")
+		result := convertToResponsesInputWithWarnings(messages, "system", false)
 
 		if len(result.Input) != 1 {
 			t.Fatalf("expected 1 item, got %d", len(result.Input))
@@ -701,7 +702,7 @@ func TestConvertToResponsesInput_ReasoningParts(t *testing.T) {
 			},
 		}
 
-		result := convertToResponsesInputWithWarnings(messages, "system")
+		result := convertToResponsesInputWithWarnings(messages, "system", false)
 
 		// Should be merged into single reasoning message
 		if len(result.Input) != 1 {
@@ -747,7 +748,7 @@ func TestConvertToResponsesInput_ReasoningParts(t *testing.T) {
 			},
 		}
 
-		result := convertToResponsesInputWithWarnings(messages, "system")
+		result := convertToResponsesInputWithWarnings(messages, "system", false)
 
 		// Should have separate reasoning messages
 		if len(result.Input) != 2 {
@@ -778,7 +779,7 @@ func TestConvertToResponsesInput_ReasoningParts(t *testing.T) {
 			},
 		}
 
-		result := convertToResponsesInputWithWarnings(messages, "system")
+		result := convertToResponsesInputWithWarnings(messages, "system", false)
 
 		// Should skip the reasoning part and add a warning
 		if len(result.Input) != 0 {
@@ -812,7 +813,7 @@ func TestConvertToResponsesInput_ReasoningParts(t *testing.T) {
 			},
 		}
 
-		result := convertToResponsesInputWithWarnings(messages, "system")
+		result := convertToResponsesInputWithWarnings(messages, "system", false)
 
 		if len(result.Warnings) != 0 {
 			t.Errorf("expected 0 warnings, got %d: %+v", len(result.Warnings), result.Warnings)
@@ -858,7 +859,7 @@ func TestConvertToResponsesInput_ReasoningParts(t *testing.T) {
 			},
 		}
 
-		result := convertToResponsesInputWithWarnings(messages, "system")
+		result := convertToResponsesInputWithWarnings(messages, "system", false)
 
 		// Should have one reasoning message
 		if len(result.Input) != 1 {
@@ -898,7 +899,7 @@ func TestConvertToResponsesInput_ReasoningParts(t *testing.T) {
 			},
 		}
 
-		result := convertToResponsesInputWithWarnings(messages, "system")
+		result := convertToResponsesInputWithWarnings(messages, "system", false)
 
 		// Should have encrypted content from the second part
 		if result.Input[0].EncryptedContent != "gAAAA-updated" {
@@ -911,7 +912,7 @@ func TestConvertToResponsesInput_ReasoningParts(t *testing.T) {
 			message.NewSystemMessage("Hello"),
 		}
 
-		result := convertToResponsesInputWithWarnings(messages, "remove")
+		result := convertToResponsesInputWithWarnings(messages, "remove", false)
 
 		if len(result.Input) != 0 {
 			t.Errorf("expected 0 items, got %d", len(result.Input))
@@ -944,7 +945,7 @@ func TestConvertToResponsesInput_PhaseEchoesBack(t *testing.T) {
 			},
 		},
 	}
-	items := convertToResponsesInput(msgs, "system")
+	items := convertToResponsesInput(msgs, "system", false)
 	if len(items) != 1 {
 		t.Fatalf("expected 1 item, got %d", len(items))
 	}
@@ -960,4 +961,104 @@ func TestConvertToResponsesInput_PhaseEchoesBack(t *testing.T) {
 	if decoded["phase"] != "commentary" {
 		t.Errorf("marshaled JSON missing phase=commentary, got %s", raw)
 	}
+}
+
+// Namespace round-trips on function_call input items (ai-sdk #15193). When a
+// tool-call carries providerMetadata.openai.namespace, the serialized
+// function_call must echo it or OpenAI rejects the follow-up.
+func TestConvertToResponsesInput_NamespaceRoundTrip(t *testing.T) {
+	t.Run("forwards namespace from providerOptions.openai.namespace", func(t *testing.T) {
+		messages := []message.Message{
+			{
+				Role: message.RoleAssistant,
+				Content: message.Content{
+					Parts: []message.Part{
+						message.ToolCallPart{
+							ID:    "call_1",
+							Name:  "search",
+							Input: json.RawMessage(`{"q":"x"}`),
+							ProviderOptions: map[string]any{
+								"openai": map[string]any{"namespace": "mcp_server"},
+							},
+						},
+					},
+				},
+			},
+		}
+		result := convertToResponsesInput(messages, "system", false)
+		if len(result) != 1 || result[0].Type != "function_call" {
+			t.Fatalf("expected one function_call item, got %+v", result)
+		}
+		if result[0].Namespace != "mcp_server" {
+			t.Errorf("namespace = %q, want mcp_server", result[0].Namespace)
+		}
+		b, err := json.Marshal(result[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatal(err)
+		}
+		if m["namespace"] != "mcp_server" {
+			t.Errorf("serialized namespace = %v, want mcp_server", m["namespace"])
+		}
+	})
+
+	t.Run("omits namespace when absent", func(t *testing.T) {
+		messages := []message.Message{
+			{
+				Role: message.RoleAssistant,
+				Content: message.Content{
+					Parts: []message.Part{
+						message.ToolCallPart{ID: "call_1", Name: "search", Input: json.RawMessage(`{}`)},
+					},
+				},
+			},
+		}
+		b, err := json.Marshal(convertToResponsesInput(messages, "system", false)[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := m["namespace"]; ok {
+			t.Errorf("namespace should be omitted, got %v", m["namespace"])
+		}
+	})
+}
+
+// Opt-in pass-through for unsupported file media types (ai-sdk #15297).
+func TestConvertToResponsesContentParts_PassThroughUnsupportedFiles(t *testing.T) {
+	content := message.Content{
+		Parts: []message.Part{
+			message.FilePart{MimeType: "text/csv", Data: message.FileDataBytes{Data: "Zm9v"}, Filename: "data.csv"},
+		},
+	}
+
+	t.Run("drops non-image non-pdf files by default", func(t *testing.T) {
+		parts := convertToResponsesContentParts(content, false)
+		if len(parts) != 0 {
+			t.Errorf("expected file dropped, got %+v", parts)
+		}
+	})
+
+	t.Run("forwards file with its media type when enabled", func(t *testing.T) {
+		parts := convertToResponsesContentParts(content, true)
+		if len(parts) != 1 {
+			t.Fatalf("expected 1 part, got %d", len(parts))
+		}
+		if parts[0].Type != "input_file" {
+			t.Errorf("type = %q, want input_file", parts[0].Type)
+		}
+		if parts[0].Filename != "data.csv" {
+			t.Errorf("filename = %q, want data.csv", parts[0].Filename)
+		}
+		want := "data:text/csv;base64,Zm9v"
+		if parts[0].FileData != want {
+			t.Errorf("fileData = %q, want %q", parts[0].FileData, want)
+		}
+	})
 }

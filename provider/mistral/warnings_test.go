@@ -6,7 +6,7 @@ import (
 	"github.com/airlockrun/goai/stream"
 )
 
-func intPtr(v int) *int       { return &v }
+func intPtr(v int) *int           { return &v }
 func floatPtr(v float64) *float64 { return &v }
 
 func hasWarningFeature(warnings []stream.Warning, feature string) bool {

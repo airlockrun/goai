@@ -88,6 +88,7 @@ func (p *Provider) Models() []string {
 		"gemini-3.1-flash-image-preview",
 		"gemini-3.1-flash-lite-preview",
 		"gemini-3.1-flash-tts-preview",
+		"gemini-3.5-flash",
 		// Gemini 2.5
 		"gemini-2.5-pro",
 		"gemini-2.5-flash",
@@ -108,6 +109,7 @@ func (p *Provider) Models() []string {
 		// Embedding + image
 		"text-embedding-005",
 		"text-embedding-004",
+		"gemini-embedding-2",
 		"textembedding-gecko@003",
 		"imagegeneration@006",
 		// MaaS models live in the dedicated vertexmaas package.
@@ -118,8 +120,23 @@ func (p *Provider) baseURL() string {
 	if p.opts.BaseURL != "" {
 		return p.opts.BaseURL
 	}
-	return fmt.Sprintf("https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s",
-		p.opts.Location, p.opts.ProjectID, p.opts.Location)
+	return fmt.Sprintf("https://%s/v1/projects/%s/locations/%s",
+		vertexHost(p.opts.Location), p.opts.ProjectID, p.opts.Location)
+}
+
+// vertexHost maps a Vertex location to its API host. "global" uses the
+// region-less host, the "eu" and "us" multi-region locations use the
+// dedicated `.rep.` hosts, and every other location is region-prefixed.
+// Mirrors ai-sdk's getHost (#b70f6ec).
+func vertexHost(location string) string {
+	switch location {
+	case "global":
+		return "aiplatform.googleapis.com"
+	case "eu", "us":
+		return fmt.Sprintf("aiplatform.%s.rep.googleapis.com", location)
+	default:
+		return fmt.Sprintf("%s-aiplatform.googleapis.com", location)
+	}
 }
 
 var _ provider.Provider = (*Provider)(nil)
@@ -287,13 +304,23 @@ func convertMessage(msg message.Message) map[string]any {
 			switch p := part.(type) {
 			case message.TextPart:
 				parts = append(parts, map[string]any{"text": p.Text})
-			case message.ImagePart:
-				parts = append(parts, map[string]any{
-					"inlineData": map[string]any{
-						"mimeType": p.MimeType,
-						"data":     p.Image,
-					},
-				})
+			case message.FilePart:
+				switch d := p.Data.(type) {
+				case message.FileDataBytes:
+					parts = append(parts, map[string]any{
+						"inlineData": map[string]any{
+							"mimeType": p.MimeType,
+							"data":     d.Data,
+						},
+					})
+				case message.FileDataURL:
+					parts = append(parts, map[string]any{
+						"fileData": map[string]any{
+							"mimeType": p.MimeType,
+							"fileUri":  d.URL,
+						},
+					})
+				}
 			case message.ToolCallPart:
 				parts = append(parts, map[string]any{
 					"functionCall": map[string]any{
@@ -302,11 +329,10 @@ func convertMessage(msg message.Message) map[string]any {
 					},
 				})
 			case message.ToolResultPart:
-				resultBytes, _ := json.Marshal(p.Result)
 				parts = append(parts, map[string]any{
 					"functionResponse": map[string]any{
 						"name":     p.ToolName,
-						"response": json.RawMessage(resultBytes),
+						"response": map[string]any{"result": message.ToolOutputWire(p.Output)},
 					},
 				})
 			}

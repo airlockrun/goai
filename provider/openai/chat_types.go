@@ -2,7 +2,7 @@ package openai
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"strings"
 
 	"github.com/airlockrun/goai/message"
@@ -107,12 +107,16 @@ type chatCompletionChunk struct {
 	Model   string            `json:"model"`
 	Choices []chatChunkChoice `json:"choices"`
 	Usage   *chatUsage        `json:"usage,omitempty"`
+	// Error rides on a top-level stream frame when OpenAI returns HTTP 200 and
+	// then fails (e.g. insufficient_quota). Surfaced as a terminating error
+	// when it arrives before any output. ai-sdk #15922.
+	Error *OpenAIErrorInfo `json:"error,omitempty"`
 }
 
 type chatChunkChoice struct {
-	Index        int              `json:"index"`
-	Delta        chatChunkDelta   `json:"delta"`
-	FinishReason string           `json:"finish_reason,omitempty"`
+	Index        int                `json:"index"`
+	Delta        chatChunkDelta     `json:"delta"`
+	FinishReason string             `json:"finish_reason,omitempty"`
 	Logprobs     *chatChunkLogprobs `json:"logprobs,omitempty"`
 }
 
@@ -201,30 +205,18 @@ func convertToChatMessages(messages []message.Message) ([]chatMessage, error) {
 			result = append(result, cm)
 		case message.RoleTool:
 			// Chat Completions only supports string tool results.
-			// Error if the message contains ImagePart or FilePart.
+			// Error if the message contains a FilePart.
 			for _, part := range msg.Content.Parts {
-				switch part.(type) {
-				case message.ImagePart:
-					return nil, fmt.Errorf("openai chat completions does not support image parts in tool results")
-				case message.FilePart:
-					return nil, fmt.Errorf("openai chat completions does not support file parts in tool results")
+				if _, ok := part.(message.FilePart); ok {
+					return nil, errors.New("openai chat completions does not support file parts in tool results")
 				}
 			}
 
 			for _, part := range msg.Content.Parts {
 				if tr, ok := part.(message.ToolResultPart); ok {
-					resultStr := ""
-					switch v := tr.Result.(type) {
-					case string:
-						resultStr = v
-					default:
-						if b, err := json.Marshal(v); err == nil {
-							resultStr = string(b)
-						}
-					}
 					result = append(result, chatMessage{
 						Role:       "tool",
-						Content:    resultStr,
+						Content:    message.ToolOutputWire(tr.Output),
 						ToolCallID: tr.ToolCallID,
 					})
 				}
@@ -277,36 +269,44 @@ func convertUserContent(content message.Content) any {
 				Type: "text",
 				Text: p.Text,
 			})
-		case message.ImagePart:
-			imageURL := p.Image
-			if !strings.HasPrefix(imageURL, "http") && !strings.HasPrefix(imageURL, "data:") {
-				mime := p.MimeType
-				if mime == "" {
-					mime = "image/png"
-				}
-				imageURL = "data:" + mime + ";base64," + imageURL
-			}
-			result = append(result, chatContentPart{
-				Type: "image_url",
-				ImageURL: &chatImageURL{
-					URL: imageURL,
-				},
-			})
 		case message.FilePart:
-			if p.MimeType == "application/pdf" {
-				filename := p.Filename
-				if filename == "" {
-					filename = "document.pdf"
+			switch d := p.Data.(type) {
+			case message.FileDataBytes:
+				if strings.HasPrefix(p.MimeType, "image/") {
+					result = append(result, chatContentPart{
+						Type: "image_url",
+						ImageURL: &chatImageURL{
+							URL: "data:" + p.MimeType + ";base64," + d.Data,
+						},
+					})
+				} else if p.MimeType == "application/pdf" {
+					filename := p.Filename
+					if filename == "" {
+						filename = "document.pdf"
+					}
+					result = append(result, chatContentPart{
+						Type: "file",
+						File: &chatFile{
+							Filename: filename,
+							FileData: "data:application/pdf;base64," + d.Data,
+						},
+					})
 				}
-				result = append(result, chatContentPart{
-					Type: "file",
-					File: &chatFile{
-						Filename: filename,
-						FileData: "data:application/pdf;base64," + p.Data,
-					},
-				})
+				// OpenAI chat only supports image and PDF file parts; other
+				// byte types are skipped.
+			case message.FileDataURL:
+				if strings.HasPrefix(p.MimeType, "image/") {
+					result = append(result, chatContentPart{
+						Type: "image_url",
+						ImageURL: &chatImageURL{
+							URL: d.URL,
+						},
+					})
+				}
+				// Chat Completions accepts remote URLs only for images.
 			}
-			// OpenAI only supports PDF file parts; other types are silently skipped.
+			// FileDataText / FileDataReference are not representable on the
+			// chat content surface; skip.
 		}
 	}
 	return result
@@ -320,7 +320,7 @@ func convertToChatTools(tools []tool.Tool) []chatTool {
 		// hosted tools (web_search, custom, tool_search, ...) are only supported
 		// on the Responses API; ai-sdk's prepareChatTools emits an 'unsupported'
 		// warning and drops them.
-		if t.Type == "provider" {
+		if t.IsProviderTool() {
 			continue
 		}
 		result = append(result, chatTool{

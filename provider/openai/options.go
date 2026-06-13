@@ -1,5 +1,13 @@
 package openai
 
+// AllowedTools restricts which tools the model may call without removing any
+// from the request, preserving prompt caching. Mode is "auto" (default) or
+// "required". ai-sdk #15038.
+type AllowedTools struct {
+	ToolNames []string `json:"toolNames"`
+	Mode      string   `json:"mode,omitempty"`
+}
+
 // ResponsesOptions contains provider-specific options for the OpenAI Responses API.
 // These options match ai-sdk's OpenAIResponsesProviderOptions schema.
 // See: ai-sdk/packages/openai/src/responses/openai-responses-options.ts
@@ -35,6 +43,13 @@ type ResponsesOptions struct {
 	// Defaults to true.
 	ParallelToolCalls *bool `json:"parallelToolCalls,omitempty"`
 
+	// AllowedTools restricts the callable tools to a subset while keeping the
+	// full tools list intact, so prompt caching is preserved across requests
+	// with different allowlists. When set, it overrides the request-level
+	// ToolChoice and emits tool_choice: {type: "allowed_tools", mode, tools}.
+	// ai-sdk #15038.
+	AllowedTools *AllowedTools `json:"allowedTools,omitempty"`
+
 	// PreviousResponseID is the ID of the previous response for conversation continuation.
 	PreviousResponseID string `json:"previousResponseId,omitempty"`
 
@@ -64,6 +79,12 @@ type ResponsesOptions struct {
 
 	// Store controls whether to store the generation. Defaults to true.
 	Store *bool `json:"store,omitempty"`
+
+	// PassThroughUnsupportedFiles forwards non-image inline file parts as
+	// generic input files. Inline file inputs are otherwise restricted to
+	// images and PDFs; enable this when the target model accepts additional
+	// media types such as text/csv. ai-sdk #15297.
+	PassThroughUnsupportedFiles bool `json:"passThroughUnsupportedFiles,omitempty"`
 
 	// StrictJsonSchema controls whether to use strict JSON schema validation.
 	// Defaults to true.

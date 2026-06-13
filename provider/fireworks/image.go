@@ -44,10 +44,10 @@ var modelToBackendConfig = map[string]backendConfig{
 // generation and editing endpoints. Mirrors ai-sdk's FireworksImageModel.
 // See: ai-sdk/packages/fireworks/src/fireworks-image-model.ts
 type FireworksImageModel struct {
-	id               string
-	provider         *Provider
-	pollIntervalMS   int
-	pollTimeoutMS    int
+	id             string
+	provider       *Provider
+	pollIntervalMS int
+	pollTimeoutMS  int
 }
 
 // ID returns the model identifier.
@@ -421,9 +421,9 @@ type asyncSubmitResponse struct {
 
 // asyncPollResponse mirrors ai-sdk asyncPollResponseSchema.
 type asyncPollResponse struct {
-	ID     string             `json:"id"`
-	Status string             `json:"status"`
-	Result *asyncPollResult   `json:"result"`
+	ID     string           `json:"id"`
+	Status string           `json:"status"`
+	Result *asyncPollResult `json:"result"`
 }
 
 type asyncPollResult struct {

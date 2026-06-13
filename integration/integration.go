@@ -311,7 +311,7 @@ func TestImageInput(t *testing.T, m stream.Model, imageURL string) {
 				Content: message.Content{
 					Parts: []message.Part{
 						message.TextPart{Text: "Describe the image in detail."},
-						message.ImagePart{Image: imageURL},
+						message.FilePart{Data: message.FileDataURL{URL: imageURL}, MimeType: "image/jpeg"},
 					},
 				},
 			},

@@ -26,6 +26,13 @@ type Options struct {
 	APIVersion     string // API version, defaults to 2024-02-15-preview
 	BaseURL        string // Optional: override base URL (for testing)
 	Headers        map[string]string
+
+	// TokenProvider returns a Microsoft Entra ID (formerly Azure Active
+	// Directory) bearer token, invoked on every request. When set, requests
+	// carry "Authorization: Bearer <token>" instead of the "api-key" header.
+	// Mutually exclusive with APIKey. Mirrors ai-sdk's azureADTokenProvider
+	// (references/ai-sdk/packages/azure/src/azure-openai-provider.ts).
+	TokenProvider func() (string, error)
 }
 
 // Provider implements the Azure OpenAI provider.
@@ -35,10 +42,29 @@ type Provider struct {
 
 // New creates a new Azure OpenAI provider.
 func New(opts Options) *Provider {
+	if opts.APIKey != "" && opts.TokenProvider != nil {
+		panic("azure: provide only one of APIKey or TokenProvider, not both")
+	}
 	if opts.APIVersion == "" {
 		opts.APIVersion = "2024-02-15-preview"
 	}
 	return &Provider{opts: opts}
+}
+
+// setAuth applies the provider's authentication header to req: a Microsoft
+// Entra ID bearer token when TokenProvider is set, otherwise the api-key
+// header.
+func (p *Provider) setAuth(req *http.Request) error {
+	if p.opts.TokenProvider != nil {
+		token, err := p.opts.TokenProvider()
+		if err != nil {
+			return fmt.Errorf("azure token provider: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		return nil
+	}
+	req.Header.Set("api-key", p.opts.APIKey)
+	return nil
 }
 
 func (p *Provider) ID() string { return "azure" }
@@ -245,7 +271,10 @@ func (m *AzureLanguageModel) doStream(ctx context.Context, options *stream.CallO
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("api-key", m.provider.opts.APIKey)
+	if err := m.provider.setAuth(req); err != nil {
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+		return
+	}
 	for k, v := range m.provider.opts.Headers {
 		req.Header.Set(k, v)
 	}
@@ -294,12 +323,23 @@ func convertMessage(msg message.Message) map[string]any {
 				"type": "text",
 				"text": p.Text,
 			})
-		case message.ImagePart:
+		case message.FilePart:
+			// Azure chat completions accepts images via image_url.
+			if !strings.HasPrefix(p.MimeType, "image/") {
+				continue
+			}
+			var url string
+			switch d := p.Data.(type) {
+			case message.FileDataBytes:
+				url = "data:" + p.MimeType + ";base64," + d.Data
+			case message.FileDataURL:
+				url = d.URL
+			default:
+				continue
+			}
 			parts = append(parts, map[string]any{
-				"type": "image_url",
-				"image_url": map[string]any{
-					"url": p.Image,
-				},
+				"type":      "image_url",
+				"image_url": map[string]any{"url": url},
 			})
 		case message.ToolCallPart:
 			// Tool calls go in tool_calls array, not content
@@ -318,8 +358,7 @@ func convertMessage(msg message.Message) map[string]any {
 			result["tool_calls"] = toolCalls
 		case message.ToolResultPart:
 			result["tool_call_id"] = p.ToolCallID
-			resultBytes, _ := json.Marshal(p.Result)
-			result["content"] = string(resultBytes)
+			result["content"] = message.ToolOutputWire(p.Output)
 			return result
 		}
 	}

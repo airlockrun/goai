@@ -299,26 +299,27 @@ func convertUserPart(part message.Part, downloadedAssets map[string]*DownloadedA
 			Text: p.Text,
 		}
 
-	case message.ImagePart:
-		data, mediaType := processDataContent(p.Image, p.MimeType, downloadedAssets)
-		// Detect media type from data if not provided or is a wildcard
-		if mediaType == "" || mediaType == "image/*" {
+	case message.FilePart:
+		var raw string
+		switch d := p.Data.(type) {
+		case message.FileDataBytes:
+			raw = d.Data
+		case message.FileDataURL:
+			raw = d.URL
+		default:
+			return LanguageModelPart{Type: "file", MediaType: p.MimeType, Filename: p.Filename}
+		}
+		data, mediaType := processDataContent(raw, p.MimeType, downloadedAssets)
+		if mediaType == "" && p.MimeType != "" {
+			mediaType = p.MimeType
+		}
+		// Detect an image media type from the bytes when absent or a wildcard.
+		if strings.HasPrefix(p.MimeType, "image/") && (mediaType == "" || mediaType == "image/*") {
 			if detected := detectImageMediaType(data); detected != "" {
 				mediaType = detected
 			} else if mediaType == "" {
 				mediaType = "image/*"
 			}
-		}
-		return LanguageModelPart{
-			Type:      "file",
-			Data:      data,
-			MediaType: mediaType,
-		}
-
-	case message.FilePart:
-		data, mediaType := processDataContent(p.Data, p.MimeType, downloadedAssets)
-		if mediaType == "" && p.MimeType != "" {
-			mediaType = p.MimeType
 		}
 		return LanguageModelPart{
 			Type:      "file",
@@ -368,7 +369,7 @@ func convertAssistantPart(part message.Part) *LanguageModelPart {
 			Type:       "tool-result",
 			ToolCallID: p.ToolCallID,
 			ToolName:   p.ToolName,
-			Output:     p.Result,
+			Output:     mapToolResultOutput(p.Output),
 		}
 
 	case message.ToolApprovalRequestPart:
@@ -388,7 +389,7 @@ func convertToolPart(part message.Part) *LanguageModelPart {
 			Type:       "tool-result",
 			ToolCallID: p.ToolCallID,
 			ToolName:   p.ToolName,
-			Output:     mapToolResultOutput(p.Result),
+			Output:     mapToolResultOutput(p.Output),
 		}
 
 	case message.ToolApprovalResponsePart:
@@ -572,15 +573,19 @@ func downloadAssets(ctx context.Context, messages []message.Message, download Do
 			var mediaType string
 
 			switch p := part.(type) {
-			case message.ImagePart:
-				data = p.Image
+			case message.FilePart:
+				switch d := p.Data.(type) {
+				case message.FileDataBytes:
+					data = d.Data
+				case message.FileDataURL:
+					data = d.URL
+				default:
+					continue
+				}
 				mediaType = p.MimeType
-				if mediaType == "" {
+				if mediaType == "" && strings.HasPrefix(p.MimeType, "image/") {
 					mediaType = "image/*"
 				}
-			case message.FilePart:
-				data = p.Data
-				mediaType = p.MimeType
 			default:
 				continue
 			}
@@ -775,11 +780,12 @@ func detectImageMediaType(data any) string {
 	return ""
 }
 
-// mapToolResultOutput maps tool result output to the language model format.
-func mapToolResultOutput(output any) any {
-	// For now, pass through the output
-	// ai-sdk has more complex mapping for content types
-	return output
+// mapToolResultOutput maps a discriminated tool-result output to the
+// language-model-prompt representation — the single wire string per
+// ai-sdk's converter (text/error → value, denied → reason, json/content →
+// JSON).
+func mapToolResultOutput(output message.ToolResultOutput) any {
+	return message.ToolOutputWire(output)
 }
 
 // getTextFromContent extracts text from message content.

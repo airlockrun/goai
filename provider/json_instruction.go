@@ -12,9 +12,9 @@ import (
 // output from the model via a system-message instruction.
 
 const (
-	jsonSchemaPrefix   = "JSON schema:"
-	jsonSchemaSuffix   = "You MUST answer with a JSON object that matches the JSON schema above."
-	jsonGenericSuffix  = "You MUST answer with JSON."
+	jsonSchemaPrefix  = "JSON schema:"
+	jsonSchemaSuffix  = "You MUST answer with a JSON object that matches the JSON schema above."
+	jsonGenericSuffix = "You MUST answer with JSON."
 )
 
 // BuildJSONInstruction returns the instruction text that is injected into the

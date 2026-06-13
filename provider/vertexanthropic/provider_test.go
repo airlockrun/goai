@@ -68,6 +68,16 @@ func TestProvider_BaseURL(t *testing.T) {
 			want: "https://aiplatform.googleapis.com/v1/projects/test-project/locations/global/publishers/anthropic/models",
 		},
 		{
+			name: "eu multi-region uses rep host",
+			opts: Options{Project: "test-project", Location: "eu"},
+			want: "https://aiplatform.eu.rep.googleapis.com/v1/projects/test-project/locations/eu/publishers/anthropic/models",
+		},
+		{
+			name: "us multi-region uses rep host",
+			opts: Options{Project: "test-project", Location: "us"},
+			want: "https://aiplatform.us.rep.googleapis.com/v1/projects/test-project/locations/us/publishers/anthropic/models",
+		},
+		{
 			name: "default location is us-central1",
 			opts: Options{Project: "test-project"},
 			want: "https://us-central1-aiplatform.googleapis.com/v1/projects/test-project/locations/us-central1/publishers/anthropic/models",

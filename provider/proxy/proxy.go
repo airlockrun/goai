@@ -42,6 +42,28 @@ type Options struct {
 	// MaxRetries is the maximum number of retry attempts for transient errors.
 	// Defaults to 5.
 	MaxRetries int
+
+	// Headers are extra HTTP headers attached to every proxied request
+	// (streaming and non-streaming). The proxy package itself is generic;
+	// callers (e.g. agentsdk) use this to carry run attribution such as
+	// X-Airlock-Run-ID. Authorization/Content-Type are set separately and
+	// are not overridable here.
+	Headers map[string]string
+}
+
+// applyHeaders sets Content-Type, optional bearer auth, and any caller-supplied
+// extra headers on req. Extra headers cannot clobber Content-Type/Authorization.
+func applyHeaders(req *http.Request, opts Options) {
+	req.Header.Set("Content-Type", "application/json")
+	if opts.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+opts.Token)
+	}
+	for k, v := range opts.Headers {
+		if k == "Content-Type" || k == "Authorization" {
+			continue
+		}
+		req.Header.Set(k, v)
+	}
 }
 
 // proxyRequest is the JSON body sent to the proxy endpoint.
@@ -76,7 +98,7 @@ type proxyModel struct {
 }
 
 func (m *proxyModel) ID() string       { return m.modelID }
-func (m *proxyModel) Provider() string  { return "proxy" }
+func (m *proxyModel) Provider() string { return "proxy" }
 
 func (m *proxyModel) Stream(ctx context.Context, options *stream.CallOptions) (<-chan stream.Event, error) {
 	events := make(chan stream.Event, 100)
@@ -113,10 +135,7 @@ func (m *proxyModel) doStream(ctx context.Context, options *stream.CallOptions, 
 			events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
 			return
 		}
-		req.Header.Set("Content-Type", "application/json")
-		if m.opts.Token != "" {
-			req.Header.Set("Authorization", "Bearer "+m.opts.Token)
-		}
+		applyHeaders(req, m.opts)
 
 		resp, err := m.opts.Client.Do(req)
 		if err != nil {
@@ -242,19 +261,13 @@ func parseNDJSONEvent(line []byte) (stream.Event, error) {
 		json.Unmarshal(envelope.Data, &d)
 		data = d
 	case stream.EventToolError:
-		var d struct {
-			ToolCallID string          `json:"toolCallId"`
-			ToolName   string          `json:"toolName"`
-			Input      json.RawMessage `json:"input,omitempty"`
-			Error      string          `json:"error"`
-		}
+		var d stream.ToolErrorEvent
 		json.Unmarshal(envelope.Data, &d)
-		data = stream.ToolErrorEvent{
-			ToolCallID: d.ToolCallID,
-			ToolName:   d.ToolName,
-			Input:      d.Input,
-			Error:      fmt.Errorf("%s", d.Error),
-		}
+		data = d
+	case stream.EventToolOutputDenied:
+		var d stream.ToolOutputDeniedEvent
+		json.Unmarshal(envelope.Data, &d)
+		data = d
 	case stream.EventReasoningStart:
 		var d stream.ReasoningStartEvent
 		json.Unmarshal(envelope.Data, &d)

@@ -22,7 +22,7 @@ func TestConvertToGeminiParts_UserMessages(t *testing.T) {
 	t.Run("should convert simple text message", func(t *testing.T) {
 		content := message.Content{Text: "Hello, world!"}
 
-		result := convertToGeminiParts(content)
+		result, _ := convertToGeminiParts(content)
 
 		if len(result) != 1 {
 			t.Fatalf("expected 1 part, got %d", len(result))
@@ -40,7 +40,7 @@ func TestConvertToGeminiParts_UserMessages(t *testing.T) {
 			},
 		}
 
-		result := convertToGeminiParts(content)
+		result, _ := convertToGeminiParts(content)
 
 		if len(result) != 2 {
 			t.Fatalf("expected 2 parts, got %d", len(result))
@@ -57,14 +57,14 @@ func TestConvertToGeminiParts_UserMessages(t *testing.T) {
 		content := message.Content{
 			Parts: []message.Part{
 				message.TextPart{Text: "Look at this:"},
-				message.ImagePart{
-					Image:    "base64encodeddata",
+				message.FilePart{
+					Data:     message.FileDataBytes{Data: "base64encodeddata"},
 					MimeType: "image/png",
 				},
 			},
 		}
 
-		result := convertToGeminiParts(content)
+		result, _ := convertToGeminiParts(content)
 
 		if len(result) != 2 {
 			t.Fatalf("expected 2 parts, got %d", len(result))
@@ -124,6 +124,10 @@ func TestConvertAssistantParts(t *testing.T) {
 		if result[0].FunctionCall.Name != "get_weather" {
 			t.Errorf("expected name 'get_weather', got '%s'", result[0].FunctionCall.Name)
 		}
+		// Tool call id rides through as functionCall.id. ai-sdk #15317.
+		if result[0].FunctionCall.ID != "call_123" {
+			t.Errorf("expected id 'call_123', got '%s'", result[0].FunctionCall.ID)
+		}
 		if result[0].FunctionCall.Args["location"] != "NYC" {
 			t.Errorf("expected location 'NYC', got '%v'", result[0].FunctionCall.Args["location"])
 		}
@@ -174,7 +178,7 @@ func TestConvertToolMessages_Google(t *testing.T) {
 					message.ToolResultPart{
 						ToolCallID: "call_123",
 						ToolName:   "get_weather",
-						Result:     "72°F",
+						Output:     message.TextOutput{Value: "72°F"},
 					},
 				},
 			},
@@ -188,7 +192,7 @@ func TestConvertToolMessages_Google(t *testing.T) {
 				parts = append(parts, geminiPart{
 					FunctionResponse: &geminiFunctionResponse{
 						Name:     p.ToolName,
-						Response: map[string]any{"result": p.Result},
+						Response: map[string]any{"result": message.ToolOutputWire(p.Output)},
 					},
 				})
 			}
@@ -213,10 +217,10 @@ func TestConvertToolMessages_Google(t *testing.T) {
 					message.ToolResultPart{
 						ToolCallID: "call_123",
 						ToolName:   "screenshot",
-						Result:     "screenshot taken",
+						Output:     message.TextOutput{Value: "screenshot taken"},
 					},
-					message.ImagePart{
-						Image:    "iVBORw0KGgo=",
+					message.FilePart{
+						Data:     message.FileDataBytes{Data: "iVBORw0KGgo="},
 						MimeType: "image/png",
 					},
 				},
@@ -231,19 +235,23 @@ func TestConvertToolMessages_Google(t *testing.T) {
 				parts = append(parts, geminiPart{
 					FunctionResponse: &geminiFunctionResponse{
 						Name:     p.ToolName,
-						Response: map[string]any{"result": p.Result},
+						Response: map[string]any{"result": message.ToolOutputWire(p.Output)},
 					},
 				})
-			case message.ImagePart:
-				parts = append(parts, geminiPart{
-					InlineData: &geminiInlineData{
-						MimeType: p.MimeType,
-						Data:     p.Image,
-					},
-				})
-				parts = append(parts, geminiPart{
-					Text: "Tool executed successfully and returned this image as a response",
-				})
+			case message.FilePart:
+				if d, ok := p.Data.(message.FileDataBytes); ok {
+					parts = append(parts, geminiPart{
+						InlineData: &geminiInlineData{
+							MimeType: p.MimeType,
+							Data:     d.Data,
+						},
+					})
+					if isImageMimeType(p.MimeType) {
+						parts = append(parts, geminiPart{
+							Text: "Tool executed successfully and returned this image as a response",
+						})
+					}
+				}
 			}
 		}
 
@@ -304,7 +312,7 @@ func TestGetTextFromContent_Google(t *testing.T) {
 	t.Run("should return empty string for no text", func(t *testing.T) {
 		content := message.Content{
 			Parts: []message.Part{
-				message.ImagePart{Image: "data"},
+				message.FilePart{Data: message.FileDataBytes{Data: "data"}, MimeType: "image/png"},
 			},
 		}
 
@@ -316,14 +324,14 @@ func TestGetTextFromContent_Google(t *testing.T) {
 	})
 }
 
-// Verifies convertToGeminiParts emits fileData (not inlineData) when a
-// FilePart carries a URL or an ImagePart's Image is http/https — matches
-// ai-sdk's convert-to-google-generative-ai-messages.ts handling of
-// URL-backed file parts.
-func TestConvertToGeminiParts_URLBacked(t *testing.T) {
-	t.Run("ImagePart with https URL becomes fileData", func(t *testing.T) {
-		parts := convertToGeminiParts(message.Content{Parts: []message.Part{
-			message.ImagePart{Image: "https://example.com/cat.png", MimeType: "image/png"},
+// Verifies convertToGeminiParts emits fileData for URL-backed file data and
+// inlineData for inline base64, and warns on file data types Gemini's request
+// shape can't carry. Matches ai-sdk's
+// convert-to-google-generative-ai-messages.ts handling of file parts.
+func TestConvertToGeminiParts_FileData(t *testing.T) {
+	t.Run("image FileDataURL becomes fileData", func(t *testing.T) {
+		parts, warnings := convertToGeminiParts(message.Content{Parts: []message.Part{
+			message.FilePart{Data: message.FileDataURL{URL: "https://example.com/cat.png"}, MimeType: "image/png"},
 		}})
 		if len(parts) != 1 || parts[0].FileData == nil {
 			t.Fatalf("expected single fileData part, got %+v", parts)
@@ -334,32 +342,59 @@ func TestConvertToGeminiParts_URLBacked(t *testing.T) {
 		if parts[0].InlineData != nil {
 			t.Error("InlineData should be nil when URL was provided")
 		}
+		if len(warnings) != 0 {
+			t.Errorf("unexpected warnings: %+v", warnings)
+		}
 	})
 
-	t.Run("ImagePart with base64 stays as inlineData", func(t *testing.T) {
-		parts := convertToGeminiParts(message.Content{Parts: []message.Part{
-			message.ImagePart{Image: "base64data", MimeType: "image/png"},
+	t.Run("image FileDataBytes stays as inlineData", func(t *testing.T) {
+		parts, _ := convertToGeminiParts(message.Content{Parts: []message.Part{
+			message.FilePart{Data: message.FileDataBytes{Data: "base64data"}, MimeType: "image/png"},
 		}})
 		if parts[0].InlineData == nil || parts[0].FileData != nil {
 			t.Errorf("expected inlineData only, got %+v", parts[0])
 		}
 	})
 
-	t.Run("FilePart.URL becomes fileData", func(t *testing.T) {
-		parts := convertToGeminiParts(message.Content{Parts: []message.Part{
-			message.FilePart{URL: "gs://bucket/doc.pdf", MimeType: "application/pdf"},
+	t.Run("FileDataURL becomes fileData", func(t *testing.T) {
+		parts, _ := convertToGeminiParts(message.Content{Parts: []message.Part{
+			message.FilePart{Data: message.FileDataURL{URL: "gs://bucket/doc.pdf"}, MimeType: "application/pdf"},
 		}})
 		if parts[0].FileData == nil || parts[0].FileData.FileURI != "gs://bucket/doc.pdf" {
 			t.Errorf("FileData = %+v", parts[0].FileData)
 		}
 	})
 
-	t.Run("FilePart.Data becomes inlineData", func(t *testing.T) {
-		parts := convertToGeminiParts(message.Content{Parts: []message.Part{
-			message.FilePart{Data: "b64", MimeType: "application/pdf"},
+	t.Run("FileDataBytes becomes inlineData", func(t *testing.T) {
+		parts, _ := convertToGeminiParts(message.Content{Parts: []message.Part{
+			message.FilePart{Data: message.FileDataBytes{Data: "b64"}, MimeType: "application/pdf"},
 		}})
 		if parts[0].InlineData == nil || parts[0].InlineData.Data != "b64" {
 			t.Errorf("InlineData = %+v", parts[0].InlineData)
+		}
+	})
+
+	t.Run("FileDataText warns and is skipped", func(t *testing.T) {
+		parts, warnings := convertToGeminiParts(message.Content{Parts: []message.Part{
+			message.FilePart{Data: message.FileDataText{Text: "hi"}, MimeType: "text/plain"},
+		}})
+		if len(parts) != 0 {
+			t.Errorf("expected no parts, got %+v", parts)
+		}
+		if len(warnings) != 1 || warnings[0].Type != stream.WarningUnsupported {
+			t.Errorf("expected one unsupported warning, got %+v", warnings)
+		}
+	})
+
+	t.Run("FileDataReference warns and is skipped", func(t *testing.T) {
+		parts, warnings := convertToGeminiParts(message.Content{Parts: []message.Part{
+			message.FilePart{Data: message.FileDataReference{Reference: map[string]any{"id": "f1"}}, MimeType: "application/pdf"},
+		}})
+		if len(parts) != 0 {
+			t.Errorf("expected no parts, got %+v", parts)
+		}
+		if len(warnings) != 1 || warnings[0].Type != stream.WarningUnsupported {
+			t.Errorf("expected one unsupported warning, got %+v", warnings)
 		}
 	})
 }
@@ -388,8 +423,8 @@ func TestGeminiRequest_ToolResultMultipart(t *testing.T) {
 			{
 				Role: message.RoleTool,
 				Content: message.Content{Parts: []message.Part{
-					message.ToolResultPart{ToolCallID: "call-1", ToolName: "fetch_report", Result: "the-summary"},
-					message.FilePart{URL: "gs://bucket/report.pdf", MimeType: "application/pdf"},
+					message.ToolResultPart{ToolCallID: "call-1", ToolName: "fetch_report", Output: message.TextOutput{Value: "the-summary"}},
+					message.FilePart{Data: message.FileDataURL{URL: "gs://bucket/report.pdf"}, MimeType: "application/pdf"},
 				}},
 			},
 		},

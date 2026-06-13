@@ -272,8 +272,8 @@ func detectImageMime(data []byte) string {
 }
 
 type xaiImageResponse struct {
-	Data  []xaiImageData  `json:"data"`
-	Usage *xaiImageUsage  `json:"usage,omitempty"`
+	Data  []xaiImageData `json:"data"`
+	Usage *xaiImageUsage `json:"usage,omitempty"`
 }
 
 type xaiImageData struct {

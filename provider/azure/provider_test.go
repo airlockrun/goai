@@ -210,6 +210,50 @@ func TestAzureModel_Headers(t *testing.T) {
 			t.Errorf("expected Custom-Request-Header, got %s", receivedHeaders.Get("Custom-Request-Header"))
 		}
 	})
+
+	// Mirrors ai-sdk #15740: a TokenProvider sends a Bearer token and omits
+	// the api-key header.
+	t.Run("should send Entra ID bearer token when TokenProvider is set", func(t *testing.T) {
+		var receivedHeaders http.Header
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			receivedHeaders = r.Header
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1694268190,"model":"gpt-4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n"))
+			w.Write([]byte("data: [DONE]\n\n"))
+		}))
+		defer server.Close()
+
+		provider := New(Options{
+			BaseURL:       server.URL,
+			TokenProvider: func() (string, error) { return "entra-token", nil },
+		})
+		events, err := provider.Model("gpt-4").Stream(context.Background(), &stream.CallOptions{
+			Messages: []message.Message{message.NewUserMessage("Hello")},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		for range events {
+		}
+
+		if got := receivedHeaders.Get("Authorization"); got != "Bearer entra-token" {
+			t.Errorf("expected Authorization 'Bearer entra-token', got %q", got)
+		}
+		if got := receivedHeaders.Get("Api-Key"); got != "" {
+			t.Errorf("expected no api-key header, got %q", got)
+		}
+	})
+}
+
+func TestAzureProvider_AuthMutualExclusion(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("expected panic when both APIKey and TokenProvider are set")
+		}
+	}()
+	New(Options{APIKey: "k", TokenProvider: func() (string, error) { return "t", nil }})
 }
 
 // Embedding tests
