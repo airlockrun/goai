@@ -122,20 +122,30 @@ type chatUsage struct {
 	TotalTokens      int `json:"total_tokens"`
 	// Cached-token sub-fields surfaced by various openai-compatible
 	// providers. Mistral can send any of three shapes (ai-sdk #14889);
-	// OpenAI itself uses prompt_tokens_details.cached_tokens.
-	NumCachedTokens     int                  `json:"num_cached_tokens,omitempty"`
-	PromptTokensDetails *promptTokensDetails `json:"prompt_tokens_details,omitempty"`
-	PromptTokenDetails  *promptTokensDetails `json:"prompt_token_details,omitempty"`
+	// OpenAI itself uses prompt_tokens_details.cached_tokens; DeepSeek
+	// reports a dedicated prompt_cache_hit_tokens alongside the standard
+	// prompt_tokens_details (ai-sdk's convert-to-deepseek-usage.ts).
+	NumCachedTokens      int                  `json:"num_cached_tokens,omitempty"`
+	PromptTokensDetails  *promptTokensDetails `json:"prompt_tokens_details,omitempty"`
+	PromptTokenDetails   *promptTokensDetails `json:"prompt_token_details,omitempty"`
+	PromptCacheHitTokens int                  `json:"prompt_cache_hit_tokens,omitempty"`
+	// Reasoning models split thinking tokens out of the completion total.
+	CompletionTokensDetails *completionTokensDetails `json:"completion_tokens_details,omitempty"`
 }
 
 type promptTokensDetails struct {
 	CachedTokens int `json:"cached_tokens,omitempty"`
 }
 
-// usageFromChat builds a stream.Usage from chatUsage, expanding cached-
-// token info into the Usage.InputTokens.{NoCache,CacheRead} breakdown
-// when the server reports it. Mirrors ai-sdk #14889 (Mistral) and the
-// equivalent OpenAI prompt_tokens_details handling.
+type completionTokensDetails struct {
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+}
+
+// usageFromChat builds a stream.Usage from chatUsage, expanding cached-token
+// info into the Usage.InputTokens.{NoCache,CacheRead} breakdown and reasoning
+// tokens into Usage.OutputTokens.{Text,Reasoning} when the server reports them.
+// Mirrors ai-sdk's convert-openai-compatible-chat-usage.ts (plus the Mistral
+// #14889 and DeepSeek prompt_cache_hit_tokens variants).
 func usageFromChat(u chatUsage) stream.Usage {
 	cached := u.NumCachedTokens
 	if cached == 0 && u.PromptTokensDetails != nil {
@@ -144,15 +154,29 @@ func usageFromChat(u chatUsage) stream.Usage {
 	if cached == 0 && u.PromptTokenDetails != nil {
 		cached = u.PromptTokenDetails.CachedTokens
 	}
+	if cached == 0 {
+		cached = u.PromptCacheHitTokens
+	}
+	reasoning := 0
+	if u.CompletionTokensDetails != nil {
+		reasoning = u.CompletionTokensDetails.ReasoningTokens
+	}
+
 	out := stream.Usage{
 		InputTokens:  stream.InputTokens{Total: stream.IntPtr(u.PromptTokens)},
-		OutputTokens: stream.OutputTokens{Total: stream.IntPtr(u.CompletionTokens), Text: stream.IntPtr(u.CompletionTokens)},
+		OutputTokens: stream.OutputTokens{Total: stream.IntPtr(u.CompletionTokens)},
 	}
 	if cached > 0 {
 		out.InputTokens.CacheRead = stream.IntPtr(cached)
 		out.InputTokens.NoCache = stream.IntPtr(u.PromptTokens - cached)
 	} else {
 		out.InputTokens.NoCache = stream.IntPtr(u.PromptTokens)
+	}
+	if reasoning > 0 {
+		out.OutputTokens.Reasoning = stream.IntPtr(reasoning)
+		out.OutputTokens.Text = stream.IntPtr(u.CompletionTokens - reasoning)
+	} else {
+		out.OutputTokens.Text = stream.IntPtr(u.CompletionTokens)
 	}
 	return out
 }

@@ -282,9 +282,35 @@ func (m *ChatModel) processStream(ctx context.Context, body io.Reader, tools []t
 			continue
 		}
 
-		// Handle usage in final chunk
+		// Handle usage in final chunk. Cached prompt tokens split onto
+		// InputTokens.CacheRead and reasoning tokens onto OutputTokens.Reasoning.
+		// Mirrors ai-sdk's convert-openai-chat-usage.
 		if chunk.Usage != nil {
-			usage = stream.UsageFrom(chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens)
+			cu := chunk.Usage
+			cached := 0
+			if cu.PromptTokensDetails != nil {
+				cached = cu.PromptTokensDetails.CachedTokens
+			}
+			reasoning := 0
+			if cu.CompletionTokensDetails != nil {
+				reasoning = cu.CompletionTokensDetails.ReasoningTokens
+			}
+			usage = stream.Usage{
+				InputTokens:  stream.InputTokens{Total: stream.IntPtr(cu.PromptTokens)},
+				OutputTokens: stream.OutputTokens{Total: stream.IntPtr(cu.CompletionTokens)},
+			}
+			if cached > 0 {
+				usage.InputTokens.CacheRead = stream.IntPtr(cached)
+				usage.InputTokens.NoCache = stream.IntPtr(cu.PromptTokens - cached)
+			} else {
+				usage.InputTokens.NoCache = stream.IntPtr(cu.PromptTokens)
+			}
+			if reasoning > 0 {
+				usage.OutputTokens.Reasoning = stream.IntPtr(reasoning)
+				usage.OutputTokens.Text = stream.IntPtr(cu.CompletionTokens - reasoning)
+			} else {
+				usage.OutputTokens.Text = stream.IntPtr(cu.CompletionTokens)
+			}
 		}
 
 		if len(chunk.Choices) == 0 {

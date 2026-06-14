@@ -455,10 +455,7 @@ func (m *GoogleModel) processStream(ctx context.Context, body io.Reader, tools [
 
 		// Process usage
 		if chunk.UsageMetadata != nil {
-			usage = stream.UsageFrom(
-				chunk.UsageMetadata.PromptTokenCount,
-				chunk.UsageMetadata.CandidatesTokenCount,
-			)
+			usage = chunk.UsageMetadata.toUsage()
 			if chunk.UsageMetadata.ServiceTier != "" {
 				serviceTier = chunk.UsageMetadata.ServiceTier
 			}
