@@ -404,9 +404,35 @@ func (m *AzureLanguageModel) processStream(ctx context.Context, body io.Reader, 
 			continue
 		}
 
-		// Handle usage in final chunk
+		// Handle usage in final chunk. Cached prompt tokens split onto
+		// InputTokens.CacheRead and reasoning tokens onto OutputTokens.Reasoning,
+		// matching the OpenAI Chat Completions usage shape Azure mirrors.
 		if chunk.Usage != nil {
-			usage = stream.UsageFrom(chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens)
+			cu := chunk.Usage
+			cached := 0
+			if cu.PromptTokensDetails != nil {
+				cached = cu.PromptTokensDetails.CachedTokens
+			}
+			reasoning := 0
+			if cu.CompletionTokensDetails != nil {
+				reasoning = cu.CompletionTokensDetails.ReasoningTokens
+			}
+			usage = stream.Usage{
+				InputTokens:  stream.InputTokens{Total: stream.IntPtr(cu.PromptTokens)},
+				OutputTokens: stream.OutputTokens{Total: stream.IntPtr(cu.CompletionTokens)},
+			}
+			if cached > 0 {
+				usage.InputTokens.CacheRead = stream.IntPtr(cached)
+				usage.InputTokens.NoCache = stream.IntPtr(cu.PromptTokens - cached)
+			} else {
+				usage.InputTokens.NoCache = stream.IntPtr(cu.PromptTokens)
+			}
+			if reasoning > 0 {
+				usage.OutputTokens.Reasoning = stream.IntPtr(reasoning)
+				usage.OutputTokens.Text = stream.IntPtr(cu.CompletionTokens - reasoning)
+			} else {
+				usage.OutputTokens.Text = stream.IntPtr(cu.CompletionTokens)
+			}
 		}
 
 		if len(chunk.Choices) == 0 {
@@ -533,9 +559,15 @@ type streamChunk struct {
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
+		PromptTokens        int `json:"prompt_tokens"`
+		CompletionTokens    int `json:"completion_tokens"`
+		TotalTokens         int `json:"total_tokens"`
+		PromptTokensDetails *struct {
+			CachedTokens int `json:"cached_tokens,omitempty"`
+		} `json:"prompt_tokens_details,omitempty"`
+		CompletionTokensDetails *struct {
+			ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+		} `json:"completion_tokens_details,omitempty"`
 	} `json:"usage"`
 }
 

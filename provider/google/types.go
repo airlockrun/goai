@@ -257,9 +257,39 @@ type geminiUsageMetadata struct {
 	PromptTokenCount     int `json:"promptTokenCount"`
 	CandidatesTokenCount int `json:"candidatesTokenCount"`
 	TotalTokenCount      int `json:"totalTokenCount"`
+	// CachedContentTokenCount is the cached portion of the prompt; thoughts
+	// (reasoning) tokens are reported separately from candidates.
+	CachedContentTokenCount int `json:"cachedContentTokenCount,omitempty"`
+	ThoughtsTokenCount      int `json:"thoughtsTokenCount,omitempty"`
 	// ServiceTier is the tier that served the request. Surfaced via
 	// providerMetadata.google.serviceTier. ai-sdk #15488.
 	ServiceTier string `json:"serviceTier,omitempty"`
+}
+
+// toUsage maps Gemini's usageMetadata to stream.Usage, splitting the cached
+// prompt portion onto InputTokens.{CacheRead,NoCache} and the thoughts portion
+// onto OutputTokens.Reasoning. The output total is candidates + thoughts, since
+// Gemini reports candidatesTokenCount exclusive of reasoning. Mirrors ai-sdk's
+// convert-google-usage.ts.
+func (u geminiUsageMetadata) toUsage() stream.Usage {
+	cached := u.CachedContentTokenCount
+	thoughts := u.ThoughtsTokenCount
+
+	out := stream.Usage{
+		InputTokens:  stream.InputTokens{Total: stream.IntPtr(u.PromptTokenCount)},
+		OutputTokens: stream.OutputTokens{Total: stream.IntPtr(u.CandidatesTokenCount + thoughts)},
+	}
+	if cached > 0 {
+		out.InputTokens.CacheRead = stream.IntPtr(cached)
+		out.InputTokens.NoCache = stream.IntPtr(u.PromptTokenCount - cached)
+	} else {
+		out.InputTokens.NoCache = stream.IntPtr(u.PromptTokenCount)
+	}
+	if thoughts > 0 {
+		out.OutputTokens.Reasoning = stream.IntPtr(thoughts)
+	}
+	out.OutputTokens.Text = stream.IntPtr(u.CandidatesTokenCount)
+	return out
 }
 
 // Conversion functions

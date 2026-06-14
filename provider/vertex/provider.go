@@ -382,12 +382,24 @@ func (m *VertexLanguageModel) processStream(ctx context.Context, body io.Reader,
 			continue
 		}
 
-		// Handle usage
+		// Handle usage. Cached prompt tokens split onto InputTokens.CacheRead
+		// and thoughts (reasoning) onto OutputTokens.Reasoning; the output
+		// total is candidates + thoughts. Mirrors ai-sdk's convert-google-usage.
 		if chunk.UsageMetadata.TotalTokenCount > 0 {
-			usage = stream.UsageFrom(
-				chunk.UsageMetadata.PromptTokenCount,
-				chunk.UsageMetadata.CandidatesTokenCount,
-			)
+			um := chunk.UsageMetadata
+			usage = stream.Usage{
+				InputTokens:  stream.InputTokens{Total: stream.IntPtr(um.PromptTokenCount)},
+				OutputTokens: stream.OutputTokens{Total: stream.IntPtr(um.CandidatesTokenCount + um.ThoughtsTokenCount), Text: stream.IntPtr(um.CandidatesTokenCount)},
+			}
+			if um.CachedContentTokenCount > 0 {
+				usage.InputTokens.CacheRead = stream.IntPtr(um.CachedContentTokenCount)
+				usage.InputTokens.NoCache = stream.IntPtr(um.PromptTokenCount - um.CachedContentTokenCount)
+			} else {
+				usage.InputTokens.NoCache = stream.IntPtr(um.PromptTokenCount)
+			}
+			if um.ThoughtsTokenCount > 0 {
+				usage.OutputTokens.Reasoning = stream.IntPtr(um.ThoughtsTokenCount)
+			}
 		}
 
 		if len(chunk.Candidates) == 0 {
@@ -470,9 +482,11 @@ type vertexStreamChunk struct {
 		FinishReason string `json:"finishReason"`
 	} `json:"candidates"`
 	UsageMetadata struct {
-		PromptTokenCount     int `json:"promptTokenCount"`
-		CandidatesTokenCount int `json:"candidatesTokenCount"`
-		TotalTokenCount      int `json:"totalTokenCount"`
+		PromptTokenCount        int `json:"promptTokenCount"`
+		CandidatesTokenCount    int `json:"candidatesTokenCount"`
+		TotalTokenCount         int `json:"totalTokenCount"`
+		CachedContentTokenCount int `json:"cachedContentTokenCount,omitempty"`
+		ThoughtsTokenCount      int `json:"thoughtsTokenCount,omitempty"`
 	} `json:"usageMetadata"`
 }
 
