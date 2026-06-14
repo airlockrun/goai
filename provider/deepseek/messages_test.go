@@ -211,6 +211,58 @@ func TestDeepSeekConvertMessages_PreservesToolCallsAndResults(t *testing.T) {
 	}
 }
 
+// A dangling assistant tool_call (no answering tool message) must be repaired
+// before it reaches DeepSeek — otherwise the API 400s with "insufficient tool
+// messages following tool_calls message". The repair runs in openaicompat's
+// buildRequest, ahead of DeepSeek's custom MessageConverter, so it applies on
+// this path too.
+func TestDeepSeekModel_PairsDanglingToolCallOnWire(t *testing.T) {
+	var captured map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&captured)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(`data: {"id":"x","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}` + "\n\n"))
+		w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	p := New(Options{APIKey: "k", BaseURL: server.URL})
+	m := p.Model("deepseek-chat")
+
+	events, err := m.Stream(context.Background(), &stream.CallOptions{
+		Messages: []message.Message{
+			message.NewUserMessage("do it"),
+			assistantMsg(message.ToolCallPart{
+				ID: "call_1", Name: "weather", Input: json.RawMessage(`{"city":"SF"}`),
+			}),
+			// No tool result follows -> must be synthesized.
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for range events {
+	}
+
+	wireMessages, ok := captured["messages"].([]any)
+	if !ok {
+		t.Fatalf("expected messages on wire, got %T", captured["messages"])
+	}
+	var toolMsg map[string]any
+	for _, raw := range wireMessages {
+		if mm, ok := raw.(map[string]any); ok && mm["role"] == "tool" {
+			toolMsg = mm
+			break
+		}
+	}
+	if toolMsg == nil {
+		t.Fatalf("no synthesized tool message on wire: %v", wireMessages)
+	}
+	if toolMsg["tool_call_id"] != "call_1" {
+		t.Errorf("synthetic tool_call_id = %v, want call_1", toolMsg["tool_call_id"])
+	}
+}
+
 // End-to-end wire-shape check: the MessageConverter hook actually runs and
 // reasoning_content reaches the HTTP body.
 func TestDeepSeekModel_V4ReasoningContentOnWire(t *testing.T) {

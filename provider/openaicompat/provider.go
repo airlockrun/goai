@@ -201,7 +201,10 @@ func (m *CompatModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 		warnings = append(warnings, m.provider.opts.CallWarner(options)...)
 	}
 
-	messages := options.Messages
+	// Repair any assistant tool_call left unanswered by a tool message before
+	// either conversion path runs — Chat Completions (and DeepSeek in
+	// particular) reject an unpaired tool_call with HTTP 400.
+	messages := pairToolResults(options.Messages)
 
 	// Map ResponseFormat. When the provider lacks native json_schema support
 	// but the caller gave a schema, fall back to json_object + inject the

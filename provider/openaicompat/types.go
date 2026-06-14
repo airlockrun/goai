@@ -211,6 +211,68 @@ func convertToMessages(messages []message.Message) []chatMessage {
 	return result
 }
 
+// pairToolResults guarantees the Chat Completions invariant that every
+// assistant tool_call is answered by a following tool message. A run can leave
+// a call unanswered: a tool with no execute function is skipped (NoExecute), a
+// parallel batch is cut short by a fatal error, or a suspended call is
+// persisted before its result and the run never resumes to fill it. OpenAI-
+// compatible APIs (notably DeepSeek) reject such a history with HTTP 400
+// ("insufficient tool messages following tool_calls message"). For each
+// unanswered call this synthesizes an error tool result, inserted immediately
+// after the turn's real tool messages, so the request stays well-formed. The
+// input slice is never mutated; a fresh slice is returned only when a
+// synthetic result is added, otherwise the original is returned unchanged.
+func pairToolResults(messages []message.Message) []message.Message {
+	out := make([]message.Message, 0, len(messages))
+	added := false
+	for i := 0; i < len(messages); i++ {
+		msg := messages[i]
+		out = append(out, msg)
+		if msg.Role != message.RoleAssistant {
+			continue
+		}
+
+		var calls []message.ToolCallPart
+		for _, p := range msg.Content.Parts {
+			if tc, ok := p.(message.ToolCallPart); ok {
+				calls = append(calls, tc)
+			}
+		}
+		if len(calls) == 0 {
+			continue
+		}
+
+		// Consume the run of tool messages answering this turn, recording
+		// which call IDs they satisfy.
+		answered := make(map[string]bool, len(calls))
+		j := i + 1
+		for j < len(messages) && messages[j].Role == message.RoleTool {
+			for _, p := range messages[j].Content.Parts {
+				if tr, ok := p.(message.ToolResultPart); ok {
+					answered[tr.ToolCallID] = true
+				}
+			}
+			out = append(out, messages[j])
+			j++
+		}
+
+		for _, tc := range calls {
+			if !answered[tc.ID] {
+				out = append(out, message.NewToolMessage(
+					tc.ID, tc.Name,
+					message.ErrorTextOutput{Value: "No tool result was recorded for this call."},
+				))
+				added = true
+			}
+		}
+		i = j - 1
+	}
+	if !added {
+		return messages
+	}
+	return out
+}
+
 func getTextFromContent(content message.Content) string {
 	if content.Text != "" {
 		return content.Text
