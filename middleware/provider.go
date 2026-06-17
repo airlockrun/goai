@@ -30,8 +30,8 @@ type wrappedProvider struct {
 	mws   ProviderMiddlewares
 }
 
-func (w *wrappedProvider) ID() string         { return w.inner.ID() }
-func (w *wrappedProvider) Models() []string   { return w.inner.Models() }
+func (w *wrappedProvider) ID() string       { return w.inner.ID() }
+func (w *wrappedProvider) Models() []string { return w.inner.Models() }
 
 func (w *wrappedProvider) Model(modelID string) stream.Model {
 	m := w.inner.Model(modelID)
@@ -82,4 +82,3 @@ func (w *wrappedProvider) TranscriptionModel(modelID string) model.Transcription
 func (w *wrappedProvider) RerankingModel(modelID string) model.RerankingModel {
 	return w.inner.RerankingModel(modelID)
 }
-

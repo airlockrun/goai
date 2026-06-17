@@ -396,9 +396,9 @@ func (s *stubProvider) ClientInformation(ctx context.Context) (*OAuthClientInfor
 	return s.clientInfo, nil
 }
 
-func (s *stubProvider) State(ctx context.Context) (string, error)        { return s.state, nil }
-func (s *stubProvider) SaveState(ctx context.Context, v string) error    { s.savedState = v; return nil }
-func (s *stubProvider) StoredState(ctx context.Context) (string, error)  { return s.storedState, nil }
+func (s *stubProvider) State(ctx context.Context) (string, error)       { return s.state, nil }
+func (s *stubProvider) SaveState(ctx context.Context, v string) error   { s.savedState = v; return nil }
+func (s *stubProvider) StoredState(ctx context.Context) (string, error) { return s.storedState, nil }
 func (s *stubProvider) InvalidateCredentials(ctx context.Context, scope string) error {
 	s.invalidations = append(s.invalidations, scope)
 	switch scope {

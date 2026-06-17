@@ -441,10 +441,10 @@ func (conn *ServerConnection) createToolExecutor(toolName string) tool.ExecuteFu
 			Content []struct {
 				Type        string `json:"type"`
 				Text        string `json:"text,omitempty"`
-				Data        string `json:"data,omitempty"`     // base64 (image)
-				MimeType    string `json:"mimeType,omitempty"` // image / resource
-				URI         string `json:"uri,omitempty"`      // resource / resource_link
-				Name        string `json:"name,omitempty"`     // resource_link
+				Data        string `json:"data,omitempty"`        // base64 (image)
+				MimeType    string `json:"mimeType,omitempty"`    // image / resource
+				URI         string `json:"uri,omitempty"`         // resource / resource_link
+				Name        string `json:"name,omitempty"`        // resource_link
 				Description string `json:"description,omitempty"` // resource_link
 				Resource    *struct {
 					URI      string `json:"uri"`
