@@ -16,15 +16,24 @@ type fakeProvider struct {
 	imageCalls int
 }
 
-func (f *fakeProvider) ID() string                                                { return "fake" }
-func (f *fakeProvider) Models() []string                                          { return []string{"x"} }
-func (f *fakeProvider) Model(_ string) stream.Model                               { f.langCalls++; return &fakeLangModel{} }
-func (f *fakeProvider) LanguageModel(_ string) model.LanguageModel                { f.langCalls++; return &fakeLangModel{} }
-func (f *fakeProvider) EmbeddingModel(_ string) model.EmbeddingModel              { f.embedCalls++; return &stubEmbeddingModel{} }
-func (f *fakeProvider) ImageModel(_ string) model.ImageModel                      { f.imageCalls++; return &stubImageModel{} }
-func (f *fakeProvider) SpeechModel(_ string) model.SpeechModel                    { return nil }
-func (f *fakeProvider) TranscriptionModel(_ string) model.TranscriptionModel      { return nil }
-func (f *fakeProvider) RerankingModel(_ string) model.RerankingModel              { return nil }
+func (f *fakeProvider) ID() string                  { return "fake" }
+func (f *fakeProvider) Models() []string            { return []string{"x"} }
+func (f *fakeProvider) Model(_ string) stream.Model { f.langCalls++; return &fakeLangModel{} }
+func (f *fakeProvider) LanguageModel(_ string) model.LanguageModel {
+	f.langCalls++
+	return &fakeLangModel{}
+}
+func (f *fakeProvider) EmbeddingModel(_ string) model.EmbeddingModel {
+	f.embedCalls++
+	return &stubEmbeddingModel{}
+}
+func (f *fakeProvider) ImageModel(_ string) model.ImageModel {
+	f.imageCalls++
+	return &stubImageModel{}
+}
+func (f *fakeProvider) SpeechModel(_ string) model.SpeechModel               { return nil }
+func (f *fakeProvider) TranscriptionModel(_ string) model.TranscriptionModel { return nil }
+func (f *fakeProvider) RerankingModel(_ string) model.RerankingModel         { return nil }
 
 var _ provider.Provider = (*fakeProvider)(nil)
 

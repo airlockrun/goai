@@ -22,41 +22,41 @@ type OAuthTokens struct {
 // and OpenID Connect Discovery 1.0 metadata. We carry the superset in a
 // single struct; consumers check non-zero fields before use.
 type AuthorizationServerMetadata struct {
-	Issuer                                  string   `json:"issuer"`
-	AuthorizationEndpoint                   string   `json:"authorization_endpoint"`
-	TokenEndpoint                           string   `json:"token_endpoint"`
-	RegistrationEndpoint                    string   `json:"registration_endpoint,omitempty"`
-	ScopesSupported                         []string `json:"scopes_supported,omitempty"`
-	ResponseTypesSupported                  []string `json:"response_types_supported"`
-	GrantTypesSupported                     []string `json:"grant_types_supported,omitempty"`
-	CodeChallengeMethodsSupported           []string `json:"code_challenge_methods_supported,omitempty"`
-	TokenEndpointAuthMethodsSupported       []string `json:"token_endpoint_auth_methods_supported,omitempty"`
-	TokenEndpointAuthSigningAlgValuesSupp   []string `json:"token_endpoint_auth_signing_alg_values_supported,omitempty"`
+	Issuer                                string   `json:"issuer"`
+	AuthorizationEndpoint                 string   `json:"authorization_endpoint"`
+	TokenEndpoint                         string   `json:"token_endpoint"`
+	RegistrationEndpoint                  string   `json:"registration_endpoint,omitempty"`
+	ScopesSupported                       []string `json:"scopes_supported,omitempty"`
+	ResponseTypesSupported                []string `json:"response_types_supported"`
+	GrantTypesSupported                   []string `json:"grant_types_supported,omitempty"`
+	CodeChallengeMethodsSupported         []string `json:"code_challenge_methods_supported,omitempty"`
+	TokenEndpointAuthMethodsSupported     []string `json:"token_endpoint_auth_methods_supported,omitempty"`
+	TokenEndpointAuthSigningAlgValuesSupp []string `json:"token_endpoint_auth_signing_alg_values_supported,omitempty"`
 
 	// OIDC-only fields (populated when discovery returned an OIDC document).
-	UserinfoEndpoint                  string   `json:"userinfo_endpoint,omitempty"`
-	JwksURI                           string   `json:"jwks_uri,omitempty"`
-	SubjectTypesSupported             []string `json:"subject_types_supported,omitempty"`
-	IDTokenSigningAlgValuesSupported  []string `json:"id_token_signing_alg_values_supported,omitempty"`
-	ClaimsSupported                   []string `json:"claims_supported,omitempty"`
+	UserinfoEndpoint                 string   `json:"userinfo_endpoint,omitempty"`
+	JwksURI                          string   `json:"jwks_uri,omitempty"`
+	SubjectTypesSupported            []string `json:"subject_types_supported,omitempty"`
+	IDTokenSigningAlgValuesSupported []string `json:"id_token_signing_alg_values_supported,omitempty"`
+	ClaimsSupported                  []string `json:"claims_supported,omitempty"`
 }
 
 // OAuthProtectedResourceMetadata is RFC 9728 protected-resource metadata.
 type OAuthProtectedResourceMetadata struct {
-	Resource                                       string   `json:"resource"`
-	AuthorizationServers                           []string `json:"authorization_servers,omitempty"`
-	JwksURI                                        string   `json:"jwks_uri,omitempty"`
-	ScopesSupported                                []string `json:"scopes_supported,omitempty"`
-	BearerMethodsSupported                         []string `json:"bearer_methods_supported,omitempty"`
-	ResourceSigningAlgValuesSupported              []string `json:"resource_signing_alg_values_supported,omitempty"`
-	ResourceName                                   string   `json:"resource_name,omitempty"`
-	ResourceDocumentation                          string   `json:"resource_documentation,omitempty"`
-	ResourcePolicyURI                              string   `json:"resource_policy_uri,omitempty"`
-	ResourceTosURI                                 string   `json:"resource_tos_uri,omitempty"`
-	TLSClientCertificateBoundAccessTokens          bool     `json:"tls_client_certificate_bound_access_tokens,omitempty"`
-	AuthorizationDetailsTypesSupported             []string `json:"authorization_details_types_supported,omitempty"`
-	DPopSigningAlgValuesSupported                  []string `json:"dpop_signing_alg_values_supported,omitempty"`
-	DPopBoundAccessTokensRequired                  bool     `json:"dpop_bound_access_tokens_required,omitempty"`
+	Resource                              string   `json:"resource"`
+	AuthorizationServers                  []string `json:"authorization_servers,omitempty"`
+	JwksURI                               string   `json:"jwks_uri,omitempty"`
+	ScopesSupported                       []string `json:"scopes_supported,omitempty"`
+	BearerMethodsSupported                []string `json:"bearer_methods_supported,omitempty"`
+	ResourceSigningAlgValuesSupported     []string `json:"resource_signing_alg_values_supported,omitempty"`
+	ResourceName                          string   `json:"resource_name,omitempty"`
+	ResourceDocumentation                 string   `json:"resource_documentation,omitempty"`
+	ResourcePolicyURI                     string   `json:"resource_policy_uri,omitempty"`
+	ResourceTosURI                        string   `json:"resource_tos_uri,omitempty"`
+	TLSClientCertificateBoundAccessTokens bool     `json:"tls_client_certificate_bound_access_tokens,omitempty"`
+	AuthorizationDetailsTypesSupported    []string `json:"authorization_details_types_supported,omitempty"`
+	DPopSigningAlgValuesSupported         []string `json:"dpop_signing_alg_values_supported,omitempty"`
+	DPopBoundAccessTokensRequired         bool     `json:"dpop_bound_access_tokens_required,omitempty"`
 }
 
 // OAuthClientInformation is the registered-client identity (id + secret).
