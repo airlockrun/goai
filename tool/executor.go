@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime/debug"
 )
 
 // FatalToolError is an interface that errors can implement to indicate
@@ -160,11 +161,21 @@ func (e *LocalExecutor) Execute(ctx context.Context, req Request) (Response, err
 		ctx = context.WithValue(ctx, WorkDirKey, req.WorkDir)
 	}
 
-	// Execute the tool
-	result, err := t.Execute(ctx, req.Input, CallOptions{
-		ToolCallID:  req.ToolCallID,
-		AbortSignal: ctx,
-	})
+	// Execute the tool, recovering any panic so one misbehaving tool can't
+	// crash the process (or tear a hijacked toolserver WebSocket). A panic
+	// becomes a normal IsError response fed back to the model, carrying the
+	// stack so the failure is diagnosable from the build log.
+	result, err := func() (res Result, e error) {
+		defer func() {
+			if r := recover(); r != nil {
+				e = fmt.Errorf("%s panicked: %v\n%s", req.ToolName, r, debug.Stack())
+			}
+		}()
+		return t.Execute(ctx, req.Input, CallOptions{
+			ToolCallID:  req.ToolCallID,
+			AbortSignal: ctx,
+		})
+	}()
 	if err != nil {
 		// Propagate context errors and fatal tool errors — these should not
 		// be fed back to the model as tool results.

@@ -167,20 +167,27 @@ func (ToolCallEvent) eventType() EventType { return EventToolCall }
 
 // ToolResultEvent contains a successful tool execution result. Output is a
 // success variant of the discriminated union (text | json | content).
+//
+// Title and Metadata carry the tool's presentation hints (the tool's
+// short Result.Title and its structured Result.Metadata). Consumers that
+// render a curated activity log — e.g. airlock's build log — use these to
+// summarize a call without dumping the full model-facing Output.
 type ToolResultEvent struct {
 	ToolCallID string                   `json:"toolCallId"`
 	ToolName   string                   `json:"toolName"`
 	Input      json.RawMessage          `json:"input,omitempty"`
 	Output     message.ToolResultOutput `json:"output"`
+	Title      string                   `json:"title,omitempty"`
+	Metadata   map[string]any           `json:"metadata,omitempty"`
 }
 
 func (ToolResultEvent) eventType() EventType { return EventToolResult }
 
 func (e ToolResultEvent) MarshalJSON() ([]byte, error) {
-	return marshalToolEvent(e.ToolCallID, e.ToolName, e.Input, e.Output)
+	return marshalToolEvent(e.ToolCallID, e.ToolName, e.Input, e.Output, e.Title, e.Metadata)
 }
 func (e *ToolResultEvent) UnmarshalJSON(b []byte) error {
-	return unmarshalToolEvent(b, &e.ToolCallID, &e.ToolName, &e.Input, &e.Output)
+	return unmarshalToolEvent(b, &e.ToolCallID, &e.ToolName, &e.Input, &e.Output, &e.Title, &e.Metadata)
 }
 
 // ToolErrorEvent signals a failed tool execution. Output carries the
@@ -195,10 +202,10 @@ type ToolErrorEvent struct {
 func (ToolErrorEvent) eventType() EventType { return EventToolError }
 
 func (e ToolErrorEvent) MarshalJSON() ([]byte, error) {
-	return marshalToolEvent(e.ToolCallID, e.ToolName, e.Input, e.Output)
+	return marshalToolEvent(e.ToolCallID, e.ToolName, e.Input, e.Output, "", nil)
 }
 func (e *ToolErrorEvent) UnmarshalJSON(b []byte) error {
-	return unmarshalToolEvent(b, &e.ToolCallID, &e.ToolName, &e.Input, &e.Output)
+	return unmarshalToolEvent(b, &e.ToolCallID, &e.ToolName, &e.Input, &e.Output, nil, nil)
 }
 
 // ErrorText returns the error message text for this event.
@@ -241,8 +248,10 @@ func ToolOutcomeEvent(toolCallID, toolName string, input json.RawMessage, out me
 }
 
 // marshalToolEvent serializes a tool result/error event with the Output
-// union carrying its discriminated "type".
-func marshalToolEvent(id, name string, input json.RawMessage, out message.ToolResultOutput) ([]byte, error) {
+// union carrying its discriminated "type". title/metadata are the
+// presentation hints carried by ToolResultEvent; the error event passes
+// "", nil and the omitempty tags keep its wire shape unchanged.
+func marshalToolEvent(id, name string, input json.RawMessage, out message.ToolResultOutput, title string, metadata map[string]any) ([]byte, error) {
 	raw, err := message.MarshalOutput(out)
 	if err != nil {
 		return nil, err
@@ -252,15 +261,22 @@ func marshalToolEvent(id, name string, input json.RawMessage, out message.ToolRe
 		ToolName   string          `json:"toolName"`
 		Input      json.RawMessage `json:"input,omitempty"`
 		Output     json.RawMessage `json:"output"`
-	}{id, name, input, raw})
+		Title      string          `json:"title,omitempty"`
+		Metadata   map[string]any  `json:"metadata,omitempty"`
+	}{id, name, input, raw, title, metadata})
 }
 
-func unmarshalToolEvent(b []byte, id, name *string, input *json.RawMessage, out *message.ToolResultOutput) error {
+// unmarshalToolEvent is the inverse of marshalToolEvent. title/metadata are
+// nil for the error event (which has no such fields); pass nil pointers to
+// skip them.
+func unmarshalToolEvent(b []byte, id, name *string, input *json.RawMessage, out *message.ToolResultOutput, title *string, metadata *map[string]any) error {
 	var a struct {
 		ToolCallID string          `json:"toolCallId"`
 		ToolName   string          `json:"toolName"`
 		Input      json.RawMessage `json:"input,omitempty"`
 		Output     json.RawMessage `json:"output"`
+		Title      string          `json:"title,omitempty"`
+		Metadata   map[string]any  `json:"metadata,omitempty"`
 	}
 	if err := json.Unmarshal(b, &a); err != nil {
 		return err
@@ -268,6 +284,12 @@ func unmarshalToolEvent(b []byte, id, name *string, input *json.RawMessage, out 
 	*id = a.ToolCallID
 	*name = a.ToolName
 	*input = a.Input
+	if title != nil {
+		*title = a.Title
+	}
+	if metadata != nil {
+		*metadata = a.Metadata
+	}
 	if len(a.Output) == 0 || string(a.Output) == "null" {
 		*out = nil
 		return nil
