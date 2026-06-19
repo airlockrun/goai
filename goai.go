@@ -736,6 +736,8 @@ func executeTools(ctx context.Context, executor tool.Executor, toolCalls []strea
 			ToolName:   tc.Name,
 			Input:      tc.Input,
 			Output:     outputFromResponse(resp),
+			Title:      resp.Title,
+			Metadata:   resp.Metadata,
 		})
 	}
 
