@@ -772,7 +772,7 @@ func outputFromResponse(resp tool.Response) message.ToolResultOutput {
 // branch on event type (UI, audit) get the right signal; the persisted
 // message keeps the full union in ToolResultPart.Output regardless.
 func toolOutcomeEvent(tr stream.ToolResultEvent) stream.Event {
-	return stream.ToolOutcomeEvent(tr.ToolCallID, tr.ToolName, tr.Input, tr.Output)
+	return stream.ToolOutcomeEvent(tr.ToolCallID, tr.ToolName, tr.Input, tr.Output, tr.Title, tr.Metadata)
 }
 
 // buildStepMessages builds the messages for a step result.

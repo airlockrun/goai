@@ -226,7 +226,9 @@ func (ToolOutputDeniedEvent) eventType() EventType { return EventToolOutputDenie
 // tool-error, execution-denied → tool-output-denied. Shared by every
 // producer so consumers that branch on event type get a consistent signal
 // while the carried Output keeps the full union.
-func ToolOutcomeEvent(toolCallID, toolName string, input json.RawMessage, out message.ToolResultOutput) Event {
+// title and metadata ride only on the success outcome — the discriminated
+// error/denied variants carry no tool-supplied metadata.
+func ToolOutcomeEvent(toolCallID, toolName string, input json.RawMessage, out message.ToolResultOutput, title string, metadata map[string]any) Event {
 	switch message.ToolOutcome(out) {
 	case "error":
 		return Event{Type: EventToolError, Data: ToolErrorEvent{
@@ -243,6 +245,7 @@ func ToolOutcomeEvent(toolCallID, toolName string, input json.RawMessage, out me
 	default:
 		return Event{Type: EventToolResult, Data: ToolResultEvent{
 			ToolCallID: toolCallID, ToolName: toolName, Input: input, Output: out,
+			Title: title, Metadata: metadata,
 		}}
 	}
 }
