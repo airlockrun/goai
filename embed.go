@@ -109,6 +109,24 @@ func Embed(ctx context.Context, input EmbedInput) (*EmbedResult, error) {
 		}
 	}
 
+	// An embedding response must contain at least one non-empty float64 vector.
+	// Genuinely unparsable numbers already fail in the provider's JSON decode
+	// (the target is []float64); this catches the other failure mode — a model
+	// that isn't actually an embedding model (e.g. a chat model routed here
+	// because it was classified as embedding by name) whose 200 response
+	// decodes to zero vectors (or an empty one). Fail loud rather than
+	// returning an empty result. We don't require one vector per input: some
+	// providers/callers legitimately collapse a batch, and the goal is only to
+	// reject "this clearly isn't an embedding response", not to police count.
+	if len(embeddings) == 0 {
+		return nil, fmt.Errorf("embed: model returned no embeddings — not an embedding model")
+	}
+	for _, e := range embeddings {
+		if len(e.Values) == 0 {
+			return nil, fmt.Errorf("embed: model returned an empty vector — not an embedding model")
+		}
+	}
+
 	result := &EmbedResult{
 		Embeddings: embeddings,
 		Usage: EmbeddingUsage{
