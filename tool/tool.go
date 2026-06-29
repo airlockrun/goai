@@ -42,9 +42,14 @@ type Tool struct {
 	// accept examples (e.g. Anthropic via input_examples) pass them through;
 	// others can use middleware.AddToolInputExamples to serialize them into
 	// the description instead.
-	InputExamples   []ToolInputExample `json:"inputExamples,omitempty"`
-	Execute         ExecuteFunc        `json:"-"`
-	ProviderOptions map[string]any     `json:"providerOptions,omitempty"`
+	InputExamples []ToolInputExample `json:"inputExamples,omitempty"`
+	// OutputSchema is an optional JSON Schema describing the tool's result.
+	// It travels with the tool for downstream consumers (MCP structuredContent,
+	// result validation) but is NOT part of the wire tool definition sent to
+	// providers like OpenAI, which advertise tool inputs only.
+	OutputSchema    json.RawMessage `json:"outputSchema,omitempty"`
+	Execute         ExecuteFunc     `json:"-"`
+	ProviderOptions map[string]any  `json:"providerOptions,omitempty"`
 }
 
 // Kind classifies a Tool at the definition level. goai distinguishes the two
@@ -107,11 +112,12 @@ type Attachment struct {
 
 // Definition is a builder for creating tools.
 type Definition struct {
-	name        string
-	description string
-	schema      json.RawMessage
-	examples    []ToolInputExample
-	execute     ExecuteFunc
+	name         string
+	description  string
+	schema       json.RawMessage
+	outputSchema json.RawMessage
+	examples     []ToolInputExample
+	execute      ExecuteFunc
 }
 
 // New creates a new tool definition builder.
@@ -135,6 +141,18 @@ func (d *Definition) Schema(schema json.RawMessage) *Definition {
 func (d *Definition) SchemaFromStruct(v any) *Definition {
 	s := schema.MustFromType(v)
 	d.schema = s.MustJSON()
+	return d
+}
+
+// OutputSchema sets the JSON schema describing the tool's result.
+func (d *Definition) OutputSchema(schema json.RawMessage) *Definition {
+	d.outputSchema = schema
+	return d
+}
+
+// OutputSchemaFromStruct generates the result JSON schema from a struct type.
+func (d *Definition) OutputSchemaFromStruct(v any) *Definition {
+	d.outputSchema = schema.MustFromType(v).MustJSON()
 	return d
 }
 
@@ -172,6 +190,7 @@ func (d *Definition) Build() Tool {
 		Name:          d.name,
 		Description:   d.description,
 		InputSchema:   inputSchema,
+		OutputSchema:  d.outputSchema,
 		InputExamples: d.examples,
 		Execute:       d.execute,
 	}
