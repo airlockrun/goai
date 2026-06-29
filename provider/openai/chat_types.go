@@ -25,8 +25,21 @@ type chatRequest struct {
 	StreamOptions   *chatStreamOptions  `json:"stream_options,omitempty"`
 	ReasoningEffort string              `json:"reasoning_effort,omitempty"`
 
+	// Modalities + Audio drive multimodal chat-audio models (gpt-audio,
+	// gpt-4o[-mini]-audio-preview): the model emits/accepts audio through
+	// /chat/completions rather than the dedicated /audio/* endpoints. Audio
+	// OUTPUT requires Modalities to include both "text" and "audio".
+	Modalities []string         `json:"modalities,omitempty"`
+	Audio      *chatAudioConfig `json:"audio,omitempty"`
+
 	Logprobs    *bool `json:"logprobs,omitempty"`
 	TopLogprobs *int  `json:"top_logprobs,omitempty"`
+}
+
+// chatAudioConfig requests spoken output from a chat-audio model.
+type chatAudioConfig struct {
+	Voice  string `json:"voice"`  // e.g. "alloy"
+	Format string `json:"format"` // wav | mp3 | opus | flac | pcm16
 }
 
 // chatResponseFormat configures structured output for chat completions.
@@ -60,10 +73,18 @@ type chatMessage struct {
 }
 
 type chatContentPart struct {
-	Type     string        `json:"type"`
-	Text     string        `json:"text,omitempty"`
-	ImageURL *chatImageURL `json:"image_url,omitempty"`
-	File     *chatFile     `json:"file,omitempty"`
+	Type       string          `json:"type"`
+	Text       string          `json:"text,omitempty"`
+	ImageURL   *chatImageURL   `json:"image_url,omitempty"`
+	File       *chatFile       `json:"file,omitempty"`
+	InputAudio *chatInputAudio `json:"input_audio,omitempty"`
+}
+
+// chatInputAudio carries an audio input part. OpenAI chat accepts only the
+// "wav" and "mp3" formats; Data is raw base64 (no data: URL prefix).
+type chatInputAudio struct {
+	Data   string `json:"data"`
+	Format string `json:"format"`
 }
 
 type chatImageURL struct {
@@ -141,6 +162,7 @@ type chatChunkDelta struct {
 	Role      string              `json:"role,omitempty"`
 	Content   string              `json:"content,omitempty"`
 	ToolCalls []chatChunkToolCall `json:"tool_calls,omitempty"`
+	Audio     *chatChunkAudio     `json:"audio,omitempty"`
 }
 
 type chatChunkToolCall struct {
@@ -160,6 +182,28 @@ type chatUsage struct {
 	CompletionTokensDetails *struct {
 		ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 	} `json:"completion_tokens_details,omitempty"`
+}
+
+// chatChunkAudio is the streamed spoken output of a chat-audio model. The
+// provider rejects non-streaming audio ("Audio output requires stream: true"),
+// so the adapters accumulate Data (base64 fragments, concatenated then decoded)
+// and Transcript across stream chunks.
+type chatChunkAudio struct {
+	ID         string `json:"id,omitempty"`
+	Data       string `json:"data,omitempty"`
+	Transcript string `json:"transcript,omitempty"`
+}
+
+// audioChatFormat maps an audio MIME type to the OpenAI chat input_audio
+// format token. Chat input accepts only wav and mp3; everything else is sent
+// as mp3 (callers should warn when that's a guess).
+func audioChatFormat(mime string) string {
+	switch mime {
+	case "audio/wav", "audio/wave", "audio/x-wav":
+		return "wav"
+	default:
+		return "mp3"
+	}
 }
 
 // Conversion functions
@@ -297,8 +341,15 @@ func convertUserContent(content message.Content) any {
 							FileData: "data:application/pdf;base64," + d.Data,
 						},
 					})
+				} else if strings.HasPrefix(p.MimeType, "audio/") {
+					// Chat-audio models accept audio input as a base64 input_audio
+					// part (wav/mp3 only). The transcription adapter rides this path.
+					result = append(result, chatContentPart{
+						Type:       "input_audio",
+						InputAudio: &chatInputAudio{Data: d.Data, Format: audioChatFormat(p.MimeType)},
+					})
 				}
-				// OpenAI chat only supports image and PDF file parts; other
+				// OpenAI chat supports image, PDF, and audio file parts; other
 				// byte types are skipped.
 			case message.FileDataURL:
 				if strings.HasPrefix(p.MimeType, "image/") {

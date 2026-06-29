@@ -78,7 +78,11 @@ func (p *Provider) EmbeddingModel(modelID string) model.EmbeddingModel {
 	}
 }
 
-// SpeechModel returns a text-to-speech model instance.
+// SpeechModel returns a text-to-speech model using the dedicated /audio/speech
+// endpoint. Multimodal chat-audio models (gpt-audio) have no such endpoint —
+// callers route those to ChatSpeechModel instead. That decision needs model
+// modality data, which lives in the catalog (sol), not in this provider, so
+// SpeechModel does NOT auto-detect; it always returns the dedicated model.
 func (p *Provider) SpeechModel(modelID string) model.SpeechModel {
 	return &OpenAISpeechModel{
 		id:       modelID,
@@ -86,12 +90,30 @@ func (p *Provider) SpeechModel(modelID string) model.SpeechModel {
 	}
 }
 
-// TranscriptionModel returns a speech-to-text model instance.
+// ChatSpeechModel returns a speech model backed by /chat/completions (modalities
+// + audio), for multimodal chat-audio models that produce speech through chat
+// rather than a dedicated /audio/speech endpoint.
+func (p *Provider) ChatSpeechModel(modelID string) model.SpeechModel {
+	return &chatSpeechModel{id: modelID, provider: p}
+}
+
+// TranscriptionModel returns a speech-to-text model using the dedicated
+// /audio/transcriptions endpoint. Chat-audio models use ChatTranscriptionModel,
+// selected by the caller from modality data (see SpeechModel).
 func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel {
 	return &OpenAITranscriptionModel{
 		id:       modelID,
 		provider: p,
 	}
+}
+
+// ChatTranscriptionModel returns a transcription model backed by
+// /chat/completions, for chat-audio models with no /audio/transcriptions
+// endpoint. These models are conversational, so any instruction to make them
+// transcribe rather than reply is application policy and must be supplied by the
+// caller via TranscribeCallOptions.Prompt — goai bakes in none.
+func (p *Provider) ChatTranscriptionModel(modelID string) model.TranscriptionModel {
+	return &chatTranscriptionModel{id: modelID, provider: p}
 }
 
 // RerankingModel returns nil as OpenAI doesn't support reranking.
