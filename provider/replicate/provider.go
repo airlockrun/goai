@@ -53,53 +53,6 @@ func (p *Provider) SpeechModel(modelID string) model.SpeechModel               {
 func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel { return nil }
 func (p *Provider) RerankingModel(modelID string) model.RerankingModel         { return nil }
 
-// Models returns the Replicate image-model catalog. Replicate only
-// supports image generation in goai (LanguageModel returns nil). Mirrors
-// ai-sdk's ReplicateImageModelId union in
-// packages/replicate/src/replicate-image-settings.ts.
-func (p *Provider) Models() []string {
-	return []string{
-		// Black Forest Labs FLUX text-to-image
-		"black-forest-labs/flux-1.1-pro",
-		"black-forest-labs/flux-1.1-pro-ultra",
-		"black-forest-labs/flux-dev",
-		"black-forest-labs/flux-pro",
-		"black-forest-labs/flux-schnell",
-		// Black Forest Labs FLUX inpainting / image editing
-		"black-forest-labs/flux-fill-pro",
-		"black-forest-labs/flux-fill-dev",
-		// Black Forest Labs FLUX 2 (multi-reference)
-		"black-forest-labs/flux-2-pro",
-		"black-forest-labs/flux-2-dev",
-		// ByteDance / fofr / ideogram / lucataco
-		"bytedance/sdxl-lightning-4step",
-		"fofr/aura-flow",
-		"fofr/latent-consistency-model",
-		"fofr/realvisxl-v3-multi-controlnet-lora",
-		"fofr/sdxl-emoji",
-		"fofr/sdxl-multi-controlnet-lora",
-		"ideogram-ai/ideogram-v2",
-		"ideogram-ai/ideogram-v2-turbo",
-		"lucataco/dreamshaper-xl-turbo",
-		"lucataco/open-dalle-v1.1",
-		"lucataco/realvisxl-v2.0",
-		"lucataco/realvisxl2-lcm",
-		// Luma / Nvidia / Playground / Recraft
-		"luma/photon",
-		"luma/photon-flash",
-		"nvidia/sana",
-		"playgroundai/playground-v2.5-1024px-aesthetic",
-		"recraft-ai/recraft-v3",
-		"recraft-ai/recraft-v3-svg",
-		// Stability AI
-		"stability-ai/stable-diffusion-3.5-large",
-		"stability-ai/stable-diffusion-3.5-large-turbo",
-		"stability-ai/stable-diffusion-3.5-medium",
-		// Other
-		"tstramer/material-diffusion",
-	}
-}
-
 var _ provider.Provider = (*Provider)(nil)
 
 // ReplicateImageModel implements the ImageModel interface.

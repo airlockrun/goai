@@ -24,25 +24,6 @@ func TestAssemblyAIProvider_ID(t *testing.T) {
 	}
 }
 
-func TestAssemblyAIProvider_Models(t *testing.T) {
-	provider := New(Options{APIKey: "test-key"})
-
-	models := provider.Models()
-	if len(models) == 0 {
-		t.Error("expected at least one model")
-	}
-
-	hasBest := false
-	for _, m := range models {
-		if m == "best" {
-			hasBest = true
-		}
-	}
-	if !hasBest {
-		t.Error("expected 'best' model in models list")
-	}
-}
-
 func TestAssemblyAITranscription_Transcribe(t *testing.T) {
 	t.Run("should transcribe audio from URL", func(t *testing.T) {
 		transcriptID := "test-transcript-id"

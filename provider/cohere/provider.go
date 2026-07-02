@@ -85,48 +85,4 @@ func (p *Provider) RerankingModel(modelID string) model.RerankingModel {
 	}
 }
 
-// Models returns available model IDs. Mirrors ai-sdk's CohereChatModelId
-// union in packages/cohere/src/cohere-chat-options.ts.
-func (p *Provider) Models() []string {
-	return []string{
-		"command-a-03-2025",
-		"command-a-reasoning-08-2025",
-		// command-a-vision-07-2025 is a vision-capable model. ai-sdk
-		// #14860 wires image input on its V2 chat API. goai's Cohere
-		// adapter still uses the V1 /chat endpoint (Message + ChatHistory),
-		// which has no image_url content type, so passing images to this
-		// model from goai will not work until we migrate to V2. The model
-		// ID is exposed so callers can still invoke it for text-only use.
-		"command-a-vision-07-2025",
-		"command-r7b-12-2024",
-		"command-r-plus-04-2024",
-		"command-r-plus",
-		"command-r-08-2024",
-		"command-r-03-2024",
-		"command-r",
-		"command",
-		"command-light",
-	}
-}
-
-// EmbeddingModels returns available embedding model IDs.
-func (p *Provider) EmbeddingModels() []string {
-	return []string{
-		"embed-english-v3.0",
-		"embed-multilingual-v3.0",
-		"embed-english-light-v3.0",
-		"embed-multilingual-light-v3.0",
-	}
-}
-
-// RerankingModels returns available reranking model IDs.
-func (p *Provider) RerankingModels() []string {
-	return []string{
-		"rerank-english-v3.0",
-		"rerank-multilingual-v3.0",
-		"rerank-english-v2.0",
-		"rerank-multilingual-v2.0",
-	}
-}
-
 var _ provider.Provider = (*Provider)(nil)

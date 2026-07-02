@@ -43,9 +43,6 @@ type Provider interface {
 	// RerankingModel returns a reranking model instance.
 	// Returns nil if the provider doesn't support reranking.
 	RerankingModel(modelID string) model.RerankingModel
-
-	// Models returns a list of available model IDs.
-	Models() []string
 }
 
 // LanguageProvider is a provider that supports language models.

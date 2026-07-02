@@ -31,25 +31,6 @@ func TestCohereProvider_ID(t *testing.T) {
 	}
 }
 
-func TestCohereProvider_Models(t *testing.T) {
-	provider := New(Options{APIKey: "test-key"})
-
-	models := provider.Models()
-	if len(models) == 0 {
-		t.Error("expected at least one model")
-	}
-
-	hasCommandR := false
-	for _, m := range models {
-		if m == "command-r-plus" {
-			hasCommandR = true
-		}
-	}
-	if !hasCommandR {
-		t.Error("expected command-r-plus in models list")
-	}
-}
-
 // Chat model tests
 func TestCohereModel_StreamText(t *testing.T) {
 	t.Run("should extract text response", func(t *testing.T) {

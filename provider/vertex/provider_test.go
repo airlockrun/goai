@@ -29,28 +29,6 @@ func TestVertexProvider_ID(t *testing.T) {
 	}
 }
 
-func TestVertexProvider_Models(t *testing.T) {
-	provider := New(Options{
-		ProjectID:   "test-project",
-		AccessToken: "test-token",
-	})
-
-	models := provider.Models()
-	if len(models) == 0 {
-		t.Error("expected at least one model")
-	}
-
-	hasGemini := false
-	for _, m := range models {
-		if strings.Contains(m, "gemini") {
-			hasGemini = true
-		}
-	}
-	if !hasGemini {
-		t.Error("expected 'gemini' model in models list")
-	}
-}
-
 func TestVertexLanguageModel_ID(t *testing.T) {
 	provider := New(Options{
 		ProjectID:   "test-project",
@@ -354,42 +332,6 @@ func TestVertexLanguageModel_ResponseFormat_ReturnsUnsupported(t *testing.T) {
 	}
 	if !errors.Is(gotErr, provider.ErrResponseFormatUnsupported) {
 		t.Errorf("expected error to wrap ErrResponseFormatUnsupported, got %v", gotErr)
-	}
-}
-
-// Verify Gemini 3.x + 2.5 catalog landed and retired
-// gemini-1.0-pro/vision pruned. Mirrors the Gemini catalog that cascades
-// from @ai-sdk/google. Vertex MaaS IDs live in the vertexmaas package and
-// must not leak back into vertex.Models().
-func TestVertexProvider_ModelsContainsLatest(t *testing.T) {
-	p := New(Options{ProjectID: "p", Location: "us-central1", AccessToken: "t"})
-	have := map[string]bool{}
-	for _, m := range p.Models() {
-		have[m] = true
-	}
-	for _, w := range []string{
-		"gemini-3.1-pro-preview",
-		"gemini-3.1-flash-image-preview",
-		"gemini-2.5-pro",
-		"gemini-2.5-flash-image",
-	} {
-		if !have[w] {
-			t.Errorf("Models() missing %q", w)
-		}
-	}
-	for _, obsolete := range []string{"gemini-1.0-pro", "gemini-1.0-pro-vision"} {
-		if have[obsolete] {
-			t.Errorf("Models() still lists retired %q", obsolete)
-		}
-	}
-	for _, maas := range []string{
-		"deepseek-ai/deepseek-v3.2-maas",
-		"meta/llama-4-maverick-17b-128e-instruct-maas",
-		"moonshotai/kimi-k2-thinking-maas",
-	} {
-		if have[maas] {
-			t.Errorf("MaaS ID %q leaked into vertex.Models(); they belong to vertexmaas", maas)
-		}
 	}
 }
 

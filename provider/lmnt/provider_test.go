@@ -23,25 +23,6 @@ func TestLMNTProvider_ID(t *testing.T) {
 	}
 }
 
-func TestLMNTProvider_Models(t *testing.T) {
-	provider := New(Options{APIKey: "test-key"})
-
-	models := provider.Models()
-	if len(models) == 0 {
-		t.Error("expected at least one model")
-	}
-
-	hasLily := false
-	for _, m := range models {
-		if m == "lily" {
-			hasLily = true
-		}
-	}
-	if !hasLily {
-		t.Error("expected 'lily' model in models list")
-	}
-}
-
 func TestLMNTSpeech_Generate(t *testing.T) {
 	t.Run("should generate speech with required parameters", func(t *testing.T) {
 		var receivedBody map[string]any

@@ -27,18 +27,6 @@ func TestAzureProvider_ID(t *testing.T) {
 	}
 }
 
-func TestAzureProvider_Models(t *testing.T) {
-	provider := New(Options{
-		ResourceName: "test-resource",
-		APIKey:       "test-key",
-	})
-
-	models := provider.Models()
-	if len(models) == 0 {
-		t.Error("expected at least one model")
-	}
-}
-
 func TestAzureModel_StreamText(t *testing.T) {
 	t.Run("should extract text response", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

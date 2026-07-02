@@ -61,9 +61,6 @@ func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel {
 	return &transcriptionModel{id: modelID, provider: p}
 }
 
-// Models returns no static list — OpenRouter's catalog is fetched from its API.
-func (p *Provider) Models() []string { return nil }
-
 // setHeaders applies auth + provider/request headers, shared by all three models.
 func (p *Provider) setHeaders(h interface{ Set(string, string) }, reqHeaders map[string]string) {
 	h.Set("Content-Type", "application/json")

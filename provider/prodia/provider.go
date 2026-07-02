@@ -53,16 +53,6 @@ func (p *Provider) SpeechModel(modelID string) model.SpeechModel               {
 func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel { return nil }
 func (p *Provider) RerankingModel(modelID string) model.RerankingModel         { return nil }
 
-func (p *Provider) Models() []string {
-	return []string{
-		"sdxl",
-		"sd_xl_base_1.0.safetensors [be9edd61]",
-		"dreamshaper_8.safetensors [9d40847d]",
-		"absolutereality_v181.safetensors [3d9d4d2b]",
-		"realistic_vision_v5.safetensors [614d1063]",
-	}
-}
-
 var _ provider.Provider = (*Provider)(nil)
 
 // ProdiaImageModel implements the ImageModel interface.

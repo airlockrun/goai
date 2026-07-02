@@ -22,26 +22,6 @@ func TestRevAIProvider_ID(t *testing.T) {
 		t.Errorf("expected provider ID revai, got %s", provider.ID())
 	}
 }
-
-func TestRevAIProvider_Models(t *testing.T) {
-	provider := New(Options{APIKey: "test-key"})
-
-	models := provider.Models()
-	if len(models) == 0 {
-		t.Error("expected at least one model")
-	}
-
-	hasDefault := false
-	for _, m := range models {
-		if m == "default" {
-			hasDefault = true
-		}
-	}
-	if !hasDefault {
-		t.Error("expected 'default' model in models list")
-	}
-}
-
 func TestRevAITranscription_Transcribe(t *testing.T) {
 	t.Run("should transcribe audio from URL", func(t *testing.T) {
 		jobID := "test-job-id"

@@ -27,25 +27,6 @@ func TestOpenAIProvider_ID(t *testing.T) {
 	}
 }
 
-func TestOpenAIProvider_Models(t *testing.T) {
-	p := New(provider.Options{APIKey: "test-key"})
-
-	models := p.Models()
-	if len(models) == 0 {
-		t.Error("expected at least one model")
-	}
-
-	hasGPT := false
-	for _, m := range models {
-		if strings.Contains(m, "gpt") {
-			hasGPT = true
-		}
-	}
-	if !hasGPT {
-		t.Error("expected 'gpt' model in models list")
-	}
-}
-
 func TestOpenAIChatModel_StreamText(t *testing.T) {
 	t.Run("should extract text response", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

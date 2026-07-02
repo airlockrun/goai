@@ -22,26 +22,6 @@ func TestGroqProvider_ID(t *testing.T) {
 	}
 }
 
-func TestGroqProvider_Models(t *testing.T) {
-	provider := New(Options{APIKey: "test-key"})
-
-	models := provider.Models()
-	if len(models) == 0 {
-		t.Error("expected at least one model")
-	}
-
-	// Check for some known models
-	hasLlama := false
-	for _, m := range models {
-		if m == "llama-3.3-70b-versatile" {
-			hasLlama = true
-		}
-	}
-	if !hasLlama {
-		t.Error("expected llama-3.3-70b-versatile in models list")
-	}
-}
-
 func TestGroqTranscription_DoTranscribe(t *testing.T) {
 	t.Run("should transcribe audio", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

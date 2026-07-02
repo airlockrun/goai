@@ -133,41 +133,4 @@ func (p *Provider) RerankingModel(modelID string) model.RerankingModel {
 	return nil
 }
 
-// Models returns available model IDs. Mirrors ai-sdk's MistralChatModelId
-// union in packages/mistral/src/mistral-chat-options.ts.
-func (p *Provider) Models() []string {
-	return []string{
-		// Ministral family
-		"ministral-3b-latest",
-		"ministral-8b-latest",
-		"ministral-14b-latest",
-		// Mistral rolling aliases
-		"mistral-large-latest",
-		"mistral-medium-latest",
-		"mistral-small-latest",
-		// Mistral dated
-		"mistral-large-2512",
-		"mistral-medium-3.5",
-		"mistral-medium-3",
-		"mistral-medium-2508",
-		"mistral-medium-2505",
-		"mistral-small-2506",
-		"mistral-small-2603",
-		// Pixtral
-		"pixtral-large-latest",
-		// Magistral reasoning models
-		"magistral-medium-latest",
-		"magistral-small-latest",
-		"magistral-medium-2509",
-		"magistral-small-2509",
-	}
-}
-
-// EmbeddingModels returns available embedding model IDs.
-func (p *Provider) EmbeddingModels() []string {
-	return []string{
-		"mistral-embed",
-	}
-}
-
 var _ provider.Provider = (*Provider)(nil)

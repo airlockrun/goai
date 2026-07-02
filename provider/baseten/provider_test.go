@@ -15,16 +15,6 @@ func TestBasetenProvider_ID(t *testing.T) {
 	}
 }
 
-func TestBasetenProvider_Models(t *testing.T) {
-	provider := New(Options{APIKey: "test-key"})
-
-	models := provider.Models()
-	// Baseten models are deployment-specific, so empty list is expected
-	if models == nil {
-		t.Error("expected non-nil models list")
-	}
-}
-
 func TestBasetenLanguageModel_ID(t *testing.T) {
 	provider := New(Options{APIKey: "test-key"})
 	m := provider.LanguageModel("test-model-id")

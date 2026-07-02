@@ -21,25 +21,6 @@ func TestFalProvider_ID(t *testing.T) {
 	}
 }
 
-func TestFalProvider_Models(t *testing.T) {
-	provider := New(Options{APIKey: "test-key"})
-
-	models := provider.Models()
-	if len(models) == 0 {
-		t.Error("expected at least one model")
-	}
-
-	hasFlux := false
-	for _, m := range models {
-		if strings.Contains(m, "flux") {
-			hasFlux = true
-		}
-	}
-	if !hasFlux {
-		t.Error("expected flux model in models list")
-	}
-}
-
 func TestFalImage_Generate(t *testing.T) {
 	t.Run("should generate image with prompt", func(t *testing.T) {
 		var receivedBody map[string]any

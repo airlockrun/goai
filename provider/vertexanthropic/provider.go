@@ -155,11 +155,4 @@ func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel {
 // RerankingModel returns nil.
 func (p *Provider) RerankingModel(modelID string) model.RerankingModel { return nil }
 
-// Models returns the Vertex Anthropic chat-model catalog.
-func (p *Provider) Models() []string {
-	out := make([]string, len(VertexAnthropicChatModels))
-	copy(out, VertexAnthropicChatModels)
-	return out
-}
-
 var _ provider.Provider = (*Provider)(nil)

@@ -1336,34 +1336,6 @@ func TestAnthropicModel_CompactionDelta(t *testing.T) {
 	}
 }
 
-// Verify the new 4.x model IDs land in Models().
-func TestAnthropicProvider_ModelsContainsLatest(t *testing.T) {
-	p := New(Options{APIKey: "test"})
-	models := p.Models()
-	wanted := []string{"claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"}
-	have := map[string]bool{}
-	for _, m := range models {
-		have[m] = true
-	}
-	for _, w := range wanted {
-		if !have[w] {
-			t.Errorf("Models() missing %q (got %v)", w, models)
-		}
-	}
-	// Obsolete IDs should be pruned.
-	for _, obsolete := range []string{"claude-3-opus-20240229", "claude-3-sonnet-20240229"} {
-		if have[obsolete] {
-			t.Errorf("Models() still lists obsolete %q", obsolete)
-		}
-	}
-	// New IDs (ai-sdk PRs #15674 opus-4-8, #15928 fable-5).
-	for _, latest := range []string{"claude-opus-4-8", "claude-fable-5"} {
-		if !have[latest] {
-			t.Errorf("Models() missing %q", latest)
-		}
-	}
-}
-
 // TestAnthropicModel_MidConversationSystem covers ai-sdk PR #15674: the first
 // system block flows into the top-level `system` field; a second system block
 // separated by user/assistant messages is emitted inline as a {role:"system"}

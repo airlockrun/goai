@@ -22,25 +22,6 @@ func TestDeepgramProvider_ID(t *testing.T) {
 	}
 }
 
-func TestDeepgramProvider_Models(t *testing.T) {
-	provider := New(Options{APIKey: "test-key"})
-
-	models := provider.Models()
-	if len(models) == 0 {
-		t.Error("expected at least one model")
-	}
-
-	hasNova2 := false
-	for _, m := range models {
-		if m == "nova-2" {
-			hasNova2 = true
-		}
-	}
-	if !hasNova2 {
-		t.Error("expected nova-2 in models list")
-	}
-}
-
 func TestDeepgramSpeech_Generate(t *testing.T) {
 	t.Run("should generate speech", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

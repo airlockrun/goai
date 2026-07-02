@@ -77,45 +77,6 @@ func (p *Provider) SpeechModel(modelID string) model.SpeechModel               {
 func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel { return nil }
 func (p *Provider) RerankingModel(modelID string) model.RerankingModel         { return nil }
 
-func (p *Provider) Models() []string {
-	return []string{
-		// Gemini 3.x (Vertex shadows the Gemini API catalog).
-		"gemini-3-pro-preview",
-		"gemini-3-pro-image-preview",
-		"gemini-3-flash-preview",
-		"gemini-3.1-pro-preview",
-		"gemini-3.1-pro-preview-customtools",
-		"gemini-3.1-flash-image-preview",
-		"gemini-3.1-flash-lite-preview",
-		"gemini-3.1-flash-tts-preview",
-		"gemini-3.5-flash",
-		// Gemini 2.5
-		"gemini-2.5-pro",
-		"gemini-2.5-flash",
-		"gemini-2.5-flash-image",
-		"gemini-2.5-flash-lite",
-		"gemini-2.5-flash-preview-tts",
-		"gemini-2.5-pro-preview-tts",
-		"gemini-2.5-computer-use-preview-10-2025",
-		// Gemini 2.0
-		"gemini-2.0-flash",
-		"gemini-2.0-flash-001",
-		"gemini-2.0-flash-lite",
-		"gemini-2.0-flash-lite-001",
-		// Gemini 1.5 (still active)
-		"gemini-1.5-pro",
-		"gemini-1.5-flash",
-		"gemini-1.5-flash-8b",
-		// Embedding + image
-		"text-embedding-005",
-		"text-embedding-004",
-		"gemini-embedding-2",
-		"textembedding-gecko@003",
-		"imagegeneration@006",
-		// MaaS models live in the dedicated vertexmaas package.
-	}
-}
-
 func (p *Provider) baseURL() string {
 	if p.opts.BaseURL != "" {
 		return p.opts.BaseURL

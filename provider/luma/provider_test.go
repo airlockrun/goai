@@ -21,25 +21,6 @@ func TestLumaProvider_ID(t *testing.T) {
 	}
 }
 
-func TestLumaProvider_Models(t *testing.T) {
-	provider := New(Options{APIKey: "test-key"})
-
-	models := provider.Models()
-	if len(models) == 0 {
-		t.Error("expected at least one model")
-	}
-
-	hasPhoton := false
-	for _, m := range models {
-		if strings.Contains(m, "photon") {
-			hasPhoton = true
-		}
-	}
-	if !hasPhoton {
-		t.Error("expected 'photon' model in models list")
-	}
-}
-
 func TestLumaImageModel_ID(t *testing.T) {
 	provider := New(Options{APIKey: "test-key"})
 	m := provider.ImageModel("photon-1")

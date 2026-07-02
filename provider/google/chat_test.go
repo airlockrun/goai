@@ -1046,28 +1046,3 @@ func TestGoogleModel_ToolConfigOmittedWhenNoToolChoice(t *testing.T) {
 		t.Errorf("expected no toolConfig when ToolChoice is unset, got %v", captured["toolConfig"])
 	}
 }
-
-// Verify the latest gemini 3.x + 2.5 model IDs landed and obsolete
-// 1.0-pro is pruned.
-func TestGoogleProvider_ModelsContainsLatest(t *testing.T) {
-	p := New(Options{APIKey: "k"})
-	have := map[string]bool{}
-	for _, m := range p.Models() {
-		have[m] = true
-	}
-	for _, w := range []string{
-		"gemini-3.1-pro-preview",
-		"gemini-3.1-flash-image-preview",
-		"gemini-3.1-flash-lite-preview",
-		"gemini-2.5-pro",
-		"gemini-2.5-flash",
-		"gemini-2.5-flash-image",
-	} {
-		if !have[w] {
-			t.Errorf("Models() missing %q", w)
-		}
-	}
-	if have["gemini-1.0-pro"] {
-		t.Error("Models() still lists retired gemini-1.0-pro")
-	}
-}

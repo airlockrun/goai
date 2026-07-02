@@ -57,12 +57,6 @@ func (p *Provider) SpeechModel(modelID string) model.SpeechModel               {
 func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel { return nil }
 func (p *Provider) RerankingModel(modelID string) model.RerankingModel         { return nil }
 
-func (p *Provider) Models() []string {
-	return []string{
-		// Model IDs are deployment-specific
-	}
-}
-
 var _ provider.Provider = (*Provider)(nil)
 
 // BasetenLanguageModel implements the LanguageModel interface.

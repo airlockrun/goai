@@ -73,19 +73,6 @@ func (p *Provider) SpeechModel(modelID string) model.SpeechModel               {
 func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel { return nil }
 func (p *Provider) RerankingModel(modelID string) model.RerankingModel         { return nil }
 
-func (p *Provider) Models() []string {
-	return []string{
-		"meta-llama/Meta-Llama-3.1-8B-Instruct",
-		"meta-llama/Meta-Llama-3.1-70B-Instruct",
-		"mistralai/Mistral-7B-Instruct-v0.3",
-		"mistralai/Mixtral-8x7B-Instruct-v0.1",
-		"microsoft/Phi-3-mini-4k-instruct",
-		"sentence-transformers/all-MiniLM-L6-v2",
-		"black-forest-labs/FLUX.1-dev",
-		"stabilityai/stable-diffusion-xl-base-1.0",
-	}
-}
-
 var _ provider.Provider = (*Provider)(nil)
 
 // HuggingFaceLanguageModel implements the LanguageModel interface.

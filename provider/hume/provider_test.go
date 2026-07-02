@@ -23,25 +23,6 @@ func TestHumeProvider_ID(t *testing.T) {
 	}
 }
 
-func TestHumeProvider_Models(t *testing.T) {
-	provider := New(Options{APIKey: "test-key"})
-
-	models := provider.Models()
-	if len(models) == 0 {
-		t.Error("expected at least one model")
-	}
-
-	hasOctave := false
-	for _, m := range models {
-		if strings.Contains(m, "octave") {
-			hasOctave = true
-		}
-	}
-	if !hasOctave {
-		t.Error("expected 'octave' model in models list")
-	}
-}
-
 func TestHumeSpeech_Generate(t *testing.T) {
 	t.Run("should generate speech with required parameters", func(t *testing.T) {
 		var receivedBody map[string]any
