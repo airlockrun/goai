@@ -343,10 +343,14 @@ func convertUserContent(content message.Content) any {
 			switch d := p.Data.(type) {
 			case message.FileDataBytes:
 				if strings.HasPrefix(p.MimeType, "image/") {
+					// d.Data is raw base64 — wrap it in a data: URL. Bare base64
+					// is not a valid URL and OpenAI-compatible providers reject
+					// it ("Expected a valid URL, but got a value with an invalid
+					// format"), which breaks image analysis via gateways.
 					result = append(result, chatContentPart{
 						Type: "image_url",
 						ImageURL: &chatImageURL{
-							URL: d.Data,
+							URL: "data:" + p.MimeType + ";base64," + d.Data,
 						},
 					})
 				} else if strings.HasPrefix(p.MimeType, "text/") {

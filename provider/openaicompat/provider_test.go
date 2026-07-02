@@ -687,6 +687,33 @@ func TestConvertUserContent_TextFilePartBase64(t *testing.T) {
 	}
 }
 
+func TestConvertUserContent_ImageFilePartBase64(t *testing.T) {
+	content := message.Content{
+		Parts: []message.Part{
+			message.TextPart{Text: "What's in this image?"},
+			message.FilePart{
+				Data:     message.FileDataBytes{Data: "/9j/4AAQSkZJRg=="},
+				MimeType: "image/jpeg",
+			},
+		},
+	}
+
+	got := convertUserContent(content)
+	parts, ok := got.([]chatContentPart)
+	if !ok {
+		t.Fatalf("expected []chatContentPart, got %T", got)
+	}
+	if len(parts) != 2 || parts[1].Type != "image_url" || parts[1].ImageURL == nil {
+		t.Fatalf("expected an image_url part, got %+v", parts)
+	}
+	// Raw base64 must be wrapped in a data: URL — a bare base64 blob is not a
+	// valid URL and OpenAI-compatible providers reject it.
+	want := "data:image/jpeg;base64,/9j/4AAQSkZJRg=="
+	if parts[1].ImageURL.URL != want {
+		t.Errorf("image URL = %q, want %q", parts[1].ImageURL.URL, want)
+	}
+}
+
 // Translated from ai-sdk PR #12250: use looseObject for openaiCompatibleTokenUsageSchema
 func TestOpenAICompatModel_PreservesExtraUsageFields(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
