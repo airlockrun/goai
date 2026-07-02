@@ -21,25 +21,6 @@ func TestHuggingFaceProvider_ID(t *testing.T) {
 	}
 }
 
-func TestHuggingFaceProvider_Models(t *testing.T) {
-	provider := New(Options{APIKey: "test-key"})
-
-	models := provider.Models()
-	if len(models) == 0 {
-		t.Error("expected at least one model")
-	}
-
-	hasLlama := false
-	for _, m := range models {
-		if strings.Contains(m, "llama") || strings.Contains(m, "Llama") {
-			hasLlama = true
-		}
-	}
-	if !hasLlama {
-		t.Error("expected 'llama' model in models list")
-	}
-}
-
 func TestHuggingFaceLanguageModel_ID(t *testing.T) {
 	provider := New(Options{APIKey: "test-key"})
 	m := provider.LanguageModel("meta-llama/Meta-Llama-3.1-8B-Instruct")

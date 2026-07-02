@@ -21,25 +21,6 @@ func TestProdiaProvider_ID(t *testing.T) {
 	}
 }
 
-func TestProdiaProvider_Models(t *testing.T) {
-	provider := New(Options{APIKey: "test-key"})
-
-	models := provider.Models()
-	if len(models) == 0 {
-		t.Error("expected at least one model")
-	}
-
-	hasSDXL := false
-	for _, m := range models {
-		if strings.Contains(m, "sdxl") || m == "sdxl" {
-			hasSDXL = true
-		}
-	}
-	if !hasSDXL {
-		t.Error("expected 'sdxl' model in models list")
-	}
-}
-
 func TestProdiaImageModel_ID(t *testing.T) {
 	provider := New(Options{APIKey: "test-key"})
 	m := provider.ImageModel("sdxl")

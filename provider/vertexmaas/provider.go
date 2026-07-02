@@ -134,11 +134,4 @@ func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel {
 // RerankingModel returns nil.
 func (p *Provider) RerankingModel(modelID string) model.RerankingModel { return nil }
 
-// Models returns the Vertex MaaS model catalog.
-func (p *Provider) Models() []string {
-	out := make([]string, len(VertexMaasModels))
-	copy(out, VertexMaasModels)
-	return out
-}
-
 var _ provider.Provider = (*Provider)(nil)

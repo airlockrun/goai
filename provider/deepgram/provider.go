@@ -58,24 +58,6 @@ func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel {
 }
 func (p *Provider) RerankingModel(modelID string) model.RerankingModel { return nil }
 
-func (p *Provider) Models() []string {
-	return []string{
-		"nova-2",
-		"nova",
-		"enhanced",
-		"base",
-	}
-}
-
-func (p *Provider) SpeechModels() []string {
-	return []string{
-		"aura-asteria-en",
-		"aura-luna-en",
-		"aura-stella-en",
-		"aura-athena-en",
-	}
-}
-
 var _ provider.Provider = (*Provider)(nil)
 
 // DeepgramSpeechModel implements the SpeechModel interface.

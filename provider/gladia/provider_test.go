@@ -24,25 +24,6 @@ func TestGladiaProvider_ID(t *testing.T) {
 	}
 }
 
-func TestGladiaProvider_Models(t *testing.T) {
-	provider := New(Options{APIKey: "test-key"})
-
-	models := provider.Models()
-	if len(models) == 0 {
-		t.Error("expected at least one model")
-	}
-
-	hasDefault := false
-	for _, m := range models {
-		if m == "default" {
-			hasDefault = true
-		}
-	}
-	if !hasDefault {
-		t.Error("expected 'default' model in models list")
-	}
-}
-
 func TestGladiaTranscription_Transcribe(t *testing.T) {
 	t.Run("should transcribe audio from URL", func(t *testing.T) {
 		var serverURL string

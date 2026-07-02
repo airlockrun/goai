@@ -130,43 +130,5 @@ func (p *Provider) RerankingModel(modelID string) model.RerankingModel {
 	return nil
 }
 
-// Models returns available model IDs. Mirrors ai-sdk's GroqChatModelId
-// union in packages/groq/src/groq-chat-options.ts.
-func (p *Provider) Models() []string {
-	return []string{
-		// production models
-		"gemma2-9b-it",
-		"llama-3.1-8b-instant",
-		"llama-3.3-70b-versatile",
-		"meta-llama/llama-guard-4-12b",
-		"openai/gpt-oss-120b",
-		"openai/gpt-oss-20b",
-		// preview models
-		"deepseek-r1-distill-llama-70b",
-		"meta-llama/llama-4-maverick-17b-128e-instruct",
-		"meta-llama/llama-4-scout-17b-16e-instruct",
-		"meta-llama/llama-prompt-guard-2-22m",
-		"meta-llama/llama-prompt-guard-2-86m",
-		"moonshotai/kimi-k2-instruct-0905",
-		"qwen/qwen3-32b",
-		"llama-guard-3-8b",
-		"llama3-70b-8192",
-		"llama3-8b-8192",
-		"mixtral-8x7b-32768",
-		"qwen-qwq-32b",
-		"qwen-2.5-32b",
-		"deepseek-r1-distill-qwen-32b",
-	}
-}
-
-// TranscriptionModels returns available transcription model IDs.
-func (p *Provider) TranscriptionModels() []string {
-	return []string{
-		"whisper-large-v3",
-		"whisper-large-v3-turbo",
-		"distil-whisper-large-v3-en",
-	}
-}
-
 // Ensure Provider implements the provider interface
 var _ provider.Provider = (*Provider)(nil)

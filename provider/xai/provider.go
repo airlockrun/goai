@@ -182,17 +182,4 @@ func (p *Provider) SpeechModel(modelID string) model.SpeechModel               {
 func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel { return nil }
 func (p *Provider) RerankingModel(modelID string) model.RerankingModel         { return nil }
 
-// Models returns available model IDs. Mirrors ai-sdk's XaiChatModelId /
-// XaiResponsesModelId autocomplete unions, curated to xAI's current
-// lineup (ai-sdk #15276). The model ID type stays open, so passing any
-// ID the xAI API accepts still works; this list only seeds autocomplete.
-func (p *Provider) Models() []string {
-	return []string{
-		"grok-4.20-non-reasoning",
-		"grok-4.20-reasoning",
-		"grok-4.3",
-		"grok-latest",
-	}
-}
-
 var _ provider.Provider = (*Provider)(nil)

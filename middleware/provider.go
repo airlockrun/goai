@@ -30,8 +30,7 @@ type wrappedProvider struct {
 	mws   ProviderMiddlewares
 }
 
-func (w *wrappedProvider) ID() string       { return w.inner.ID() }
-func (w *wrappedProvider) Models() []string { return w.inner.Models() }
+func (w *wrappedProvider) ID() string { return w.inner.ID() }
 
 func (w *wrappedProvider) Model(modelID string) stream.Model {
 	m := w.inner.Model(modelID)

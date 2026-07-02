@@ -23,33 +23,6 @@ func TestProvider_ID(t *testing.T) {
 		t.Errorf("ID() = %q, want %q", got, "vertex.anthropic")
 	}
 }
-
-func TestProvider_Models(t *testing.T) {
-	p := New(Options{Project: "test-project"})
-	models := p.Models()
-	if len(models) != len(VertexAnthropicChatModels) {
-		t.Fatalf("Models() length = %d, want %d", len(models), len(VertexAnthropicChatModels))
-	}
-	// Spot-check a few entries that should be present.
-	wants := []string{
-		"claude-3-5-sonnet-v2@20241022",
-		"claude-sonnet-4-5@20250929",
-		"claude-opus-4-1@20250805",
-	}
-	for _, w := range wants {
-		found := false
-		for _, m := range models {
-			if m == w {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("Models() missing %q", w)
-		}
-	}
-}
-
 func TestProvider_BaseURL(t *testing.T) {
 	tests := []struct {
 		name    string

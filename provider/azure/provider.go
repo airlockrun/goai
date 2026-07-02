@@ -115,23 +115,6 @@ func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel {
 
 func (p *Provider) RerankingModel(modelID string) model.RerankingModel { return nil }
 
-func (p *Provider) Models() []string {
-	return []string{
-		"gpt-4o",
-		"gpt-4o-mini",
-		"gpt-4-turbo",
-		"gpt-4",
-		"gpt-35-turbo",
-		"text-embedding-ada-002",
-		"text-embedding-3-small",
-		"text-embedding-3-large",
-		"dall-e-3",
-		"whisper",
-		"tts",
-		"tts-hd",
-	}
-}
-
 func (p *Provider) baseURL(deployment string) string {
 	if p.opts.BaseURL != "" {
 		return p.opts.BaseURL

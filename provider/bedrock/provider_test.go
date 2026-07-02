@@ -23,28 +23,6 @@ func TestBedrockProvider_ID(t *testing.T) {
 	}
 }
 
-func TestBedrockProvider_Models(t *testing.T) {
-	provider := New(Options{
-		AccessKeyID:     "test-access-key",
-		SecretAccessKey: "test-secret-key",
-	})
-
-	models := provider.Models()
-	if len(models) == 0 {
-		t.Error("expected at least one model")
-	}
-
-	hasClaude := false
-	for _, m := range models {
-		if strings.Contains(m, "claude") {
-			hasClaude = true
-		}
-	}
-	if !hasClaude {
-		t.Error("expected 'claude' model in models list")
-	}
-}
-
 func TestBedrockLanguageModel_ID(t *testing.T) {
 	provider := New(Options{
 		AccessKeyID:     "test-access-key",
@@ -787,30 +765,5 @@ func TestBedrockAnthropic_ComputerUseBetaInjection(t *testing.T) {
 				t.Errorf("anthropic_beta = %v, want to contain %q", betas, tc.wantBeta)
 			}
 		})
-	}
-}
-
-// Verify the latest Anthropic 4.x model IDs landed in Models() (ai-sdk #dc34ced).
-// The ID format now mirrors ai-sdk's BedrockChatModelId exactly (short form
-// for the very latest Opus/Sonnet, dated form for the rest). US
-// region-inference variants are also present.
-func TestBedrockProvider_ModelsContainsLatestAnthropic(t *testing.T) {
-	p := New(Options{AccessKeyID: "k", SecretAccessKey: "s", Region: "us-east-1"})
-	have := map[string]bool{}
-	for _, m := range p.Models() {
-		have[m] = true
-	}
-	wanted := []string{
-		"anthropic.claude-opus-4-7",
-		"anthropic.claude-opus-4-6-v1",
-		"anthropic.claude-sonnet-4-6-v1",
-		"anthropic.claude-haiku-4-5-20251001-v1:0",
-		"us.anthropic.claude-opus-4-7",
-		"us.anthropic.claude-sonnet-4-6-v1",
-	}
-	for _, w := range wanted {
-		if !have[w] {
-			t.Errorf("Models() missing %q", w)
-		}
 	}
 }

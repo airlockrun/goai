@@ -70,21 +70,6 @@ func (p *Provider) SpeechModel(modelID string) model.SpeechModel               {
 func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel { return nil }
 func (p *Provider) RerankingModel(modelID string) model.RerankingModel         { return nil }
 
-func (p *Provider) Models() []string {
-	return []string{
-		"meta-llama/Meta-Llama-3.1-8B-Instruct",
-		"meta-llama/Meta-Llama-3.1-70B-Instruct",
-		"meta-llama/Meta-Llama-3.1-405B-Instruct",
-		"mistralai/Mistral-7B-Instruct-v0.3",
-		"mistralai/Mixtral-8x7B-Instruct-v0.1",
-		"microsoft/Phi-3-medium-4k-instruct",
-		"Qwen/Qwen2-72B-Instruct",
-		"nvidia/Llama-3.1-Nemotron-70B-Instruct-HF",
-		"BAAI/bge-large-en-v1.5",
-		"BAAI/bge-base-en-v1.5",
-	}
-}
-
 var _ provider.Provider = (*Provider)(nil)
 
 // DeepInfraEmbeddingModel implements the EmbeddingModel interface.

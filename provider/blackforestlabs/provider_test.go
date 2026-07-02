@@ -21,25 +21,6 @@ func TestBlackForestLabsProvider_ID(t *testing.T) {
 	}
 }
 
-func TestBlackForestLabsProvider_Models(t *testing.T) {
-	provider := New(Options{APIKey: "test-key"})
-
-	models := provider.Models()
-	if len(models) == 0 {
-		t.Error("expected at least one model")
-	}
-
-	hasFlux := false
-	for _, m := range models {
-		if strings.Contains(m, "flux") {
-			hasFlux = true
-		}
-	}
-	if !hasFlux {
-		t.Error("expected 'flux' model in models list")
-	}
-}
-
 func TestFluxImageModel_ID(t *testing.T) {
 	provider := New(Options{APIKey: "test-key"})
 	model := provider.ImageModel("flux-pro-1.1")

@@ -18,26 +18,6 @@ func TestReplicateProvider_ID(t *testing.T) {
 		t.Errorf("expected provider ID replicate, got %s", provider.ID())
 	}
 }
-
-func TestReplicateProvider_Models(t *testing.T) {
-	provider := New(Options{APIKey: "test-key"})
-
-	models := provider.Models()
-	if len(models) == 0 {
-		t.Error("expected at least one model")
-	}
-
-	hasFlux := false
-	for _, m := range models {
-		if strings.Contains(m, "flux") {
-			hasFlux = true
-		}
-	}
-	if !hasFlux {
-		t.Error("expected 'flux' model in models list")
-	}
-}
-
 func TestReplicateImageModel_ID(t *testing.T) {
 	provider := New(Options{APIKey: "test-key"})
 	m := provider.ImageModel("black-forest-labs/flux-1.1-pro")

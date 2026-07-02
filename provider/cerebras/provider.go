@@ -57,16 +57,4 @@ func (p *Provider) SpeechModel(modelID string) model.SpeechModel               {
 func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel { return nil }
 func (p *Provider) RerankingModel(modelID string) model.RerankingModel         { return nil }
 
-// Models returns the Cerebras model catalog. Mirrors
-// ai-sdk/packages/cerebras/src/cerebras-chat-options.ts CerebrasChatModelId.
-func (p *Provider) Models() []string {
-	return []string{
-		"llama3.1-8b",
-		"qwen-3-235b-a22b-instruct-2507",
-		"qwen-3-235b-a22b-thinking-2507",
-		"zai-glm-4.6",
-		"zai-glm-4.7",
-	}
-}
-
 var _ provider.Provider = (*Provider)(nil)

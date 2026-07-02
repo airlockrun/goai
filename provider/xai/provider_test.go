@@ -21,26 +21,6 @@ func TestXaiProvider_ID(t *testing.T) {
 		t.Errorf("expected provider ID xai, got %s", provider.ID())
 	}
 }
-
-func TestXaiProvider_Models(t *testing.T) {
-	provider := New(Options{APIKey: "test-key"})
-
-	models := provider.Models()
-	if len(models) == 0 {
-		t.Error("expected at least one model")
-	}
-
-	hasGrok := false
-	for _, m := range models {
-		if m == "grok-beta" || strings.Contains(m, "grok") {
-			hasGrok = true
-		}
-	}
-	if !hasGrok {
-		t.Error("expected grok model in models list")
-	}
-}
-
 func TestXaiModel_StreamText(t *testing.T) {
 	t.Run("should extract text response", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -532,34 +512,5 @@ func TestXaiRequestModifier_Logprobs(t *testing.T) {
 	}
 	if extra["top_logprobs"] != 5 {
 		t.Errorf("top_logprobs = %v, want 5", extra["top_logprobs"])
-	}
-}
-
-// Verify the curated Grok lineup (ai-sdk #15276): only the current
-// autocomplete IDs are advertised, retired variants are gone.
-func TestXaiProvider_ModelsContainsLatest(t *testing.T) {
-	p := New(Options{APIKey: "k"})
-	have := map[string]bool{}
-	for _, m := range p.Models() {
-		have[m] = true
-	}
-	for _, w := range []string{
-		"grok-4.20-non-reasoning",
-		"grok-4.20-reasoning",
-		"grok-4.3",
-		"grok-latest",
-	} {
-		if !have[w] {
-			t.Errorf("Models() missing %q", w)
-		}
-	}
-	for _, retired := range []string{
-		"grok-2", "grok-beta", "grok-3", "grok-3-mini",
-		"grok-4", "grok-4-1-fast-reasoning", "grok-code-fast-1",
-		"grok-4.20-0309-reasoning", "grok-4.20-multi-agent-0309",
-	} {
-		if have[retired] {
-			t.Errorf("Models() still lists retired %q", retired)
-		}
 	}
 }

@@ -3,6 +3,7 @@ package google
 
 import (
 	"github.com/airlockrun/goai/model"
+	"github.com/airlockrun/goai/provider"
 	"github.com/airlockrun/goai/stream"
 )
 
@@ -84,65 +85,4 @@ func (p *Provider) RerankingModel(modelID string) model.RerankingModel {
 	return nil
 }
 
-// Models returns available model IDs.
-// Mirrors ai-sdk's GoogleGenerativeAIModelId union in
-// packages/google/src/google-generative-ai-options.ts.
-func (p *Provider) Models() []string {
-	return []string{
-		// Gemini 3.x
-		"gemini-3-pro-preview",
-		"gemini-3-pro-image-preview",
-		"gemini-3-flash-preview",
-		"gemini-3.1-pro-preview",
-		"gemini-3.1-pro-preview-customtools",
-		"gemini-3.1-flash-image-preview",
-		"gemini-3.1-flash-lite-preview",
-		"gemini-3.1-flash-tts-preview",
-		"gemini-3.5-flash",
-		// Gemini 2.5
-		"gemini-2.5-pro",
-		"gemini-2.5-flash",
-		"gemini-2.5-flash-image",
-		"gemini-2.5-flash-lite",
-		"gemini-2.5-flash-preview-tts",
-		"gemini-2.5-pro-preview-tts",
-		"gemini-2.5-computer-use-preview-10-2025",
-		"gemini-2.5-flash-native-audio-latest",
-		"gemini-2.5-flash-native-audio-preview-09-2025",
-		"gemini-2.5-flash-native-audio-preview-12-2025",
-		// Gemini 2.0
-		"gemini-2.0-flash",
-		"gemini-2.0-flash-001",
-		"gemini-2.0-flash-lite",
-		"gemini-2.0-flash-lite-001",
-		// Rolling aliases
-		"gemini-pro-latest",
-		"gemini-flash-latest",
-		"gemini-flash-lite-latest",
-		// Gemini 1.5 (still active)
-		"gemini-1.5-pro",
-		"gemini-1.5-flash",
-		"gemini-1.5-flash-8b",
-		// Specialty previews
-		"deep-research-pro-preview-12-2025",
-		"deep-research-max-preview-04-2026",
-		"deep-research-preview-04-2026",
-		"nano-banana-pro-preview",
-		// Gemma 3 open-weight family via Gemini API
-		"gemma-3-1b-it",
-		"gemma-3-4b-it",
-		"gemma-3-12b-it",
-		"gemma-3-27b-it",
-		"gemma-3n-e2b-it",
-		"gemma-3n-e4b-it",
-	}
-}
-
-// EmbeddingModels returns available embedding model IDs.
-func (p *Provider) EmbeddingModels() []string {
-	return []string{
-		"text-embedding-004",
-		"embedding-001",
-		"gemini-embedding-2",
-	}
-}
+var _ provider.Provider = (*Provider)(nil)

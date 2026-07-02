@@ -74,31 +74,6 @@ func TestProvider_BaseURL(t *testing.T) {
 	}
 }
 
-func TestProvider_Models(t *testing.T) {
-	p := New(Options{Project: "test-project", AccessToken: "t"})
-	models := p.Models()
-	if len(models) != len(VertexMaasModels) {
-		t.Fatalf("Models() length = %d, want %d", len(models), len(VertexMaasModels))
-	}
-	// Independence: mutating return shouldn't affect subsequent calls.
-	models[0] = "mutated"
-	if p.Models()[0] == "mutated" {
-		t.Error("Models() return must be a copy")
-	}
-	// Spot-check a representative entry.
-	want := "deepseek-ai/deepseek-r1-0528-maas"
-	found := false
-	for _, m := range p.Models() {
-		if m == want {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("Models() missing %q", want)
-	}
-}
-
 func TestProvider_AuthorizationHeader(t *testing.T) {
 	var receivedAuth string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

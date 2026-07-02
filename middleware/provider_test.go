@@ -17,7 +17,6 @@ type fakeProvider struct {
 }
 
 func (f *fakeProvider) ID() string                  { return "fake" }
-func (f *fakeProvider) Models() []string            { return []string{"x"} }
 func (f *fakeProvider) Model(_ string) stream.Model { f.langCalls++; return &fakeLangModel{} }
 func (f *fakeProvider) LanguageModel(_ string) model.LanguageModel {
 	f.langCalls++

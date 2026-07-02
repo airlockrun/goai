@@ -23,25 +23,6 @@ func TestDeepInfraProvider_ID(t *testing.T) {
 	}
 }
 
-func TestDeepInfraProvider_Models(t *testing.T) {
-	provider := New(Options{APIKey: "test-key"})
-
-	models := provider.Models()
-	if len(models) == 0 {
-		t.Error("expected at least one model")
-	}
-
-	hasLlama := false
-	for _, m := range models {
-		if strings.Contains(m, "llama") || strings.Contains(m, "Llama") {
-			hasLlama = true
-		}
-	}
-	if !hasLlama {
-		t.Error("expected Llama model in models list")
-	}
-}
-
 func TestDeepInfraModel_StreamText(t *testing.T) {
 	t.Run("should extract text response", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

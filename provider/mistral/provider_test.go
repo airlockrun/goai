@@ -26,25 +26,6 @@ func TestMistralProvider_ID(t *testing.T) {
 	}
 }
 
-func TestMistralProvider_Models(t *testing.T) {
-	provider := New(Options{APIKey: "test-key"})
-
-	models := provider.Models()
-	if len(models) == 0 {
-		t.Error("expected at least one model")
-	}
-
-	hasMistralLarge := false
-	for _, m := range models {
-		if m == "mistral-large-latest" {
-			hasMistralLarge = true
-		}
-	}
-	if !hasMistralLarge {
-		t.Error("expected mistral-large-latest in models list")
-	}
-}
-
 func TestMistralEmbedding_DoEmbed(t *testing.T) {
 	t.Run("should extract embedding", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

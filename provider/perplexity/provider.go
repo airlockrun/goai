@@ -67,18 +67,4 @@ func (p *Provider) SpeechModel(modelID string) model.SpeechModel               {
 func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel { return nil }
 func (p *Provider) RerankingModel(modelID string) model.RerankingModel         { return nil }
 
-// Models returns the Perplexity model catalog. Mirrors
-// ai-sdk/packages/perplexity/src/perplexity-language-model-options.ts
-// PerplexityLanguageModelId. The legacy llama-3.1-sonar-* IDs were retired
-// by Perplexity in favor of the sonar-* naming.
-func (p *Provider) Models() []string {
-	return []string{
-		"sonar-deep-research",
-		"sonar-reasoning-pro",
-		"sonar-reasoning",
-		"sonar-pro",
-		"sonar",
-	}
-}
-
 var _ provider.Provider = (*Provider)(nil)

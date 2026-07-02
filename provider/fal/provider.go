@@ -53,17 +53,6 @@ func (p *Provider) SpeechModel(modelID string) model.SpeechModel               {
 func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel { return nil }
 func (p *Provider) RerankingModel(modelID string) model.RerankingModel         { return nil }
 
-func (p *Provider) Models() []string {
-	return []string{
-		"fal-ai/flux-pro/v1.1",
-		"fal-ai/flux/dev",
-		"fal-ai/flux/schnell",
-		"fal-ai/flux-lora",
-		"fal-ai/stable-diffusion-v3-medium",
-		"fal-ai/aura-flow",
-	}
-}
-
 var _ provider.Provider = (*Provider)(nil)
 
 // FalImageModel implements the ImageModel interface.
