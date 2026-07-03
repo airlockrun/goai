@@ -55,7 +55,7 @@ var bedrockToolBetaMap = map[string]string{
 func bedrockAnthropicConfig(modelID string) anthropic.Config {
 	supportsNativeStructuredOutput := !strings.Contains(modelID, "claude-opus-4-7")
 	return anthropic.Config{
-		ProviderID:                     "bedrock",
+		ProviderID:                     "amazon-bedrock",
 		ToolBetaMap:                    bedrockToolBetaMap,
 		ToolsStrict:                    true,
 		EmitBetasInBody:                true,
@@ -95,7 +95,7 @@ func New(opts Options) *Provider {
 	return &Provider{opts: opts}
 }
 
-func (p *Provider) ID() string { return "bedrock" }
+func (p *Provider) ID() string { return "amazon-bedrock" }
 
 func (p *Provider) Model(modelID string) stream.Model {
 	return p.LanguageModel(modelID)
@@ -139,7 +139,7 @@ type BedrockLanguageModel struct {
 }
 
 func (m *BedrockLanguageModel) ID() string       { return m.id }
-func (m *BedrockLanguageModel) Provider() string { return "bedrock" }
+func (m *BedrockLanguageModel) Provider() string { return "amazon-bedrock" }
 
 func (m *BedrockLanguageModel) Stream(ctx context.Context, options *stream.CallOptions) (<-chan stream.Event, error) {
 	events := make(chan stream.Event, 100)

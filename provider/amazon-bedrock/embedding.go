@@ -23,7 +23,7 @@ type BedrockEmbeddingModel struct {
 }
 
 func (m *BedrockEmbeddingModel) ID() string                { return m.id }
-func (m *BedrockEmbeddingModel) Provider() string          { return "bedrock" }
+func (m *BedrockEmbeddingModel) Provider() string          { return "amazon-bedrock" }
 func (m *BedrockEmbeddingModel) MaxEmbeddingsPerCall() int { return 1 } // Bedrock does one at a time
 func (m *BedrockEmbeddingModel) Dimensions() int           { return 0 } // Variable
 

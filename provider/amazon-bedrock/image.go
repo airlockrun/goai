@@ -24,7 +24,7 @@ type BedrockImageModel struct {
 }
 
 func (m *BedrockImageModel) ID() string            { return m.id }
-func (m *BedrockImageModel) Provider() string      { return "bedrock" }
+func (m *BedrockImageModel) Provider() string      { return "amazon-bedrock" }
 func (m *BedrockImageModel) MaxImagesPerCall() int { return 4 }
 
 func (m *BedrockImageModel) Generate(ctx context.Context, opts model.ImageCallOptions) (*model.ImageResult, error) {

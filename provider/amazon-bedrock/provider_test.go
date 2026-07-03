@@ -18,8 +18,8 @@ func TestBedrockProvider_ID(t *testing.T) {
 		Region:          "us-east-1",
 	})
 
-	if provider.ID() != "bedrock" {
-		t.Errorf("expected provider ID bedrock, got %s", provider.ID())
+	if provider.ID() != "amazon-bedrock" {
+		t.Errorf("expected provider ID amazon-bedrock, got %s", provider.ID())
 	}
 }
 
@@ -42,8 +42,8 @@ func TestBedrockLanguageModel_Provider(t *testing.T) {
 	})
 	m := provider.LanguageModel("anthropic.claude-3-5-sonnet-20241022-v2:0")
 
-	if m.Provider() != "bedrock" {
-		t.Errorf("expected provider bedrock, got %s", m.Provider())
+	if m.Provider() != "amazon-bedrock" {
+		t.Errorf("expected provider amazon-bedrock, got %s", m.Provider())
 	}
 }
 
@@ -239,8 +239,8 @@ func TestBedrockImageModel_Provider(t *testing.T) {
 	})
 	m := provider.ImageModel("amazon.titan-image-generator-v1")
 
-	if m.Provider() != "bedrock" {
-		t.Errorf("expected provider bedrock, got %s", m.Provider())
+	if m.Provider() != "amazon-bedrock" {
+		t.Errorf("expected provider amazon-bedrock, got %s", m.Provider())
 	}
 }
 
@@ -263,8 +263,8 @@ func TestBedrockEmbeddingModel_Provider(t *testing.T) {
 	})
 	m := provider.EmbeddingModel("amazon.titan-embed-text-v1")
 
-	if m.Provider() != "bedrock" {
-		t.Errorf("expected provider bedrock, got %s", m.Provider())
+	if m.Provider() != "amazon-bedrock" {
+		t.Errorf("expected provider amazon-bedrock, got %s", m.Provider())
 	}
 }
 
