@@ -560,7 +560,7 @@ func isGeminiImageModel(id string) bool {
 
 // detectVertexImageMime mirrors xai's detectImageMime helper. Duplicated
 // locally because cross-package sharing of these ~15 LOC helpers is
-// awkward — see goai/CLAUDE.md's "mirror ai-sdk exactly" and F1 notes.
+// awkward — see goai/AGENTS.md's "mirror ai-sdk exactly" and F1 notes.
 func detectVertexImageMime(data []byte) string {
 	switch {
 	case len(data) >= 4 && bytes.HasPrefix(data, []byte{0x89, 0x50, 0x4E, 0x47}):
