@@ -253,8 +253,12 @@ func TestStreamText_BasicUsage(t *testing.T) {
 		}
 
 		// Check final text
-		if result.Text() != "Hello, world!" {
-			t.Errorf("expected 'Hello, world!', got '%s'", result.Text())
+		text, err := result.Text()
+		if err != nil {
+			t.Fatalf("text error: %v", err)
+		}
+		if text != "Hello, world!" {
+			t.Errorf("expected 'Hello, world!', got '%s'", text)
 		}
 	})
 
@@ -277,7 +281,10 @@ func TestStreamText_BasicUsage(t *testing.T) {
 		for range result.FullStream {
 		}
 
-		usage := result.Usage()
+		usage, err := result.Usage()
+		if err != nil {
+			t.Fatalf("usage error: %v", err)
+		}
 		if usage.InputTotal() != 100 {
 			t.Errorf("expected 100 prompt tokens, got %d", usage.InputTotal())
 		}
@@ -322,6 +329,70 @@ func TestStreamText_BasicUsage(t *testing.T) {
 			t.Errorf("expected 'call_456', got '%s'", toolCalls[0].ID)
 		}
 	})
+}
+
+func TestStreamText_TerminalErrorAccessors(t *testing.T) {
+	streamErr := errors.New("stream disconnected")
+	model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
+		StreamResponse: []stream.Event{
+			{Type: stream.EventTextStart, Data: stream.TextStartEvent{}},
+			{Type: stream.EventTextDelta, Data: stream.TextDeltaEvent{Text: "partial"}},
+			{Type: stream.EventError, Data: stream.ErrorEvent{Error: streamErr}},
+		},
+	})
+
+	var onError error
+	result, err := StreamText(context.Background(), stream.Input{
+		Model:    model,
+		Messages: []message.Message{message.NewUserMessage("say something")},
+		OnError: func(err error) {
+			onError = err
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var sawError, sawFinish bool
+	for event := range result.FullStream {
+		switch event.Type {
+		case stream.EventError:
+			sawError = true
+		case stream.EventFinish:
+			sawFinish = true
+		}
+	}
+
+	if !sawError {
+		t.Fatal("expected error event")
+	}
+	if sawFinish {
+		t.Fatal("did not expect final finish after terminal error")
+	}
+	if !errors.Is(onError, streamErr) {
+		t.Fatalf("expected OnError to receive stream error, got %v", onError)
+	}
+
+	text, err := result.Text()
+	if !errors.Is(err, streamErr) {
+		t.Fatalf("expected text error %v, got %v", streamErr, err)
+	}
+	if text != "partial" {
+		t.Fatalf("expected partial text, got %q", text)
+	}
+
+	finishReason, err := result.FinishReason()
+	if !errors.Is(err, streamErr) {
+		t.Fatalf("expected finish reason error %v, got %v", streamErr, err)
+	}
+	if finishReason != stream.FinishReasonError {
+		t.Fatalf("expected finish reason error, got %q", finishReason)
+	}
+
+	_, err = result.Usage()
+	if !errors.Is(err, streamErr) {
+		t.Fatalf("expected usage error %v, got %v", streamErr, err)
+	}
 }
 
 func TestGenerateText_WithMultipleResponses(t *testing.T) {
@@ -649,8 +720,12 @@ func TestStreamText_MultiStep(t *testing.T) {
 		}
 
 		// Final text should be from step 2
-		if result.Text() != "The time is 12:00" {
-			t.Errorf("expected 'The time is 12:00', got '%s'", result.Text())
+		text, err := result.Text()
+		if err != nil {
+			t.Fatalf("text error: %v", err)
+		}
+		if text != "The time is 12:00" {
+			t.Errorf("expected 'The time is 12:00', got '%s'", text)
 		}
 
 		// OnStepEnd should be called twice
@@ -659,7 +734,10 @@ func TestStreamText_MultiStep(t *testing.T) {
 		}
 
 		// Check accumulated usage
-		usage := result.Usage()
+		usage, err := result.Usage()
+		if err != nil {
+			t.Fatalf("usage error: %v", err)
+		}
 		if usage.InputTotal() != 25 {
 			t.Errorf("expected 25 prompt tokens, got %d", usage.InputTotal())
 		}

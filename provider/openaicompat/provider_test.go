@@ -3,6 +3,7 @@ package openaicompat
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,20 @@ import (
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/stream"
 )
+
+type failingStreamReader struct {
+	data string
+	err  error
+	sent bool
+}
+
+func (r *failingStreamReader) Read(p []byte) (int, error) {
+	if !r.sent {
+		r.sent = true
+		return copy(p, r.data), nil
+	}
+	return 0, r.err
+}
 
 // Translated from ai-sdk/packages/openai-compatible/src/openai-compatible-provider.test.ts
 
@@ -23,6 +38,39 @@ func TestOpenAICompatProvider_ID(t *testing.T) {
 
 	if provider.ID() != "custom-provider" {
 		t.Errorf("expected provider ID custom-provider, got %s", provider.ID())
+	}
+}
+
+func TestOpenAICompatModel_ProcessStreamReadError(t *testing.T) {
+	readErr := errors.New("connection reset")
+	events := make(chan stream.Event, 10)
+	body := &failingStreamReader{
+		data: `data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}` + "\n\n",
+		err:  readErr,
+	}
+
+	model := &CompatModel{provider: &Provider{opts: Options{ProviderID: "custom"}}}
+	model.processStream(context.Background(), body, nil, events, false)
+	close(events)
+
+	var sawError, sawFinish bool
+	for event := range events {
+		switch event.Type {
+		case stream.EventError:
+			sawError = true
+			if !errors.Is(event.Data.(stream.ErrorEvent).Error, readErr) {
+				t.Fatalf("expected read error, got %v", event.Data.(stream.ErrorEvent).Error)
+			}
+		case stream.EventFinish, stream.EventFinishStep:
+			sawFinish = true
+		}
+	}
+
+	if !sawError {
+		t.Fatal("expected error event")
+	}
+	if sawFinish {
+		t.Fatal("did not expect finish event after read error")
 	}
 }
 

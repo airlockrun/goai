@@ -3,6 +3,7 @@ package openai
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -174,6 +175,42 @@ func createResponsesToolCallChunks() string {
 }
 
 // Tests
+
+func TestResponsesModel_ProcessStreamReadError(t *testing.T) {
+	readErr := errors.New("connection reset")
+	events := make(chan stream.Event, 10)
+	body := &failingStreamReader{
+		data: strings.Join([]string{
+			`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1"}}`,
+			`data: {"type":"response.output_text.delta","delta":"partial"}`,
+		}, "\n\n") + "\n\n",
+		err: readErr,
+	}
+
+	var model ResponsesModel
+	model.processStream(context.Background(), body, nil, events, false)
+	close(events)
+
+	var sawError, sawFinish bool
+	for event := range events {
+		switch event.Type {
+		case stream.EventError:
+			sawError = true
+			if !errors.Is(event.Data.(stream.ErrorEvent).Error, readErr) {
+				t.Fatalf("expected read error, got %v", event.Data.(stream.ErrorEvent).Error)
+			}
+		case stream.EventFinish, stream.EventFinishStep:
+			sawFinish = true
+		}
+	}
+
+	if !sawError {
+		t.Fatal("expected error event")
+	}
+	if sawFinish {
+		t.Fatal("did not expect finish event after read error")
+	}
+}
 
 func TestResponsesModel_ID(t *testing.T) {
 	p := createTestProvider("http://localhost")

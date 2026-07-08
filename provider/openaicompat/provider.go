@@ -445,6 +445,10 @@ func (m *CompatModel) processStream(ctx context.Context, body io.Reader, tools [
 			}
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: fmt.Errorf("%s stream read: %w", m.provider.opts.ProviderID, err)}}
+		return
+	}
 
 	// End text if started
 	if textStarted {

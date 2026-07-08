@@ -107,7 +107,11 @@ func TestIntegration_StreamText(t *testing.T) {
 	}
 
 	t.Logf("Received %d chunks", len(chunks))
-	t.Logf("Final text: %s", result.Text())
+	text, err := result.Text()
+	if err != nil {
+		t.Fatalf("text error: %v", err)
+	}
+	t.Logf("Final text: %s", text)
 }
 
 func TestIntegration_Embeddings(t *testing.T) {

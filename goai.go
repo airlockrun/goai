@@ -46,6 +46,7 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 		finalStepText     string
 		totalUsage        stream.Usage
 		parsedOutput      any
+		terminalErr       error
 		mu                sync.Mutex
 		done              = make(chan struct{})
 	)
@@ -57,6 +58,26 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 	go func() {
 		defer close(fullStream)
 		defer close(done)
+
+		recordError := func(err error) {
+			mu.Lock()
+			if terminalErr == nil {
+				terminalErr = err
+				finalFinishReason = stream.FinishReasonError
+			}
+			mu.Unlock()
+			if input.OnError != nil {
+				input.OnError(err)
+			}
+		}
+
+		emitError := func(err error) {
+			recordError(err)
+			fullStream <- stream.Event{
+				Type: stream.EventError,
+				Data: stream.ErrorEvent{Error: err},
+			}
+		}
 
 		allMessages := make([]message.Message, len(input.Messages))
 		copy(allMessages, input.Messages)
@@ -80,10 +101,7 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 			// Get events channel from model
 			events, err := currentInput.Model.Stream(ctx, callOptions)
 			if err != nil {
-				fullStream <- stream.Event{
-					Type: stream.EventError,
-					Data: stream.ErrorEvent{Error: err},
-				}
+				emitError(err)
 				return
 			}
 
@@ -131,12 +149,16 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 				case stream.ToolCallEvent:
 					refined := e.Input
 					if input.RefineToolInput != nil {
-						r, err := input.RefineToolInput(e.ToolName, e.Input)
-						if err != nil {
-							fullStream <- stream.Event{
-								Type: stream.EventError,
-								Data: stream.ErrorEvent{Error: fmt.Errorf("refineToolInput(%s): %w", e.ToolName, err)},
-							}
+						r, refineErr := input.RefineToolInput(e.ToolName, e.Input)
+						if refineErr != nil {
+							err := fmt.Errorf("refineToolInput(%s): %w", e.ToolName, refineErr)
+							mu.Lock()
+							stepText := stepTextBuilder.String()
+							textBuilder.WriteString(stepText)
+							allSources = append(allSources, stepSources...)
+							finalStepText = stepText
+							mu.Unlock()
+							emitError(err)
 							return
 						}
 						refined = r
@@ -156,6 +178,17 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 						stepFinishReason = e.FinishReason
 					}
 					stepUsage = e.Usage
+				case stream.ErrorEvent:
+					mu.Lock()
+					stepText := stepTextBuilder.String()
+					textBuilder.WriteString(stepText)
+					allToolCalls = append(allToolCalls, stepToolCalls...)
+					allSources = append(allSources, stepSources...)
+					totalUsage.Add(stepUsage)
+					finalStepText = stepText
+					mu.Unlock()
+					recordError(e.Error)
+					return
 				}
 			}
 
@@ -190,10 +223,16 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 					for _, tr := range stepToolResults {
 						fullStream <- toolOutcomeEvent(tr)
 					}
-					fullStream <- stream.Event{
-						Type: stream.EventError,
-						Data: stream.ErrorEvent{Error: toolExecErr},
-					}
+					mu.Lock()
+					stepText := stepTextBuilder.String()
+					textBuilder.WriteString(stepText)
+					allToolCalls = append(allToolCalls, stepToolCalls...)
+					allToolResults = append(allToolResults, stepToolResults...)
+					allSources = append(allSources, stepSources...)
+					totalUsage.Add(stepUsage)
+					finalStepText = stepText
+					mu.Unlock()
+					emitError(toolExecErr)
 					return
 				}
 
@@ -271,10 +310,7 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 				Usage:        totalUsage,
 			})
 			if parseErr != nil {
-				fullStream <- stream.Event{
-					Type: stream.EventError,
-					Data: stream.ErrorEvent{Error: parseErr},
-				}
+				emitError(parseErr)
 				return
 			}
 			mu.Lock()
@@ -311,11 +347,11 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 
 	result := &stream.Result{
 		FullStream: fullStream,
-		Text: func() string {
+		Text: func() (string, error) {
 			<-done
 			mu.Lock()
 			defer mu.Unlock()
-			return textBuilder.String()
+			return textBuilder.String(), terminalErr
 		},
 		ToolCalls: func() []stream.ToolCall {
 			<-done
@@ -335,17 +371,17 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 			defer mu.Unlock()
 			return allSources
 		},
-		FinishReason: func() stream.FinishReason {
+		FinishReason: func() (stream.FinishReason, error) {
 			<-done
 			mu.Lock()
 			defer mu.Unlock()
-			return finalFinishReason
+			return finalFinishReason, terminalErr
 		},
-		Usage: func() stream.Usage {
+		Usage: func() (stream.Usage, error) {
 			<-done
 			mu.Lock()
 			defer mu.Unlock()
-			return totalUsage
+			return totalUsage, terminalErr
 		},
 		Output: func() any {
 			<-done
