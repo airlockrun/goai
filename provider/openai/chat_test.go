@@ -3,6 +3,7 @@ package openai
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +17,20 @@ import (
 	"github.com/airlockrun/goai/tool"
 )
 
+type failingStreamReader struct {
+	data string
+	err  error
+	sent bool
+}
+
+func (r *failingStreamReader) Read(p []byte) (int, error) {
+	if !r.sent {
+		r.sent = true
+		return copy(p, r.data), nil
+	}
+	return 0, r.err
+}
+
 // Test fixtures
 
 func createTestProvider(baseURL string) *Provider {
@@ -23,6 +38,39 @@ func createTestProvider(baseURL string) *Provider {
 		APIKey:  "test-api-key",
 		BaseURL: baseURL,
 	})
+}
+
+func TestChatModel_ProcessStreamReadError(t *testing.T) {
+	readErr := errors.New("connection reset")
+	events := make(chan stream.Event, 10)
+	body := &failingStreamReader{
+		data: `data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}` + "\n\n",
+		err:  readErr,
+	}
+
+	var model ChatModel
+	model.processStream(context.Background(), body, nil, events, false)
+	close(events)
+
+	var sawError, sawFinish bool
+	for event := range events {
+		switch event.Type {
+		case stream.EventError:
+			sawError = true
+			if !errors.Is(event.Data.(stream.ErrorEvent).Error, readErr) {
+				t.Fatalf("expected read error, got %v", event.Data.(stream.ErrorEvent).Error)
+			}
+		case stream.EventFinish, stream.EventFinishStep:
+			sawFinish = true
+		}
+	}
+
+	if !sawError {
+		t.Fatal("expected error event")
+	}
+	if sawFinish {
+		t.Fatal("did not expect finish event after read error")
+	}
 }
 
 func createStreamChunks(chunks []string, finishReason string) string {

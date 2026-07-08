@@ -591,6 +591,10 @@ func (m *ResponsesModel) processStream(ctx context.Context, body io.Reader, tool
 			}
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: fmt.Errorf("OpenAI Responses stream read: %w", err)}}
+		return
+	}
 
 	// End text if still started
 	if textStarted {

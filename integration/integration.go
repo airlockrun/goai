@@ -105,7 +105,10 @@ func TestStreamText(t *testing.T, m stream.Model) {
 		t.Error("expected at least one text chunk")
 	}
 
-	text := result.Text()
+	text, err := result.Text()
+	if err != nil {
+		t.Fatalf("text error: %v", err)
+	}
 	if text == "" {
 		t.Error("expected non-empty final text")
 	}

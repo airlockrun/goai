@@ -14,8 +14,9 @@ type Result struct {
 	FullStream <-chan Event
 
 	// Text returns the final complete text when streaming is done.
+	// If streaming fails after partial output, it returns the partial text and the error.
 	// This blocks until the stream is complete.
-	Text func() string
+	Text func() (string, error)
 
 	// ToolCalls returns all tool calls made during generation.
 	// This blocks until the stream is complete.
@@ -31,12 +32,14 @@ type Result struct {
 	Sources func() []SourceEvent
 
 	// FinishReason returns why the generation stopped.
+	// If streaming fails, it returns the best known finish reason and the error.
 	// This blocks until the stream is complete.
-	FinishReason func() FinishReason
+	FinishReason func() (FinishReason, error)
 
 	// Usage returns token usage statistics.
+	// If streaming fails, it returns accumulated usage and the error.
 	// This blocks until the stream is complete.
-	Usage func() Usage
+	Usage func() (Usage, error)
 
 	// Output returns the parsed output when an Output strategy was provided
 	// on Input and the final step finished with FinishReasonStop.

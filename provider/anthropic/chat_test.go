@@ -3,6 +3,7 @@ package anthropic
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,20 @@ import (
 	"github.com/airlockrun/goai/tool"
 )
 
+type failingStreamReader struct {
+	data string
+	err  error
+	sent bool
+}
+
+func (r *failingStreamReader) Read(p []byte) (int, error) {
+	if !r.sent {
+		r.sent = true
+		return copy(p, r.data), nil
+	}
+	return 0, r.err
+}
+
 // Translated from ai-sdk/packages/anthropic/src/anthropic-messages-language-model.test.ts
 
 func createTestProvider(serverURL string) *Provider {
@@ -21,6 +36,42 @@ func createTestProvider(serverURL string) *Provider {
 		APIKey:  "test-api-key",
 		BaseURL: serverURL,
 	})
+}
+
+func TestAnthropicModel_ProcessStreamReadError(t *testing.T) {
+	readErr := errors.New("connection reset")
+	events := make(chan stream.Event, 10)
+	body := &failingStreamReader{
+		data: strings.Join([]string{
+			`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}`,
+		}, "\n\n") + "\n\n",
+		err: readErr,
+	}
+
+	var model AnthropicModel
+	model.processStream(context.Background(), body, nil, events, false, false)
+	close(events)
+
+	var sawError, sawFinish bool
+	for event := range events {
+		switch event.Type {
+		case stream.EventError:
+			sawError = true
+			if !errors.Is(event.Data.(stream.ErrorEvent).Error, readErr) {
+				t.Fatalf("expected read error, got %v", event.Data.(stream.ErrorEvent).Error)
+			}
+		case stream.EventFinish, stream.EventFinishStep:
+			sawFinish = true
+		}
+	}
+
+	if !sawError {
+		t.Fatal("expected error event")
+	}
+	if sawFinish {
+		t.Fatal("did not expect finish event after read error")
+	}
 }
 
 func TestAnthropicModel_ID(t *testing.T) {

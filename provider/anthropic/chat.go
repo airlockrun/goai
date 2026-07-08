@@ -890,6 +890,10 @@ func (m *AnthropicModel) processStream(ctx context.Context, body io.Reader, tool
 			// Stream ended
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: fmt.Errorf("Anthropic stream read: %w", err)}}
+		return
+	}
 
 	// End text if started
 	if textStarted {
