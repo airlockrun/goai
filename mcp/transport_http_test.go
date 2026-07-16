@@ -627,3 +627,13 @@ func TestHTTPTransport_NotificationsSendNoWait(t *testing.T) {
 		t.Errorf("expected nil result, got %s", string(res))
 	}
 }
+
+func TestReadHTTPResponseLimit(t *testing.T) {
+	got, err := readHTTPResponse(strings.NewReader("abcd"), 4)
+	if err != nil || string(got) != "abcd" {
+		t.Fatalf("readHTTPResponse(at limit) = %q, %v", got, err)
+	}
+	if _, err := readHTTPResponse(strings.NewReader("abcde"), 4); err == nil {
+		t.Fatal("readHTTPResponse(over limit) succeeded")
+	}
+}
