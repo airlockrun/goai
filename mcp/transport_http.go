@@ -57,6 +57,9 @@ type HTTPTransport struct {
 	mu     sync.Mutex
 }
 
+// MaxHTTPResponseBytes bounds one MCP HTTP response before JSON decoding.
+const MaxHTTPResponseBytes = 20 << 20
+
 // authResult holds the outcome of a shared OAuth recovery; done is closed
 // when the flow completes.
 type authResult struct {
@@ -294,13 +297,13 @@ func (t *HTTPTransport) Send(ctx context.Context, method string, params any) (js
 	contentType := resp.Header.Get("Content-Type")
 	switch {
 	case strings.Contains(contentType, "application/json"):
-		raw, err := io.ReadAll(resp.Body)
+		raw, err := readHTTPResponse(resp.Body, MaxHTTPResponseBytes)
 		if err != nil {
 			return nil, fmt.Errorf("read response: %w", err)
 		}
 		return t.parseJSONResponse(raw, requestID)
 	case strings.Contains(contentType, "text/event-stream"):
-		return t.parseSSEResponse(resp.Body, requestID)
+		return t.parseSSEResponse(io.LimitReader(resp.Body, MaxHTTPResponseBytes+1), requestID)
 	default:
 		return nil, &MCPClientError{
 			Message:    fmt.Sprintf("MCP HTTP Transport Error: unexpected content type: %s", contentType),
@@ -311,7 +314,7 @@ func (t *HTTPTransport) Send(ctx context.Context, method string, params any) (js
 }
 
 func (t *HTTPTransport) statusError(resp *http.Response) error {
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := readHTTPResponse(resp.Body, 64<<10)
 	msg := fmt.Sprintf("MCP HTTP Transport Error: POSTing to endpoint (HTTP %d): %s", resp.StatusCode, string(body))
 	if resp.StatusCode == http.StatusNotFound {
 		msg += ". This server does not support HTTP transport. Try using `sse` transport instead"
@@ -322,6 +325,17 @@ func (t *HTTPTransport) statusError(resp *http.Response) error {
 		URL:          t.url,
 		ResponseBody: string(body),
 	}
+}
+
+func readHTTPResponse(r io.Reader, limit int64) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > limit {
+		return nil, fmt.Errorf("MCP HTTP response exceeds %d bytes", limit)
+	}
+	return body, nil
 }
 
 // postWithAuthRetry runs one POST plus, optionally, one auth-on-401 retry
