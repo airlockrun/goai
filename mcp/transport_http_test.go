@@ -387,6 +387,7 @@ func TestHTTPTransport_AuthOn401Retry(t *testing.T) {
 	// already has a refresh token, so Auth() runs the refresh flow without
 	// triggering a redirect.
 	var attempt atomic.Int32
+	var metadataRequests atomic.Int32
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
@@ -435,6 +436,13 @@ func TestHTTPTransport_AuthOn401Retry(t *testing.T) {
 	prov := &fakeAuthProvider{tokens: &OAuthTokens{AccessToken: "stale", TokenType: "Bearer", RefreshToken: "rt"}}
 
 	tr := NewHTTPTransport(srv.URL+"/mcp", nil, prov)
+	baseTransport := srv.Client().Transport
+	tr.client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if strings.Contains(req.URL.Path, "/.well-known/") {
+			metadataRequests.Add(1)
+		}
+		return baseTransport.RoundTrip(req)
+	})}
 	if err := tr.Connect(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -448,6 +456,9 @@ func TestHTTPTransport_AuthOn401Retry(t *testing.T) {
 	}
 	if prov.tokens.AccessToken != "fresh" {
 		t.Errorf("expected token refresh, got %s", prov.tokens.AccessToken)
+	}
+	if metadataRequests.Load() == 0 {
+		t.Error("configured HTTP client did not carry OAuth metadata requests")
 	}
 }
 

@@ -164,6 +164,7 @@ func (t *SSETransport) openEventStream(ctx context.Context) (*http.Response, err
 		res, err := Auth(ctx, t.authProvider, AuthOptions{
 			ServerURL:           t.url,
 			ResourceMetadataURL: resourceMetaURL,
+			HTTPClient:          t.client,
 		})
 		if err != nil {
 			return nil, err
@@ -319,6 +320,7 @@ func (t *SSETransport) postWithAuthRetry(ctx context.Context, messageURL string,
 		res, err := Auth(ctx, t.authProvider, AuthOptions{
 			ServerURL:           t.url,
 			ResourceMetadataURL: resourceMetaURL,
+			HTTPClient:          t.client,
 		})
 		if err != nil {
 			return err

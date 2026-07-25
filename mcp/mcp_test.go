@@ -3,10 +3,32 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
 	"testing"
 
 	"github.com/airlockrun/goai/tool"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}
+
+func TestClientConnectUsesConfiguredHTTPClient(t *testing.T) {
+	want := errors.New("configured client used")
+	client := NewClient()
+	err := client.Connect(t.Context(), ServerConfig{
+		Name:       "custom",
+		Transport:  "http",
+		URL:        "https://mcp.example",
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, want })},
+	})
+	if !errors.Is(err, want) {
+		t.Fatalf("Connect() error = %v, want %v", err, want)
+	}
+}
 
 // connectWithMock creates a Client connected to a MockTransport with the given server name.
 // It bypasses the normal Connect flow to inject the mock transport directly.
