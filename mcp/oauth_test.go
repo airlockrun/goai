@@ -358,6 +358,144 @@ func TestDiscoverAuthorizationServerMetadata_OIDCRequiresS256(t *testing.T) {
 	}
 }
 
+func TestDiscoverOAuthMetadata(t *testing.T) {
+	tests := []struct {
+		name                string
+		registration        bool
+		wantRegistrationURL bool
+	}{
+		{name: "DCR advertised", registration: true, wantRegistrationURL: true},
+		{name: "DCR not advertised"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			registrationRequests := 0
+			var server *httptest.Server
+			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/.well-known/oauth-protected-resource/mcp/v1":
+					if r.Method != http.MethodGet {
+						t.Errorf("protected resource metadata method = %s", r.Method)
+					}
+					_ = json.NewEncoder(w).Encode(OAuthProtectedResourceMetadata{
+						Resource:             server.URL + "/mcp/v1",
+						AuthorizationServers: []string{server.URL + "/"},
+						ScopesSupported:      []string{"mail.read"},
+					})
+				case "/.well-known/oauth-authorization-server":
+					if r.Method != http.MethodGet {
+						t.Errorf("authorization server metadata method = %s", r.Method)
+					}
+					metadata := AuthorizationServerMetadata{
+						Issuer:                        server.URL,
+						AuthorizationEndpoint:         server.URL + "/authorize",
+						TokenEndpoint:                 server.URL + "/token",
+						CodeChallengeMethodsSupported: []string{"S256"},
+					}
+					if tt.registration {
+						metadata.RegistrationEndpoint = server.URL + "/register"
+					}
+					_ = json.NewEncoder(w).Encode(metadata)
+				case "/register":
+					registrationRequests++
+					http.Error(w, "registration must not be attempted", http.StatusInternalServerError)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			discovery, err := DiscoverOAuthMetadata(t.Context(), server.Client(), server.URL+"/mcp/v1")
+			if err != nil {
+				t.Fatalf("DiscoverOAuthMetadata() error: %v", err)
+			}
+			if discovery.AuthorizationServer != server.URL+"/" {
+				t.Errorf("AuthorizationServer = %q", discovery.AuthorizationServer)
+			}
+			if discovery.Metadata.AuthorizationEndpoint != server.URL+"/authorize" {
+				t.Errorf("AuthorizationEndpoint = %q", discovery.Metadata.AuthorizationEndpoint)
+			}
+			if got := discovery.Metadata.RegistrationEndpoint != ""; got != tt.wantRegistrationURL {
+				t.Errorf("RegistrationEndpoint present = %v, want %v", got, tt.wantRegistrationURL)
+			}
+			if registrationRequests != 0 {
+				t.Errorf("registration requests = %d, want 0", registrationRequests)
+			}
+		})
+	}
+}
+
+func TestDiscoverOAuthMetadataRejectsIssuerMismatch(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/.well-known/oauth-protected-resource":
+			_ = json.NewEncoder(w).Encode(OAuthProtectedResourceMetadata{
+				Resource:             server.URL,
+				AuthorizationServers: []string{server.URL},
+			})
+		case "/.well-known/oauth-authorization-server":
+			_ = json.NewEncoder(w).Encode(AuthorizationServerMetadata{
+				Issuer:                "https://other.example",
+				AuthorizationEndpoint: server.URL + "/authorize",
+				TokenEndpoint:         server.URL + "/token",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	_, err := DiscoverOAuthMetadata(t.Context(), server.Client(), server.URL)
+	if err == nil || !strings.Contains(err.Error(), "issuer") {
+		t.Fatalf("DiscoverOAuthMetadata() error = %v, want issuer mismatch", err)
+	}
+}
+
+func TestDiscoverOAuthMetadataRejectsMissingS256(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/.well-known/oauth-protected-resource":
+			_ = json.NewEncoder(w).Encode(OAuthProtectedResourceMetadata{
+				Resource:             server.URL,
+				AuthorizationServers: []string{server.URL},
+			})
+		case "/.well-known/oauth-authorization-server":
+			_ = json.NewEncoder(w).Encode(AuthorizationServerMetadata{
+				Issuer:                        server.URL,
+				AuthorizationEndpoint:         server.URL + "/authorize",
+				TokenEndpoint:                 server.URL + "/token",
+				RegistrationEndpoint:          server.URL + "/register",
+				CodeChallengeMethodsSupported: []string{"plain"},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	_, err := DiscoverOAuthMetadata(t.Context(), server.Client(), server.URL)
+	if err == nil || !strings.Contains(err.Error(), "S256") {
+		t.Fatalf("DiscoverOAuthMetadata() error = %v, want S256 error", err)
+	}
+}
+
+func TestDiscoverOAuthMetadataLimitsResponseSize(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(strings.Repeat("x", maxOAuthMetadataBytes+1)))
+	}))
+	defer server.Close()
+
+	_, err := DiscoverOAuthMetadata(t.Context(), server.Client(), server.URL)
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("DiscoverOAuthMetadata() error = %v, want size error", err)
+	}
+}
+
 // stubProvider is the minimal OAuthClientProvider for Auth tests.
 type stubProvider struct {
 	clientInfo  *OAuthClientInformation

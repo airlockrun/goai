@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -109,6 +110,8 @@ func ExtractResourceMetadataURL(resp *http.Response) *url.URL {
 type httpDoer interface {
 	Do(req *http.Request) (*http.Response, error)
 }
+
+const maxOAuthMetadataBytes = 1 << 20
 
 func defaultHTTPClient(c httpDoer) httpDoer {
 	if c != nil {
@@ -225,7 +228,7 @@ func discoverOAuthProtectedResourceMetadata(
 		return nil, fmt.Errorf("HTTP %d loading protected resource metadata", resp.StatusCode)
 	}
 	var meta OAuthProtectedResourceMetadata
-	if err := json.NewDecoder(resp.Body).Decode(&meta); err != nil {
+	if err := decodeOAuthMetadata(resp.Body, &meta); err != nil {
 		return nil, fmt.Errorf("decode protected resource metadata: %w", err)
 	}
 	return &meta, nil
@@ -298,7 +301,7 @@ func discoverAuthorizationServerMetadata(
 		}
 
 		var meta AuthorizationServerMetadata
-		if err := json.NewDecoder(resp.Body).Decode(&meta); err != nil {
+		if err := decodeOAuthMetadata(resp.Body, &meta); err != nil {
 			resp.Body.Close()
 			return nil, fmt.Errorf("decode %s metadata: %w", ep.Type, err)
 		}
@@ -313,6 +316,116 @@ func discoverAuthorizationServerMetadata(
 		return &meta, nil
 	}
 	return nil, nil
+}
+
+// DiscoverOAuthMetadata passively discovers OAuth metadata for an MCP
+// resource. It only performs metadata GET requests; in particular, it never
+// sends a dynamic client registration request.
+func DiscoverOAuthMetadata(ctx context.Context, client *http.Client, serverURL string) (*OAuthMetadataDiscovery, error) {
+	if client == nil {
+		panic("mcp: HTTP client is required")
+	}
+	resourceMeta, err := discoverOAuthProtectedResourceMetadata(ctx, client, serverURL, "", LatestProtocolVersion)
+	if err != nil {
+		return nil, err
+	}
+	if resourceMeta.Resource == "" {
+		return nil, errors.New("protected resource metadata does not declare a resource")
+	}
+	resource, err := resourceURLFromServerURL(serverURL)
+	if err != nil {
+		return nil, err
+	}
+	if resource.String() != resourceMeta.Resource {
+		return nil, fmt.Errorf("protected resource %s does not match MCP server %s", resourceMeta.Resource, serverURL)
+	}
+	if len(resourceMeta.AuthorizationServers) == 0 {
+		return nil, errors.New("protected resource metadata does not declare an authorization server")
+	}
+
+	authorizationServer := resourceMeta.AuthorizationServers[0]
+	if err := validateDiscoveredURL("authorization server", authorizationServer, false); err != nil {
+		return nil, err
+	}
+	metadata, err := discoverAuthorizationServerMetadata(ctx, client, authorizationServer, LatestProtocolVersion)
+	if err != nil {
+		return nil, err
+	}
+	if metadata == nil {
+		return nil, errors.New("authorization server metadata was not found")
+	}
+	if !sameDiscoveredURL(metadata.Issuer, authorizationServer) {
+		return nil, errors.New("authorization server metadata issuer does not match the advertised server")
+	}
+	if len(metadata.CodeChallengeMethodsSupported) > 0 && !containsString(metadata.CodeChallengeMethodsSupported, "S256") {
+		return nil, errors.New("authorization server does not support S256 PKCE")
+	}
+	if err := validateDiscoveredURL("authorization endpoint", metadata.AuthorizationEndpoint, false); err != nil {
+		return nil, err
+	}
+	if err := validateDiscoveredURL("token endpoint", metadata.TokenEndpoint, false); err != nil {
+		return nil, err
+	}
+	if err := validateDiscoveredURL("registration endpoint", metadata.RegistrationEndpoint, true); err != nil {
+		return nil, err
+	}
+
+	return &OAuthMetadataDiscovery{
+		ProtectedResource:   *resourceMeta,
+		AuthorizationServer: authorizationServer,
+		Metadata:            *metadata,
+	}, nil
+}
+
+func validateDiscoveredURL(name, raw string, optional bool) error {
+	if raw == "" && optional {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || !u.IsAbs() || u.Host == "" || u.User != nil || u.Fragment != "" {
+		return fmt.Errorf("%s is not an absolute URL", name)
+	}
+	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopbackURL(u)) {
+		return fmt.Errorf("%s must use HTTPS", name)
+	}
+	return nil
+}
+
+func isLoopbackURL(u *url.URL) bool {
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func sameDiscoveredURL(left, right string) bool {
+	a, err := url.Parse(left)
+	if err != nil {
+		return false
+	}
+	b, err := url.Parse(right)
+	if err != nil {
+		return false
+	}
+	for _, u := range []*url.URL{a, b} {
+		// Google advertises https://accounts.google.com/ while its metadata
+		// issuer is https://accounts.google.com.
+		u.Path = strings.TrimRight(u.Path, "/")
+	}
+	return a.String() == b.String()
+}
+
+func decodeOAuthMetadata(reader io.Reader, target any) error {
+	body, err := io.ReadAll(io.LimitReader(reader, maxOAuthMetadataBytes+1))
+	if err != nil {
+		return err
+	}
+	if len(body) > maxOAuthMetadataBytes {
+		return fmt.Errorf("metadata exceeds %d bytes", maxOAuthMetadataBytes)
+	}
+	return json.Unmarshal(body, target)
 }
 
 // startAuthorizationOptions groups the inputs to startAuthorization to
@@ -886,6 +999,6 @@ func readAndClose(resp *http.Response) string {
 		return ""
 	}
 	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, maxOAuthMetadataBytes))
 	return string(b)
 }

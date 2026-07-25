@@ -59,6 +59,15 @@ type OAuthProtectedResourceMetadata struct {
 	DPopBoundAccessTokensRequired         bool     `json:"dpop_bound_access_tokens_required,omitempty"`
 }
 
+// OAuthMetadataDiscovery is the passive RFC 9728 and RFC 8414 discovery
+// result for an MCP resource. AuthorizationServer is the first server listed
+// by the protected resource, matching the server selected by Auth.
+type OAuthMetadataDiscovery struct {
+	ProtectedResource   OAuthProtectedResourceMetadata
+	AuthorizationServer string
+	Metadata            AuthorizationServerMetadata
+}
+
 // OAuthClientInformation is the registered-client identity (id + secret).
 type OAuthClientInformation struct {
 	ClientID              string `json:"client_id"`

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 
@@ -59,6 +60,10 @@ type ServerConfig struct {
 
 	// AuthProvider is the optional OAuth integration. nil = no OAuth.
 	AuthProvider OAuthClientProvider
+
+	// HTTPClient carries HTTP and SSE transport traffic. nil uses the package
+	// default client.
+	HTTPClient *http.Client
 }
 
 // ServerConnection represents a connection to an MCP server.
@@ -141,9 +146,17 @@ func (c *Client) Connect(ctx context.Context, config ServerConfig) error {
 	case "stdio":
 		transport = NewStdioTransport(config.Command, config.Args, config.Env)
 	case "sse":
-		transport = NewSSETransport(config.URL, config.Headers, config.AuthProvider)
+		t := NewSSETransport(config.URL, config.Headers, config.AuthProvider)
+		if config.HTTPClient != nil {
+			t.client = config.HTTPClient
+		}
+		transport = t
 	case "http":
-		transport = NewHTTPTransport(config.URL, config.Headers, config.AuthProvider)
+		t := NewHTTPTransport(config.URL, config.Headers, config.AuthProvider)
+		if config.HTTPClient != nil {
+			t.client = config.HTTPClient
+		}
+		transport = t
 	default:
 		return fmt.Errorf("unknown transport: %s", config.Transport)
 	}

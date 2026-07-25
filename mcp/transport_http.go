@@ -214,6 +214,7 @@ func (t *HTTPTransport) authorizeOnce(ctx context.Context, resourceMetadataURL *
 	inflight.result, inflight.err = Auth(ctx, t.authProvider, AuthOptions{
 		ServerURL:           t.url,
 		ResourceMetadataURL: resourceMetadataURL,
+		HTTPClient:          t.client,
 	})
 	close(inflight.done)
 
