@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -1074,6 +1075,170 @@ func TestBuildStepMessages_InvalidToolInputSubstitutedWithEmptyObject(t *testing
 			}
 			if got != tc.want {
 				t.Errorf("input = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+type recordingToolExecutor struct {
+	responses map[string]tool.Response
+	errors    map[string]error
+	calls     []string
+}
+
+func (e *recordingToolExecutor) Execute(_ context.Context, req tool.Request) (tool.Response, error) {
+	e.calls = append(e.calls, req.ToolName)
+	if err := e.errors[req.ToolName]; err != nil {
+		return tool.Response{}, err
+	}
+	if resp, ok := e.responses[req.ToolName]; ok {
+		return resp, nil
+	}
+	return tool.Response{Output: req.ToolName}, nil
+}
+
+func (e *recordingToolExecutor) Tools() []tool.Info { return nil }
+
+type markedFatalError struct {
+	fatal bool
+}
+
+func (e markedFatalError) Error() string        { return "marked executor error" }
+func (e markedFatalError) FatalToolError() bool { return e.fatal }
+
+type classifiedExecutorDenial struct{}
+
+func (classifiedExecutorDenial) Error() string            { return "permission rule denied execution" }
+func (classifiedExecutorDenial) ToolDenialReason() string { return "rule denied" }
+
+func TestExecuteTools_OrderedBatch(t *testing.T) {
+	const wantSkippedReason = "This tool was not executed because an earlier tool call in the same ordered batch was denied by the user."
+
+	toolCalls := []stream.ToolCall{
+		{ID: "call-2", Name: "second", Input: json.RawMessage(`{"n":2}`)},
+		{ID: "call-1", Name: "first", Input: json.RawMessage(`{"n":1}`)},
+		{ID: "call-3", Name: "third", Input: json.RawMessage(`{"n":3}`)},
+	}
+	tests := []struct {
+		name          string
+		responses     map[string]tool.Response
+		errors        map[string]error
+		wantCalls     []string
+		wantOutcomes  []string
+		deniedReasons map[int]string
+	}{
+		{
+			name:         "preserves model call order",
+			wantCalls:    []string{"second", "first", "third"},
+			wantOutcomes: []string{"success", "success", "success"},
+		},
+		{
+			name:         "ordinary error continues to later calls",
+			errors:       map[string]error{"first": errors.New("failed")},
+			wantCalls:    []string{"second", "first", "third"},
+			wantOutcomes: []string{"success", "error", "success"},
+		},
+		{
+			name: "denied response skips ordered tail",
+			responses: map[string]tool.Response{
+				"first": {Denied: true, DeniedReason: "user refused first"},
+			},
+			wantCalls:    []string{"second", "first"},
+			wantOutcomes: []string{"success", "denied", "denied"},
+			deniedReasons: map[int]string{
+				1: "user refused first",
+				2: wantSkippedReason,
+			},
+		},
+		{
+			name: "wrapped denied error skips ordered tail",
+			errors: map[string]error{
+				"second": fmt.Errorf("permission check: %w", tool.DeniedError{Reason: "second denied"}),
+			},
+			wantCalls:    []string{"second"},
+			wantOutcomes: []string{"denied", "denied", "denied"},
+			deniedReasons: map[int]string{
+				0: "second denied",
+				1: wantSkippedReason,
+				2: wantSkippedReason,
+			},
+		},
+		{
+			name: "generic denied error skips ordered tail",
+			errors: map[string]error{
+				"first": fmt.Errorf("permission check: %w", classifiedExecutorDenial{}),
+			},
+			wantCalls:    []string{"second", "first"},
+			wantOutcomes: []string{"success", "denied", "denied"},
+			deniedReasons: map[int]string{
+				1: "rule denied",
+				2: wantSkippedReason,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			executor := &recordingToolExecutor{responses: tt.responses, errors: tt.errors}
+			results, err := executeTools(context.Background(), executor, toolCalls)
+			if err != nil {
+				t.Fatalf("executeTools() error = %v", err)
+			}
+			if got, want := strings.Join(executor.calls, ","), strings.Join(tt.wantCalls, ","); got != want {
+				t.Errorf("executed calls = %q, want %q", got, want)
+			}
+			if len(results) != len(toolCalls) {
+				t.Fatalf("len(results) = %d, want %d", len(results), len(toolCalls))
+			}
+			for i, result := range results {
+				if result.ToolCallID != toolCalls[i].ID {
+					t.Errorf("results[%d].ToolCallID = %q, want %q", i, result.ToolCallID, toolCalls[i].ID)
+				}
+				if got := message.ToolOutcome(result.Output); got != tt.wantOutcomes[i] {
+					t.Errorf("results[%d] outcome = %q, want %q", i, got, tt.wantOutcomes[i])
+				}
+				if wantReason, ok := tt.deniedReasons[i]; ok {
+					denied, ok := result.Output.(message.ExecutionDeniedOutput)
+					if !ok {
+						t.Errorf("results[%d].Output = %T, want ExecutionDeniedOutput", i, result.Output)
+					} else if denied.Reason != wantReason {
+						t.Errorf("results[%d] denial reason = %q, want %q", i, denied.Reason, wantReason)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestExecuteTools_WrappedFatalError(t *testing.T) {
+	tests := []struct {
+		name        string
+		fatal       bool
+		wantErr     bool
+		wantCalls   []string
+		wantResults int
+	}{
+		{name: "true marker stops batch", fatal: true, wantErr: true, wantCalls: []string{"first"}},
+		{name: "false marker is ordinary error", fatal: false, wantCalls: []string{"first", "second"}, wantResults: 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			executor := &recordingToolExecutor{errors: map[string]error{
+				"first": fmt.Errorf("wrapped: %w", markedFatalError{fatal: tt.fatal}),
+			}}
+			results, err := executeTools(context.Background(), executor, []stream.ToolCall{
+				{ID: "1", Name: "first"},
+				{ID: "2", Name: "second"},
+			})
+			if (err != nil) != tt.wantErr {
+				t.Errorf("executeTools() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got, want := strings.Join(executor.calls, ","), strings.Join(tt.wantCalls, ","); got != want {
+				t.Errorf("executed calls = %q, want %q", got, want)
+			}
+			if len(results) != tt.wantResults {
+				t.Errorf("len(results) = %d, want %d", len(results), tt.wantResults)
 			}
 		})
 	}

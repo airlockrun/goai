@@ -22,15 +22,33 @@ func (e DeniedError) Error() string {
 	return "tool execution denied"
 }
 
+// ToolDenialReason classifies DeniedError as a denied tool execution.
+func (e DeniedError) ToolDenialReason() string { return e.Reason }
+
+// DenialError is implemented by errors that classify a tool execution as
+// denied rather than failed.
+type DenialError interface {
+	error
+	ToolDenialReason() string
+}
+
+// DenialReason returns the reason carried by a direct or wrapped DenialError.
+func DenialReason(err error) (string, bool) {
+	var denied DenialError
+	if errors.As(err, &denied) {
+		return denied.ToolDenialReason(), true
+	}
+	return "", false
+}
+
 // OutputForError classifies a non-nil tool error into the matching
-// ToolResultOutput variant: a DeniedError (directly or wrapped) →
+// ToolResultOutput variant: a DenialError (directly or wrapped) →
 // ExecutionDeniedOutput; anything else → ErrorTextOutput. This is the single
 // error-classification rule used everywhere a tool error is turned into a
 // result.
 func OutputForError(err error) message.ToolResultOutput {
-	var d DeniedError
-	if errors.As(err, &d) {
-		return message.ExecutionDeniedOutput{Reason: d.Reason}
+	if reason, denied := DenialReason(err); denied {
+		return message.ExecutionDeniedOutput{Reason: reason}
 	}
 	return message.ErrorTextOutput{Value: err.Error()}
 }

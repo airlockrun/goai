@@ -137,6 +137,43 @@ func TestAzureModel_StreamText(t *testing.T) {
 	})
 }
 
+func TestAzureModel_ToolCallOrder(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "contiguous indices",
+			body: `data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":2,"id":"call-2","function":{"name":"third","arguments":"{}"}},{"index":0,"id":"call-0","function":{"name":"first","arguments":"{}"}},{"index":1,"id":"call-1","function":{"name":"second","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}` + "\n\ndata: [DONE]\n\n",
+			want: "call-0,call-1,call-2",
+		},
+		{
+			name: "sparse indices",
+			body: `data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":7,"id":"call-7","function":{"name":"last","arguments":"{}"}},{"index":3,"id":"call-3","function":{"name":"first","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}` + "\n\ndata: [DONE]\n\n",
+			want: "call-3,call-7",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			events := make(chan stream.Event, 32)
+			(&AzureLanguageModel{}).processStream(context.Background(), strings.NewReader(tt.body), nil, events)
+			close(events)
+
+			var ids []string
+			for event := range events {
+				if event.Type == stream.EventToolCall {
+					ids = append(ids, event.Data.(stream.ToolCallEvent).ToolCallID)
+				}
+			}
+			if got := strings.Join(ids, ","); got != tt.want {
+				t.Errorf("tool call order = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestAzureModel_Headers(t *testing.T) {
 	t.Run("should pass api-key header", func(t *testing.T) {
 		var receivedHeaders http.Header
