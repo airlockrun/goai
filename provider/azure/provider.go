@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/airlockrun/goai/message"
@@ -481,7 +482,13 @@ func (m *AzureLanguageModel) processStream(ctx context.Context, body io.Reader, 
 	}
 
 	// Process completed tool calls
-	for _, acc := range currentToolCalls {
+	toolCallIndices := make([]int, 0, len(currentToolCalls))
+	for index := range currentToolCalls {
+		toolCallIndices = append(toolCallIndices, index)
+	}
+	sort.Ints(toolCallIndices)
+	for _, index := range toolCallIndices {
+		acc := currentToolCalls[index]
 		events <- stream.Event{
 			Type: stream.EventToolInputEnd,
 			Data: stream.ToolInputEndEvent{ID: acc.id},

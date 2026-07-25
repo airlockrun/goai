@@ -182,17 +182,17 @@ func (e *LocalExecutor) Execute(ctx context.Context, req Request) (Response, err
 		if ctx.Err() != nil {
 			return Response{}, ctx.Err()
 		}
-		if fatal, ok := err.(FatalToolError); ok && fatal.FatalToolError() {
+		var fatal FatalToolError
+		if errors.As(err, &fatal) && fatal.FatalToolError() {
 			return Response{}, err
 		}
 
 		// A denied tool call is refused, not failed — surface it distinctly
 		// so it serializes to execution-denied.
-		var denied DeniedError
-		if errors.As(err, &denied) {
-			resp := Response{Denied: true, DeniedReason: denied.Reason}
+		if reason, denied := DenialReason(err); denied {
+			resp := Response{Denied: true, DeniedReason: reason}
 			if DebugExecutor {
-				fmt.Fprintf(os.Stderr, "[TOOL] <<< %s denied=%q\n", req.ToolName, denied.Reason)
+				fmt.Fprintf(os.Stderr, "[TOOL] <<< %s denied=%q\n", req.ToolName, reason)
 			}
 			return resp, nil
 		}

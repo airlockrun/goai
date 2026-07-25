@@ -11,6 +11,13 @@ import (
 	"github.com/airlockrun/goai/message"
 )
 
+type classifiedDenialError struct {
+	reason string
+}
+
+func (e classifiedDenialError) Error() string            { return "classified denial: " + e.reason }
+func (e classifiedDenialError) ToolDenialReason() string { return e.reason }
+
 func TestOutputForError(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -43,6 +50,20 @@ func TestOutputForError(t *testing.T) {
 				}
 				if d.Reason != "nested" {
 					t.Errorf("Reason = %q, want %q", d.Reason, "nested")
+				}
+			},
+		},
+		{
+			name:     "generic denial maps to ExecutionDeniedOutput",
+			err:      fmt.Errorf("outer: %w", classifiedDenialError{reason: "rule refused"}),
+			wantType: message.ExecutionDeniedOutput{},
+			check: func(t *testing.T, out message.ToolResultOutput) {
+				d, ok := out.(message.ExecutionDeniedOutput)
+				if !ok {
+					t.Fatalf("got %T, want ExecutionDeniedOutput", out)
+				}
+				if d.Reason != "rule refused" {
+					t.Errorf("Reason = %q, want %q", d.Reason, "rule refused")
 				}
 			},
 		},
@@ -159,5 +180,24 @@ func TestLocalExecutor_DeniedError(t *testing.T) {
 	out := OutputForError(DeniedError{Reason: "nope"})
 	if d, ok := out.(message.ExecutionDeniedOutput); !ok || d.Reason != "nope" {
 		t.Errorf("OutputForError = %#v, want ExecutionDeniedOutput{Reason:\"nope\"}", out)
+	}
+}
+
+func TestLocalExecutor_GenericDenialError(t *testing.T) {
+	tools := Set{
+		"guarded": Tool{
+			Name: "guarded",
+			Execute: func(context.Context, json.RawMessage, CallOptions) (Result, error) {
+				return Result{}, fmt.Errorf("permission check: %w", classifiedDenialError{reason: "blocked by policy"})
+			},
+		},
+	}
+
+	resp, err := NewLocalExecutor(tools, []string{"guarded"}).Execute(context.Background(), Request{ToolName: "guarded"})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !resp.Denied || resp.DeniedReason != "blocked by policy" {
+		t.Errorf("Execute() response = %+v, want denied response", resp)
 	}
 }

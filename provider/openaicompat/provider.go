@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/airlockrun/goai/message"
@@ -456,7 +457,13 @@ func (m *CompatModel) processStream(ctx context.Context, body io.Reader, tools [
 	}
 
 	// Process completed tool calls
-	for _, acc := range currentToolCalls {
+	toolCallIndices := make([]int, 0, len(currentToolCalls))
+	for index := range currentToolCalls {
+		toolCallIndices = append(toolCallIndices, index)
+	}
+	sort.Ints(toolCallIndices)
+	for _, index := range toolCallIndices {
+		acc := currentToolCalls[index]
 		if !acc.started {
 			// function.name never arrived for this tool-call index. Mirrors
 			// ai-sdk's processDelta which raises AI_InvalidResponseDataError

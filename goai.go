@@ -5,6 +5,7 @@ package goai
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -16,6 +17,8 @@ import (
 
 // defaultMaxSteps is the default maximum number of tool-calling steps.
 const defaultMaxSteps = 1
+
+const skippedAfterDeniedReason = "This tool was not executed because an earlier tool call in the same ordered batch was denied by the user."
 
 // StreamText streams text generation from a language model.
 // This is the main entry point, equivalent to ai-sdk's streamText().
@@ -733,48 +736,62 @@ func buildCallOptions(input *stream.Input) *stream.CallOptions {
 func executeTools(ctx context.Context, executor tool.Executor, toolCalls []stream.ToolCall) ([]stream.ToolResultEvent, error) {
 	results := make([]stream.ToolResultEvent, 0, len(toolCalls))
 
-	for _, tc := range toolCalls {
+	for i, tc := range toolCalls {
 		// Execute via the executor
 		resp, err := executor.Execute(ctx, tool.Request{
 			ToolCallID: tc.ID,
 			ToolName:   tc.Name,
 			Input:      tc.Input,
 		})
+		var result stream.ToolResultEvent
 
 		if err != nil {
 			// Fatal errors and context errors propagate up to stop the run
 			if ctx.Err() != nil {
 				return results, ctx.Err()
 			}
-			if _, ok := err.(tool.FatalToolError); ok {
+			var fatal tool.FatalToolError
+			if errors.As(err, &fatal) && fatal.FatalToolError() {
 				return results, err
 			}
 
 			// Normal executor errors: classify (denied vs error) and feed
 			// the discriminated outcome back to the model.
-			results = append(results, stream.ToolResultEvent{
+			result = stream.ToolResultEvent{
 				ToolCallID: tc.ID,
 				ToolName:   tc.Name,
 				Input:      tc.Input,
 				Output:     tool.OutputForError(err),
-			})
-			continue
+			}
+		} else {
+			// Skip if tool has no execute function (matches ai-sdk behavior where
+			// tools without execute return undefined, which is filtered out)
+			if resp.NoExecute {
+				continue
+			}
+
+			result = stream.ToolResultEvent{
+				ToolCallID: tc.ID,
+				ToolName:   tc.Name,
+				Input:      tc.Input,
+				Output:     outputFromResponse(resp),
+				Title:      resp.Title,
+				Metadata:   resp.Metadata,
+			}
 		}
 
-		// Skip if tool has no execute function (matches ai-sdk behavior where
-		// tools without execute return undefined, which is filtered out)
-		if resp.NoExecute {
-			continue
+		results = append(results, result)
+		if message.ToolOutcome(result.Output) == "denied" {
+			for _, skipped := range toolCalls[i+1:] {
+				results = append(results, stream.ToolResultEvent{
+					ToolCallID: skipped.ID,
+					ToolName:   skipped.Name,
+					Input:      skipped.Input,
+					Output:     message.ExecutionDeniedOutput{Reason: skippedAfterDeniedReason},
+				})
+			}
+			return results, nil
 		}
-
-		results = append(results, stream.ToolResultEvent{
-			ToolCallID: tc.ID,
-			ToolName:   tc.Name,
-			Input:      tc.Input,
-			Output:     outputFromResponse(resp),
-			Title:      resp.Title,
-			Metadata:   resp.Metadata,
-		})
 	}
 
 	return results, nil
