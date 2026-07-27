@@ -2,4 +2,4 @@ package goai
 
 // Version is the goai library version. It is strictly greater than the latest
 // git tag except while that exact version is being released.
-const Version = "0.1.6-alpha.1"
+const Version = "0.1.6"
