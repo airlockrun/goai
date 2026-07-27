@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +13,12 @@ import (
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/stream"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 type failingStreamReader struct {
 	data string
@@ -27,6 +34,19 @@ func (r *failingStreamReader) Read(p []byte) (int, error) {
 	return 0, r.err
 }
 
+type countingReadCloser struct {
+	reader io.Reader
+	read   int
+}
+
+func (r *countingReadCloser) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	r.read += n
+	return n, err
+}
+
+func (r *countingReadCloser) Close() error { return nil }
+
 // Translated from ai-sdk/packages/openai-compatible/src/openai-compatible-provider.test.ts
 
 func TestOpenAICompatProvider_ID(t *testing.T) {
@@ -38,6 +58,42 @@ func TestOpenAICompatProvider_ID(t *testing.T) {
 
 	if provider.ID() != "custom-provider" {
 		t.Errorf("expected provider ID custom-provider, got %s", provider.ID())
+	}
+}
+
+func TestOpenAICompatModel_StreamUsesHTTPClient(t *testing.T) {
+	called := false
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		called = true
+		if req.URL.String() != "http://provider.internal/v1/chat/completions" {
+			t.Errorf("request URL = %q", req.URL.String())
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader("data: [DONE]\n\n")),
+			Request:    req,
+		}, nil
+	})}
+	model := New(Options{
+		ProviderID: "custom",
+		BaseURL:    "http://provider.internal/v1",
+		HTTPClient: client,
+	}).Model("custom-model")
+
+	events, err := model.Stream(context.Background(), &stream.CallOptions{
+		Messages: []message.Message{message.NewUserMessage("Hello")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for event := range events {
+		if event.Type == stream.EventError {
+			t.Fatal(event.Data.(stream.ErrorEvent).Error)
+		}
+	}
+	if !called {
+		t.Fatal("configured HTTP client was not called")
 	}
 }
 
@@ -224,6 +280,32 @@ func TestOpenAICompatModel_Headers(t *testing.T) {
 		}
 	})
 
+	t.Run("should omit authorization header without an API key", func(t *testing.T) {
+		var receivedHeaders http.Header
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			receivedHeaders = r.Header.Clone()
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("data: [DONE]\n\n"))
+		}))
+		defer server.Close()
+
+		model := New(Options{ProviderID: "custom", BaseURL: server.URL}).Model("custom-model")
+		events, err := model.Stream(context.Background(), &stream.CallOptions{
+			Messages: []message.Message{message.NewUserMessage("Hello")},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for range events {
+		}
+
+		if _, ok := receivedHeaders["Authorization"]; ok {
+			t.Errorf("Authorization header = %q, want omitted", receivedHeaders.Get("Authorization"))
+		}
+	})
+
 	t.Run("should pass custom auth header", func(t *testing.T) {
 		var receivedHeaders http.Header
 
@@ -319,6 +401,42 @@ func TestOpenAICompatModel_Headers(t *testing.T) {
 			t.Errorf("expected Custom-Request-Header, got %s", receivedHeaders.Get("Custom-Request-Header"))
 		}
 	})
+}
+
+func TestOpenAICompatModel_StreamOptions(t *testing.T) {
+	boolPtr := func(v bool) *bool { return &v }
+	tests := []struct {
+		name         string
+		includeUsage *bool
+		wantOptions  bool
+	}{
+		{name: "default includes usage", wantOptions: true},
+		{name: "enabled includes usage", includeUsage: boolPtr(true), wantOptions: true},
+		{name: "disabled omits stream options", includeUsage: boolPtr(false)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := New(Options{ProviderID: "custom", IncludeUsage: tt.includeUsage}).Model("model").(*CompatModel)
+			body, _, err := model.buildRequest(&stream.CallOptions{
+				Messages: []message.Message{message.NewUserMessage("Hello")},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var request map[string]any
+			if err := json.Unmarshal(body, &request); err != nil {
+				t.Fatal(err)
+			}
+			options, ok := request["stream_options"].(map[string]any)
+			if ok != tt.wantOptions {
+				t.Fatalf("stream_options present = %v, want %v", ok, tt.wantOptions)
+			}
+			if ok && options["include_usage"] != true {
+				t.Errorf("include_usage = %v, want true", options["include_usage"])
+			}
+		})
+	}
 }
 
 func TestOpenAICompatModel_RequestBody(t *testing.T) {
@@ -706,43 +824,68 @@ func TestOpenAICompatModel_ResponseFormat(t *testing.T) {
 }
 
 func TestOpenAICompatModel_ErrorResponse(t *testing.T) {
-	t.Run("should emit error event on API errors", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			w.Write([]byte(`{"error":{"message":"Invalid API key","type":"invalid_request_error"}}`))
-		}))
-		defer server.Close()
+	shortBody := `{"error":{"message":"Invalid API key","type":"invalid_request_error"}}`
+	tests := []struct {
+		name     string
+		body     string
+		wantBody string
+		wantRead int
+	}{
+		{
+			name:     "short body",
+			body:     shortBody,
+			wantBody: shortBody,
+			wantRead: len(shortBody),
+		},
+		{
+			name:     "oversized body",
+			body:     strings.Repeat("x", maxErrorResponseBodyBytes*2),
+			wantBody: strings.Repeat("x", maxErrorResponseBodyBytes) + "... (truncated)",
+			wantRead: maxErrorResponseBodyBytes + 1,
+		},
+	}
 
-		provider := New(Options{
-			ProviderID: "custom",
-			APIKey:     "invalid-key",
-			BaseURL:    server.URL,
-		})
-		model := provider.Model("custom-model")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := &countingReadCloser{reader: strings.NewReader(tt.body)}
+			client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusTooManyRequests,
+					Body:       body,
+					Request:    req,
+				}, nil
+			})}
+			model := New(Options{
+				ProviderID: "custom",
+				BaseURL:    "http://provider.internal/v1",
+				HTTPClient: client,
+			}).Model("custom-model")
 
-		events, err := model.Stream(context.Background(), &stream.CallOptions{
-			Messages: []message.Message{
-				message.NewUserMessage("Hello"),
-			},
-		})
-
-		if err != nil {
-			return // Error returned directly - test passes
-		}
-
-		var gotError bool
-		for event := range events {
-			if event.Type == stream.EventError {
-				gotError = true
-				break
+			events, err := model.Stream(context.Background(), &stream.CallOptions{
+				Messages: []message.Message{message.NewUserMessage("Hello")},
+			})
+			if err != nil {
+				t.Fatal(err)
 			}
-		}
 
-		if !gotError {
-			t.Error("expected error event in stream")
-		}
-	})
+			var got error
+			for event := range events {
+				if event.Type == stream.EventError {
+					got = event.Data.(stream.ErrorEvent).Error
+				}
+			}
+			if got == nil {
+				t.Fatal("expected error event")
+			}
+			want := "custom API error (status 429): " + tt.wantBody
+			if got.Error() != want {
+				t.Errorf("error = %q, want %q", got, want)
+			}
+			if body.read != tt.wantRead {
+				t.Errorf("response bytes read = %d, want %d", body.read, tt.wantRead)
+			}
+		})
+	}
 }
 
 // Translated from ai-sdk PR #13006: fix(openai-compat): decode base64 string data

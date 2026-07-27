@@ -19,6 +19,8 @@ import (
 	"github.com/airlockrun/goai/tool"
 )
 
+const maxErrorResponseBodyBytes = 8 << 10
+
 // RequestModifier allows providers to add extra fields to the request body.
 // It receives the provider options from CallOptions.ProviderOptions and returns
 // additional fields to merge into the request JSON plus any warnings about
@@ -51,6 +53,9 @@ type Options struct {
 	// APIKey is the API key.
 	APIKey string
 
+	// HTTPClient sends streaming requests. Nil uses http.DefaultClient.
+	HTTPClient *http.Client
+
 	// Headers are additional HTTP headers to send.
 	Headers map[string]string
 
@@ -78,6 +83,10 @@ type Options struct {
 	// a schema request falls back to "json_object" plus prompt injection.
 	// Mirrors ai-sdk's OpenAICompatibleChatConfig.supportsStructuredOutputs.
 	SupportsStructuredOutputs bool
+
+	// IncludeUsage controls whether streaming requests send
+	// stream_options.include_usage. Nil preserves the default of true.
+	IncludeUsage *bool
 
 	// ToolSchemaTransformer, when set, rewrites each tool's JSON-schema
 	// parameters before they reach the request body. Providers whose API
@@ -168,7 +177,9 @@ func (m *CompatModel) doStream(ctx context.Context, options *stream.CallOptions,
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(m.provider.opts.AuthHeader, m.provider.opts.AuthPrefix+m.provider.opts.APIKey)
+	if m.provider.opts.APIKey != "" {
+		req.Header.Set(m.provider.opts.AuthHeader, m.provider.opts.AuthPrefix+m.provider.opts.APIKey)
+	}
 	for k, v := range m.provider.opts.Headers {
 		req.Header.Set(k, v)
 	}
@@ -178,7 +189,11 @@ func (m *CompatModel) doStream(ctx context.Context, options *stream.CallOptions,
 
 	events <- stream.Event{Type: stream.EventStart, Data: stream.StartEvent{Warnings: warnings}}
 
-	resp, err := http.DefaultClient.Do(req)
+	client := m.provider.opts.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
 		return
@@ -186,9 +201,17 @@ func (m *CompatModel) doStream(ctx context.Context, options *stream.CallOptions,
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorResponseBodyBytes+1))
+		truncated := len(body) > maxErrorResponseBodyBytes
+		if truncated {
+			body = body[:maxErrorResponseBodyBytes]
+		}
+		bodyText := string(body)
+		if truncated {
+			bodyText += "... (truncated)"
+		}
 		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{
-			Error: fmt.Errorf("%s API error (status %d): %s", m.provider.opts.ProviderID, resp.StatusCode, string(body)),
+			Error: fmt.Errorf("%s API error (status %d): %s", m.provider.opts.ProviderID, resp.StatusCode, bodyText),
 		}}
 		return
 	}
@@ -290,8 +313,10 @@ func (m *CompatModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 		req.ToolChoice = convertToolChoice(options.ToolChoice)
 	}
 
-	// Stream options for usage
-	req.StreamOptions = &streamOptions{IncludeUsage: true}
+	includeUsage := m.provider.opts.IncludeUsage == nil || *m.provider.opts.IncludeUsage
+	if includeUsage {
+		req.StreamOptions = &streamOptions{IncludeUsage: true}
+	}
 
 	// Apply provider-specific request modifications
 	if m.provider.opts.RequestModifier != nil {
