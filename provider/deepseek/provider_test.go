@@ -293,8 +293,9 @@ func TestDeepSeekRequestModifier_ThinkingEnabled(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if extra["enable_thinking"] != true {
-		t.Errorf("expected enable_thinking true, got %v", extra["enable_thinking"])
+	thinking, ok := extra["thinking"].(map[string]string)
+	if !ok || thinking["type"] != "enabled" {
+		t.Errorf("expected thinking enabled, got %v", extra["thinking"])
 	}
 }
 
@@ -310,8 +311,31 @@ func TestDeepSeekRequestModifier_ThinkingDisabled(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if extra["enable_thinking"] != false {
-		t.Errorf("expected enable_thinking false, got %v", extra["enable_thinking"])
+	thinking, ok := extra["thinking"].(map[string]string)
+	if !ok || thinking["type"] != "disabled" {
+		t.Errorf("expected thinking disabled, got %v", extra["thinking"])
+	}
+}
+
+func TestDeepSeekRequestModifier_ThinkingAdaptive(t *testing.T) {
+	extra, _, err := deepseekRequestModifier(map[string]any{
+		"thinking": map[string]any{"type": "adaptive"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	thinking, ok := extra["thinking"].(map[string]string)
+	if !ok || thinking["type"] != "adaptive" {
+		t.Errorf("expected thinking adaptive, got %v", extra["thinking"])
+	}
+}
+
+func TestDeepSeekRequestModifier_RejectsInvalidThinking(t *testing.T) {
+	_, _, err := deepseekRequestModifier(map[string]any{
+		"thinking": map[string]any{"type": "sometimes"},
+	})
+	if err == nil {
+		t.Fatal("expected invalid thinking type error")
 	}
 }
 
@@ -323,9 +347,9 @@ func TestDeepSeekRequestModifier_NoThinking(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// When no thinking config is provided, enable_thinking should not be set
-	if _, exists := extra["enable_thinking"]; exists {
-		t.Error("expected enable_thinking to not be set when thinking config is nil")
+	// When no thinking config is provided, rely on the provider default.
+	if _, exists := extra["thinking"]; exists {
+		t.Error("expected thinking to not be set when config is nil")
 	}
 }
 

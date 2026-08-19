@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	goaierrors "github.com/airlockrun/goai/errors"
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/output"
 	"github.com/airlockrun/goai/schema"
@@ -330,6 +331,235 @@ func TestStreamText_BasicUsage(t *testing.T) {
 			t.Errorf("expected 'call_456', got '%s'", toolCalls[0].ID)
 		}
 	})
+}
+
+func TestStreamText_RetriesStreamSetupErrors(t *testing.T) {
+	attempts := 0
+	model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
+		DoStreamFunc: func(ctx context.Context, options *stream.CallOptions) (<-chan stream.Event, error) {
+			attempts++
+			if attempts == 1 {
+				return nil, goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{
+					Message: "temporarily unavailable", StatusCode: 502,
+					ResponseHeaders: map[string]string{"Retry-After": "0"},
+				})
+			}
+			events := make(chan stream.Event, 4)
+			for _, event := range testutil.MockTextResponse("recovered", testutil.MockUsage(1, 1)) {
+				events <- event
+			}
+			close(events)
+			return events, nil
+		},
+	})
+
+	result, err := StreamText(context.Background(), stream.Input{
+		Model: model, Messages: []message.Message{message.NewUserMessage("hello")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := result.Text()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text != "recovered" {
+		t.Fatalf("text = %q, want recovered", text)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
+func TestStreamText_ExplicitZeroDisablesRetries(t *testing.T) {
+	attempts := 0
+	model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
+		DoStreamFunc: func(context.Context, *stream.CallOptions) (<-chan stream.Event, error) {
+			attempts++
+			return nil, goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{
+				Message: "temporarily unavailable", StatusCode: 502,
+			})
+		},
+	})
+	maxRetries := 0
+
+	result, err := StreamText(context.Background(), stream.Input{
+		Model: model, Messages: []message.Message{message.NewUserMessage("hello")}, MaxRetries: maxRetries, MaxRetriesSet: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := result.Text(); err == nil {
+		t.Fatal("Text() error = nil, want setup error")
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+}
+
+func TestStreamText_LegacyPositiveMaxRetriesStillApplies(t *testing.T) {
+	attempts := 0
+	model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
+		DoStreamFunc: func(context.Context, *stream.CallOptions) (<-chan stream.Event, error) {
+			attempts++
+			return nil, goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{
+				Message: "temporarily unavailable", StatusCode: 502,
+				ResponseHeaders: map[string]string{"Retry-After": "0"},
+			})
+		},
+	})
+
+	result, err := StreamText(context.Background(), stream.Input{
+		Model: model, MaxRetries: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := result.Text(); err == nil {
+		t.Fatal("Text() error = nil, want setup error")
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
+func TestStreamText_RetriesAsyncSetupErrorBeforeContent(t *testing.T) {
+	attempts := 0
+	model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
+		DoStreamFunc: func(context.Context, *stream.CallOptions) (<-chan stream.Event, error) {
+			attempts++
+			events := make(chan stream.Event, 16)
+			events <- stream.Event{Type: stream.EventStart, Data: stream.StartEvent{}}
+			if attempts == 1 {
+				events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{
+					Message: "temporarily unavailable", StatusCode: 502, ResponseHeaders: map[string]string{"Retry-After": "0"},
+				})}}
+			} else {
+				for _, event := range testutil.MockTextResponse("recovered", testutil.MockUsage(1, 1)) {
+					events <- event
+				}
+			}
+			close(events)
+			return events, nil
+		},
+	})
+
+	result, err := StreamText(context.Background(), stream.Input{
+		Model: model, Messages: []message.Message{message.NewUserMessage("hello")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := result.Text()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text != "recovered" || attempts != 2 {
+		t.Fatalf("text = %q, attempts = %d; want recovered after 2 attempts", text, attempts)
+	}
+}
+
+func TestStreamText_ClosedSetupStreamCompletes(t *testing.T) {
+	tests := []struct {
+		name  string
+		start bool
+	}{
+		{name: "empty"},
+		{name: "start only", start: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
+				DoStreamFunc: func(context.Context, *stream.CallOptions) (<-chan stream.Event, error) {
+					events := make(chan stream.Event, 1)
+					if tt.start {
+						events <- stream.Event{Type: stream.EventStart, Data: stream.StartEvent{}}
+					}
+					close(events)
+					return events, nil
+				},
+			})
+			result, err := StreamText(context.Background(), stream.Input{Model: model})
+			if err != nil {
+				t.Fatal(err)
+			}
+			text, err := result.Text()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if text != "" {
+				t.Fatalf("text = %q, want empty", text)
+			}
+		})
+	}
+}
+
+func TestStreamText_RejectsNilSetupStream(t *testing.T) {
+	model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
+		DoStreamFunc: func(context.Context, *stream.CallOptions) (<-chan stream.Event, error) {
+			return nil, nil
+		},
+	})
+	result, err := StreamText(context.Background(), stream.Input{Model: model, MaxRetriesSet: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := result.Text(); err == nil || !strings.Contains(err.Error(), "nil event stream") {
+		t.Fatalf("Text() error = %v, want nil stream error", err)
+	}
+}
+
+func TestStreamText_RejectsNegativeModelSetupRetries(t *testing.T) {
+	model := setupRetriesModel{
+		Model: testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{}),
+		max:   -1,
+	}
+	result, err := StreamText(context.Background(), stream.Input{Model: model})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := result.Text(); err == nil || !strings.Contains(err.Error(), "maxRetries") {
+		t.Fatalf("Text() error = %v, want maxRetries validation", err)
+	}
+}
+
+func TestGenerateText_RetriesStreamSetupErrors(t *testing.T) {
+	attempts := 0
+	model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
+		DoStreamFunc: func(context.Context, *stream.CallOptions) (<-chan stream.Event, error) {
+			attempts++
+			if attempts == 1 {
+				return nil, goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{
+					Message: "temporarily unavailable", StatusCode: 502, ResponseHeaders: map[string]string{"Retry-After": "0"},
+				})
+			}
+			events := make(chan stream.Event, 4)
+			for _, event := range testutil.MockTextResponse("recovered", testutil.MockUsage(1, 1)) {
+				events <- event
+			}
+			close(events)
+			return events, nil
+		},
+	})
+
+	result, err := GenerateText(context.Background(), stream.Input{
+		Model: model, Messages: []message.Message{message.NewUserMessage("hello")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Text != "recovered" || attempts != 2 {
+		t.Fatalf("text = %q, attempts = %d; want recovered after 2 attempts", result.Text, attempts)
+	}
+}
+
+type setupRetriesModel struct {
+	stream.Model
+	max int
+}
+
+func (m setupRetriesModel) SetupMaxRetries() (int, bool) {
+	return m.max, true
 }
 
 func TestStreamText_TerminalErrorAccessors(t *testing.T) {

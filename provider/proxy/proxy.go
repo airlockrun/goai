@@ -11,13 +11,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"strconv"
 	"time"
 
+	goaierrors "github.com/airlockrun/goai/errors"
 	"github.com/airlockrun/goai/stream"
 )
+
+const maxErrorResponseBodyBytes = 8 << 10
 
 // Options configures the proxy provider.
 type Options struct {
@@ -39,8 +43,8 @@ type Options struct {
 	// Client is the HTTP client to use. Defaults to http.DefaultClient.
 	Client *http.Client
 
-	// MaxRetries is the maximum number of retry attempts for transient errors.
-	// Defaults to 5.
+	// MaxRetries overrides the default number of setup retries performed by
+	// StreamText and GenerateText. Zero leaves the default unchanged.
 	MaxRetries int
 
 	// Headers are extra HTTP headers attached to every proxied request
@@ -83,9 +87,6 @@ func Model(modelID string, opts Options) stream.Model {
 	if opts.Client == nil {
 		opts.Client = http.DefaultClient
 	}
-	if opts.MaxRetries == 0 {
-		opts.MaxRetries = 5
-	}
 	return &proxyModel{
 		modelID: modelID,
 		opts:    opts,
@@ -99,6 +100,9 @@ type proxyModel struct {
 
 func (m *proxyModel) ID() string       { return m.modelID }
 func (m *proxyModel) Provider() string { return "proxy" }
+func (m *proxyModel) SetupMaxRetries() (int, bool) {
+	return m.opts.MaxRetries, m.opts.MaxRetries != 0
+}
 
 func (m *proxyModel) Stream(ctx context.Context, options *stream.CallOptions) (<-chan stream.Event, error) {
 	events := make(chan stream.Event, 100)
@@ -129,80 +133,79 @@ func (m *proxyModel) doStream(ctx context.Context, options *stream.CallOptions, 
 
 	url := m.opts.BaseURL + m.opts.Path
 
-	for attempt := 0; attempt <= m.opts.MaxRetries; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
-		if err != nil {
-			events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
-			return
-		}
-		applyHeaders(req, m.opts)
-
-		resp, err := m.opts.Client.Do(req)
-		if err != nil {
-			if ctx.Err() != nil {
-				events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: ctx.Err()}}
-				return
-			}
-			if attempt < m.opts.MaxRetries {
-				sleepBackoff(ctx, attempt, nil)
-				continue
-			}
-			events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
-			return
-		}
-
-		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
-			resp.Body.Close()
-			if attempt < m.opts.MaxRetries {
-				sleepBackoff(ctx, attempt, resp)
-				continue
-			}
-			events <- stream.Event{
-				Type: stream.EventError,
-				Data: stream.ErrorEvent{Error: fmt.Errorf("proxy: LLM returned %d after %d retries", resp.StatusCode, m.opts.MaxRetries)},
-			}
-			return
-		}
-
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			resp.Body.Close()
-			events <- stream.Event{
-				Type: stream.EventError,
-				Data: stream.ErrorEvent{Error: fmt.Errorf("proxy: LLM returned status %d", resp.StatusCode)},
-			}
-			return
-		}
-
-		// Parse NDJSON response.
-		scanner := bufio.NewScanner(resp.Body)
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			if len(line) == 0 {
-				continue
-			}
-			event, err := parseNDJSONEvent(line)
-			if err != nil {
-				events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
-				resp.Body.Close()
-				return
-			}
-			events <- event
-		}
-		resp.Body.Close()
-		if err := scanner.Err(); err != nil {
-			events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
-		}
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
 		return
+	}
+	applyHeaders(req, m.opts)
+
+	resp, err := m.opts.Client.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{
+			Message: "proxy: LLM request failed", URL: url, Cause: err, IsRetryable: ctx.Err() == nil, IsRetryableSet: true,
+		})}}
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorResponseBodyBytes+1))
+		if len(responseBody) > maxErrorResponseBodyBytes {
+			responseBody = append(responseBody[:maxErrorResponseBodyBytes], []byte("... (truncated)")...)
+		}
+		retryable, retryableSet := false, false
+		if raw := resp.Header.Get("X-Airlock-LLM-Retryable"); raw != "" {
+			if parsed, parseErr := strconv.ParseBool(raw); parseErr == nil {
+				retryable, retryableSet = parsed, true
+			}
+		}
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{
+			Message: "proxy: LLM request failed", URL: url, StatusCode: resp.StatusCode,
+			ResponseHeaders: flattenHeaders(resp.Header), ResponseBody: string(responseBody),
+			IsRetryable: retryable, IsRetryableSet: retryableSet,
+		})}}
+		return
+	}
+
+	// Parse NDJSON response.
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		event, err := parseNDJSONEvent(line)
+		if err != nil {
+			events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+			return
+		}
+		events <- event
+	}
+	if err := scanner.Err(); err != nil {
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
 	}
 }
 
-// sleepBackoff sleeps for 2^attempt * 2 seconds, respecting Retry-After and context.
+func flattenHeaders(headers http.Header) map[string]string {
+	flattened := make(map[string]string, len(headers))
+	for name := range headers {
+		flattened[name] = headers.Get(name)
+	}
+	return flattened
+}
+
+// sleepBackoff is used by the proxy's non-streaming model endpoints, whose
+// retry loop is separate from StreamText and GenerateText.
 func sleepBackoff(ctx context.Context, attempt int, resp *http.Response) {
 	delay := time.Duration(math.Pow(2, float64(attempt))) * 2 * time.Second
 	if resp != nil {
-		if ra := resp.Header.Get("Retry-After"); ra != "" {
-			if secs, err := strconv.Atoi(ra); err == nil {
-				delay = time.Duration(secs) * time.Second
+		if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
+			if seconds, err := strconv.Atoi(retryAfter); err == nil {
+				delay = time.Duration(seconds) * time.Second
 			}
 		}
 	}

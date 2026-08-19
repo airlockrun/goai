@@ -11,9 +11,11 @@ import (
 	"net/http"
 	"strings"
 
+	goaierrors "github.com/airlockrun/goai/errors"
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/model"
 	"github.com/airlockrun/goai/provider"
+	goairesponse "github.com/airlockrun/goai/response"
 	"github.com/airlockrun/goai/stream"
 	"github.com/airlockrun/goai/tool"
 )
@@ -155,16 +157,22 @@ func (m *BasetenLanguageModel) doStream(ctx context.Context, options *stream.Cal
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{
+			Message: "Baseten API request failed", URL: url, RequestBodyValues: json.RawMessage(reqBytes),
+			Cause: err, IsRetryable: ctx.Err() == nil, IsRetryableSet: true,
+		})}}
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 		events <- stream.Event{
 			Type: stream.EventError,
-			Data: stream.ErrorEvent{Error: fmt.Errorf("Baseten API error (status %d): %s", resp.StatusCode, string(body))},
+			Data: stream.ErrorEvent{Error: goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{
+				Message: "Baseten API error: " + string(body), URL: url, RequestBodyValues: json.RawMessage(reqBytes),
+				StatusCode: resp.StatusCode, ResponseHeaders: goairesponse.ExtractResponseHeaders(resp), ResponseBody: string(body),
+			})},
 		}
 		return
 	}

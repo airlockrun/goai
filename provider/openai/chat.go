@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	goaierrors "github.com/airlockrun/goai/errors"
 	"github.com/airlockrun/goai/provider"
 	"github.com/airlockrun/goai/stream"
 	"github.com/airlockrun/goai/tool"
@@ -71,16 +72,16 @@ func (m *ChatModel) doStream(ctx context.Context, options *stream.CallOptions, e
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{
+			Message: "OpenAI API request failed", URL: req.URL.String(), RequestBodyValues: json.RawMessage(reqBody),
+			Cause: err, IsRetryable: ctx.Err() == nil, IsRetryableSet: true,
+		})}}
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{
-			Error: fmt.Errorf("OpenAI API error (status %d): %s", resp.StatusCode, string(body)),
-		}}
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: HandleErrorResponse(resp, req.URL.String(), json.RawMessage(reqBody))}}
 		return
 	}
 

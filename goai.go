@@ -7,9 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
+	goaierrors "github.com/airlockrun/goai/errors"
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/stream"
 	"github.com/airlockrun/goai/tool"
@@ -27,6 +31,9 @@ const skippedAfterDeniedReason = "This tool was not executed because an earlier 
 func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error) {
 	if input.AbortSignal == nil {
 		input.AbortSignal = ctx
+	}
+	if input.MaxRetries < 0 {
+		return nil, fmt.Errorf("maxRetries must be >= 0")
 	}
 
 	// Set default MaxSteps
@@ -101,8 +108,9 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 				input.OnStepStart(stream.StepStartData{StepNumber: stepNumber, Messages: currentInput.Messages})
 			}
 
-			// Get events channel from model
-			events, err := currentInput.Model.Stream(ctx, callOptions)
+			// Retry only errors returned while establishing the provider stream.
+			// Start events do not commit output; the first non-start event does.
+			events, err := streamWithSetupRetries(ctx, currentInput.Model, callOptions, currentInput.MaxRetries, currentInput.MaxRetriesSet)
 			if err != nil {
 				emitError(err)
 				return
@@ -397,6 +405,135 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 	return result, nil
 }
 
+func streamWithSetupRetries(ctx context.Context, model stream.Model, options *stream.CallOptions, configuredMaxRetries int, maxRetriesSet bool) (<-chan stream.Event, error) {
+	maxRetries := 2
+	if maxRetriesSet || configuredMaxRetries != 0 {
+		maxRetries = configuredMaxRetries
+	} else if configured, ok := model.(interface{ SetupMaxRetries() (int, bool) }); ok {
+		if modelMaxRetries, set := configured.SetupMaxRetries(); set {
+			maxRetries = modelMaxRetries
+		}
+	}
+	if maxRetries < 0 {
+		return nil, fmt.Errorf("maxRetries must be >= 0")
+	}
+
+	for attempt := 0; ; attempt++ {
+		events, err := model.Stream(ctx, options)
+		if err == nil {
+			events, err = inspectStreamSetup(ctx, events)
+			if err == nil {
+				return events, nil
+			}
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		var apiErr *goaierrors.APICallError
+		if attempt >= maxRetries || !errors.As(err, &apiErr) || !apiErr.IsRetryable {
+			return nil, err
+		}
+
+		delay := retryDelay(apiErr, attempt)
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
+// inspectStreamSetup adapts providers that begin the HTTP request in their
+// stream goroutine. A retryable API error before any content is still a setup
+// failure; once any non-start event is observed, the stream is committed and
+// subsequent failures are never replayed.
+func inspectStreamSetup(ctx context.Context, events <-chan stream.Event) (<-chan stream.Event, error) {
+	if events == nil {
+		return nil, errors.New("model returned nil event stream")
+	}
+	var prefix []stream.Event
+	for {
+		select {
+		case event, ok := <-events:
+			if !ok {
+				return prependEvents(prefix, nil), nil
+			}
+			prefix = append(prefix, event)
+			switch event.Type {
+			case stream.EventStart:
+				continue
+			case stream.EventError:
+				if eventErr, ok := event.Data.(stream.ErrorEvent); ok {
+					go drainEvents(ctx, events)
+					return nil, eventErr.Error
+				}
+			}
+			return prependEvents(prefix, events), nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
+func prependEvents(prefix []stream.Event, events <-chan stream.Event) <-chan stream.Event {
+	out := make(chan stream.Event, len(prefix))
+	go func() {
+		defer close(out)
+		for _, event := range prefix {
+			out <- event
+		}
+		if events != nil {
+			for event := range events {
+				out <- event
+			}
+		}
+	}()
+	return out
+}
+
+func drainEvents(ctx context.Context, events <-chan stream.Event) {
+	for {
+		select {
+		case _, ok := <-events:
+			if !ok {
+				return
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func retryDelay(apiErr *goaierrors.APICallError, attempt int) time.Duration {
+	defaultDelay := time.Duration(1<<attempt) * 2 * time.Second
+	for name, value := range apiErr.ResponseHeaders {
+		if !strings.EqualFold(name, "Retry-After-Ms") {
+			continue
+		}
+		if milliseconds, err := strconv.ParseFloat(value, 64); err == nil {
+			if delay := time.Duration(milliseconds * float64(time.Millisecond)); delay >= 0 && (delay < time.Minute || delay < defaultDelay) {
+				return delay
+			}
+		}
+	}
+	for name, value := range apiErr.ResponseHeaders {
+		if !strings.EqualFold(name, "Retry-After") {
+			continue
+		}
+		if seconds, err := strconv.ParseFloat(value, 64); err == nil {
+			if delay := time.Duration(seconds * float64(time.Second)); delay >= 0 && (delay < time.Minute || delay < defaultDelay) {
+				return delay
+			}
+		}
+		if at, err := http.ParseTime(value); err == nil {
+			if delay := time.Until(at); delay > 0 && delay < time.Minute {
+				return delay
+			}
+		}
+	}
+	return defaultDelay
+}
+
 // GenerateTextResult contains the result of a GenerateText call.
 // Equivalent to ai-sdk's GenerateTextResult.
 type GenerateTextResult struct {
@@ -452,6 +589,9 @@ func GenerateText(ctx context.Context, input stream.Input) (*GenerateTextResult,
 	if input.AbortSignal == nil {
 		input.AbortSignal = ctx
 	}
+	if input.MaxRetries < 0 {
+		return nil, fmt.Errorf("maxRetries must be >= 0")
+	}
 
 	// Set default MaxSteps
 	maxSteps := input.MaxSteps
@@ -487,8 +627,8 @@ func GenerateText(ctx context.Context, input stream.Input) (*GenerateTextResult,
 			input.OnStepStart(stream.StepStartData{StepNumber: stepNumber, Messages: currentInput.Messages})
 		}
 
-		// Get events channel from model
-		events, err := currentInput.Model.Stream(ctx, callOptions)
+		// Get events channel from model, retrying only stream setup failures.
+		events, err := streamWithSetupRetries(ctx, currentInput.Model, callOptions, currentInput.MaxRetries, currentInput.MaxRetriesSet)
 		if err != nil {
 			return nil, err
 		}

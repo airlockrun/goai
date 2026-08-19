@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 
+	goaierrors "github.com/airlockrun/goai/errors"
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/provider"
 	"github.com/airlockrun/goai/stream"
@@ -73,20 +74,32 @@ func (m *GoogleModel) doStream(ctx context.Context, options *stream.CallOptions,
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{
+			Message: "Google AI API request failed", URL: req.URL.String(), RequestBodyValues: json.RawMessage(reqBody),
+			Cause: err, IsRetryable: ctx.Err() == nil, IsRetryableSet: true,
+		})}}
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{
-			Error: fmt.Errorf("Google AI API error (status %d): %s", resp.StatusCode, string(body)),
-		}}
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{
+			Message: fmt.Sprintf("Google AI API error: %s", body), URL: req.URL.String(), RequestBodyValues: json.RawMessage(reqBody),
+			StatusCode: resp.StatusCode, ResponseHeaders: responseHeaders(resp.Header), ResponseBody: string(body),
+		})}}
 		return
 	}
 
 	m.processStream(ctx, resp.Body, options.Tools, events, options.IncludeRawChunks)
+}
+
+func responseHeaders(headers http.Header) map[string]string {
+	flattened := make(map[string]string, len(headers))
+	for name := range headers {
+		flattened[name] = headers.Get(name)
+	}
+	return flattened
 }
 
 func (m *GoogleModel) buildRequest(options *stream.CallOptions) ([]byte, []stream.Warning, error) {
