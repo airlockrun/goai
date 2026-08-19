@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 
+	goaierrors "github.com/airlockrun/goai/errors"
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/provider"
 	"github.com/airlockrun/goai/stream"
@@ -97,20 +98,32 @@ func (m *AnthropicModel) doStream(ctx context.Context, options *stream.CallOptio
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{
+			Message: "Anthropic API request failed", URL: req.URL.String(), RequestBodyValues: json.RawMessage(reqBody),
+			Cause: err, IsRetryable: ctx.Err() == nil, IsRetryableSet: true,
+		})}}
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{
-			Error: fmt.Errorf("Anthropic API error (status %d): %s", resp.StatusCode, string(body)),
-		}}
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{
+			Message: fmt.Sprintf("Anthropic API error: %s", body), URL: req.URL.String(), RequestBodyValues: json.RawMessage(reqBody),
+			StatusCode: resp.StatusCode, ResponseHeaders: responseHeaders(resp.Header), ResponseBody: string(body),
+		})}}
 		return
 	}
 
 	m.processStream(ctx, resp.Body, options.Tools, events, jsonToolInjected, options.IncludeRawChunks)
+}
+
+func responseHeaders(headers http.Header) map[string]string {
+	flattened := make(map[string]string, len(headers))
+	for name := range headers {
+		flattened[name] = headers.Get(name)
+	}
+	return flattened
 }
 
 // syntheticJSONToolName is the name of the synthetic tool injected when the

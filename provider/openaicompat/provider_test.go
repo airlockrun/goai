@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	goaierrors "github.com/airlockrun/goai/errors"
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/stream"
 )
@@ -127,6 +128,46 @@ func TestOpenAICompatModel_ProcessStreamReadError(t *testing.T) {
 	}
 	if sawFinish {
 		t.Fatal("did not expect finish event after read error")
+	}
+}
+
+func TestOpenAICompatModel_StreamsReasoningContent(t *testing.T) {
+	events := make(chan stream.Event, 20)
+	body := strings.Join([]string{
+		`data: {"choices":[{"index":0,"delta":{"reasoning_content":"considering"}}]}`,
+		`data: {"choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2}}`,
+		`data: [DONE]`,
+	}, "\n\n")
+
+	model := &CompatModel{provider: &Provider{opts: Options{ProviderID: "custom"}}}
+	model.processStream(context.Background(), strings.NewReader(body), nil, events, false)
+	close(events)
+
+	var types []stream.EventType
+	var reasoning, text string
+	for event := range events {
+		types = append(types, event.Type)
+		switch data := event.Data.(type) {
+		case stream.ReasoningDeltaEvent:
+			reasoning += data.Text
+		case stream.TextDeltaEvent:
+			text += data.Text
+		}
+	}
+	if reasoning != "considering" || text != "answer" {
+		t.Fatalf("reasoning/text = %q/%q, want considering/answer", reasoning, text)
+	}
+	wantPrefix := []stream.EventType{
+		stream.EventStartStep, stream.EventReasoningStart, stream.EventReasoningDelta,
+		stream.EventReasoningEnd, stream.EventTextStart, stream.EventTextDelta,
+	}
+	if len(types) < len(wantPrefix) {
+		t.Fatalf("event types = %v", types)
+	}
+	for i, want := range wantPrefix {
+		if types[i] != want {
+			t.Fatalf("event types = %v, want prefix %v", types, wantPrefix)
+		}
 	}
 }
 
@@ -861,25 +902,21 @@ func TestOpenAICompatModel_ErrorResponse(t *testing.T) {
 				HTTPClient: client,
 			}).Model("custom-model")
 
-			events, err := model.Stream(context.Background(), &stream.CallOptions{
+			_, err := model.Stream(context.Background(), &stream.CallOptions{
 				Messages: []message.Message{message.NewUserMessage("Hello")},
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			var got error
-			for event := range events {
-				if event.Type == stream.EventError {
-					got = event.Data.(stream.ErrorEvent).Error
-				}
-			}
-			if got == nil {
+			if err == nil {
 				t.Fatal("expected error event")
 			}
-			want := "custom API error (status 429): " + tt.wantBody
-			if got.Error() != want {
-				t.Errorf("error = %q, want %q", got, want)
+			var apiErr *goaierrors.APICallError
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("error type = %T, want APICallError", err)
+			}
+			if apiErr.StatusCode != http.StatusTooManyRequests || apiErr.ResponseBody != tt.wantBody {
+				t.Errorf("status/body = %d/%q, want 429/%q", apiErr.StatusCode, apiErr.ResponseBody, tt.wantBody)
+			}
+			if !apiErr.IsRetryable {
+				t.Error("429 error should be retryable")
 			}
 			if body.read != tt.wantRead {
 				t.Errorf("response bytes read = %d, want %d", body.read, tt.wantRead)

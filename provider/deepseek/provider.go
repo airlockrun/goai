@@ -3,6 +3,8 @@
 package deepseek
 
 import (
+	"fmt"
+
 	"github.com/airlockrun/goai/model"
 	"github.com/airlockrun/goai/provider"
 	"github.com/airlockrun/goai/provider/openaicompat"
@@ -53,12 +55,14 @@ func deepseekRequestModifier(providerOptions map[string]any) (map[string]any, []
 
 	extra := make(map[string]any)
 
-	// DeepSeek uses "enable_thinking" boolean in the API
+	// DeepSeek's current API accepts the same typed thinking object exposed by
+	// ai-sdk. Leaving it unset preserves the provider default.
 	if opts.Thinking != nil {
-		if opts.Thinking.Type == "disabled" {
-			extra["enable_thinking"] = false
-		} else if opts.Thinking.Type == "enabled" {
-			extra["enable_thinking"] = true
+		switch opts.Thinking.Type {
+		case "adaptive", "enabled", "disabled":
+			extra["thinking"] = map[string]string{"type": opts.Thinking.Type}
+		default:
+			return nil, nil, fmt.Errorf("unsupported DeepSeek thinking type %q", opts.Thinking.Type)
 		}
 	}
 

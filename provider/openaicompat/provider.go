@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 
+	goaierrors "github.com/airlockrun/goai/errors"
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/provider"
 	"github.com/airlockrun/goai/stream"
@@ -152,28 +153,15 @@ func (m *CompatModel) Provider() string {
 
 // Stream sends a streaming request using the OpenAI-compatible API.
 func (m *CompatModel) Stream(ctx context.Context, options *stream.CallOptions) (<-chan stream.Event, error) {
-	events := make(chan stream.Event, 100)
-
-	go func() {
-		defer close(events)
-		m.doStream(ctx, options, events)
-	}()
-
-	return events, nil
-}
-
-func (m *CompatModel) doStream(ctx context.Context, options *stream.CallOptions, events chan<- stream.Event) {
-	// Build the request
 	reqBody, warnings, err := m.buildRequest(options)
 	if err != nil {
-		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
-		return
+		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", m.provider.opts.BaseURL+"/chat/completions", bytes.NewReader(reqBody))
+	requestURL := m.provider.opts.BaseURL + "/chat/completions"
+	req, err := http.NewRequestWithContext(ctx, "POST", requestURL, bytes.NewReader(reqBody))
 	if err != nil {
-		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
-		return
+		return nil, err
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -187,20 +175,27 @@ func (m *CompatModel) doStream(ctx context.Context, options *stream.CallOptions,
 		req.Header.Set(k, v)
 	}
 
-	events <- stream.Event{Type: stream.EventStart, Data: stream.StartEvent{Warnings: warnings}}
-
 	client := m.provider.opts.HTTPClient
 	if client == nil {
 		client = http.DefaultClient
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
-		return
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{
+			Message:           "cannot connect to API: " + err.Error(),
+			URL:               requestURL,
+			RequestBodyValues: json.RawMessage(reqBody),
+			Cause:             err,
+			IsRetryable:       true,
+			IsRetryableSet:    true,
+		})
 	}
-	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorResponseBodyBytes+1))
 		truncated := len(body) > maxErrorResponseBodyBytes
 		if truncated {
@@ -210,13 +205,32 @@ func (m *CompatModel) doStream(ctx context.Context, options *stream.CallOptions,
 		if truncated {
 			bodyText += "... (truncated)"
 		}
-		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{
-			Error: fmt.Errorf("%s API error (status %d): %s", m.provider.opts.ProviderID, resp.StatusCode, bodyText),
-		}}
-		return
+		return nil, goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{
+			Message:           fmt.Sprintf("%s API error: %s", m.provider.opts.ProviderID, bodyText),
+			URL:               requestURL,
+			RequestBodyValues: json.RawMessage(reqBody),
+			StatusCode:        resp.StatusCode,
+			ResponseHeaders:   flattenHeaders(resp.Header),
+			ResponseBody:      bodyText,
+		})
 	}
 
-	m.processStream(ctx, resp.Body, options.Tools, events, options.IncludeRawChunks)
+	events := make(chan stream.Event, 100)
+	go func() {
+		defer close(events)
+		defer resp.Body.Close()
+		events <- stream.Event{Type: stream.EventStart, Data: stream.StartEvent{Warnings: warnings}}
+		m.processStream(ctx, resp.Body, options.Tools, events, options.IncludeRawChunks)
+	}()
+	return events, nil
+}
+
+func flattenHeaders(headers http.Header) map[string]string {
+	out := make(map[string]string, len(headers))
+	for name, values := range headers {
+		out[name] = strings.Join(values, ", ")
+	}
+	return out
 }
 
 func (m *CompatModel) buildRequest(options *stream.CallOptions) ([]byte, []stream.Warning, error) {
@@ -359,7 +373,7 @@ func (m *CompatModel) processStream(ctx context.Context, body io.Reader, tools [
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
-	var textStarted bool
+	var textStarted, reasoningStarted bool
 	var currentToolCalls = make(map[int]*toolCallAccumulator)
 	var usage stream.Usage
 	var usageRaw map[string]any
@@ -419,8 +433,27 @@ func (m *CompatModel) processStream(ctx context.Context, body io.Reader, tools [
 
 		delta := choice.Delta
 
+		// OpenAI-compatible reasoning models use reasoning_content (and a few
+		// endpoints use reasoning). Preserve it as first-class stream events;
+		// DeepSeek V4 requires this content to be echoed on later turns.
+		reasoningContent := delta.ReasoningContent
+		if reasoningContent == "" {
+			reasoningContent = delta.Reasoning
+		}
+		if reasoningContent != "" {
+			if !reasoningStarted {
+				reasoningStarted = true
+				events <- stream.Event{Type: stream.EventReasoningStart, Data: stream.ReasoningStartEvent{ID: "reasoning-0"}}
+			}
+			events <- stream.Event{Type: stream.EventReasoningDelta, Data: stream.ReasoningDeltaEvent{ID: "reasoning-0", Text: reasoningContent}}
+		}
+
 		// Handle text content
 		if delta.Content != "" {
+			if reasoningStarted {
+				events <- stream.Event{Type: stream.EventReasoningEnd, Data: stream.ReasoningEndEvent{ID: "reasoning-0"}}
+				reasoningStarted = false
+			}
 			if !textStarted {
 				textStarted = true
 				events <- stream.Event{Type: stream.EventTextStart, Data: stream.TextStartEvent{}}
@@ -433,6 +466,10 @@ func (m *CompatModel) processStream(ctx context.Context, body io.Reader, tools [
 		// without function.name and supply it on a later chunk; emitting
 		// tool-input-start before the name would produce malformed events.
 		// Mirrors ai-sdk PR #14760.
+		if len(delta.ToolCalls) > 0 && reasoningStarted {
+			events <- stream.Event{Type: stream.EventReasoningEnd, Data: stream.ReasoningEndEvent{ID: "reasoning-0"}}
+			reasoningStarted = false
+		}
 		for _, tc := range delta.ToolCalls {
 			acc, exists := currentToolCalls[tc.Index]
 			if !exists {
@@ -474,6 +511,10 @@ func (m *CompatModel) processStream(ctx context.Context, body io.Reader, tools [
 	if err := scanner.Err(); err != nil {
 		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: fmt.Errorf("%s stream read: %w", m.provider.opts.ProviderID, err)}}
 		return
+	}
+
+	if reasoningStarted {
+		events <- stream.Event{Type: stream.EventReasoningEnd, Data: stream.ReasoningEndEvent{ID: "reasoning-0"}}
 	}
 
 	// End text if started

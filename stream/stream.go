@@ -163,8 +163,10 @@ type Input struct {
 	// Headers are additional HTTP headers.
 	Headers map[string]string
 
-	// MaxRetries is the number of retry attempts.
-	MaxRetries int
+	// MaxRetries is the number of provider stream-setup retries. The default is
+	// 2. Set MaxRetriesSet when explicitly configuring this value, including 0.
+	MaxRetries    int
+	MaxRetriesSet bool
 
 	// ProviderOptions are provider-specific options.
 	ProviderOptions map[string]any
