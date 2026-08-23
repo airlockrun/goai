@@ -361,6 +361,8 @@ func TestFromType(t *testing.T) {
 		}
 		if schema.Properties["age"] == nil {
 			t.Error("expected 'age' property")
+		} else if schema.Properties["age"].Type != "integer" {
+			t.Errorf("age type = %q, want integer", schema.Properties["age"].Type)
 		}
 		if schema.Properties["email"] == nil {
 			t.Error("expected 'email' property")
