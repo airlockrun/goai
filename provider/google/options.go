@@ -47,10 +47,10 @@ type GenerativeAIOptions struct {
 	// Default is false (ai-sdk #46a3584 flipped the default).
 	StreamFunctionCallArguments *bool `json:"streamFunctionCallArguments,omitempty"`
 
-	// ServiceTier selects the service tier. Values: "standard", "flex",
-	// "priority" (ai-sdk #4e22c2c). On Vertex, goai maps these to the
-	// SERVICE_TIER_* wire values.
-	ServiceTier string `json:"serviceTier,omitempty"`
+	// ServiceTier selects the Gemini API service tier: standard, flex, or priority.
+	ServiceTier       string `json:"serviceTier,omitempty"`
+	SharedRequestType string `json:"sharedRequestType,omitempty"`
+	RequestType       string `json:"requestType,omitempty"`
 }
 
 // ThinkingConfig configures Google's thinking/reasoning behavior.

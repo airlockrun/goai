@@ -5,27 +5,43 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
 	goaierrors "github.com/airlockrun/goai/errors"
+	goaiinternal "github.com/airlockrun/goai/internal"
 	"github.com/airlockrun/goai/provider"
 	"github.com/airlockrun/goai/stream"
 	"github.com/airlockrun/goai/tool"
 )
 
-// ResponsesModel represents an OpenAI model using the Responses API.
-// This is the newer API that supports features like reasoning, web search,
-// and code interpreter natively.
-//
-// Note: goai defaults to the Responses API.
-// The standard @ai-sdk/openai uses Chat Completions by default
-// See provider.go for the default behavior.
+// ResponsesModel implements the Responses protocol with configurable transport.
 type ResponsesModel struct {
-	id       string
-	provider *Provider
+	id     string
+	config *ResponsesConfig
+}
+
+// ResponsesConfig connects the Responses protocol to a provider's endpoint.
+// ConfigureRequest runs after per-call headers, so authentication can be applied last.
+type ResponsesConfig struct {
+	Provider         string
+	URL              string
+	ConfigureRequest func(*http.Request) error
+	HTTPClient       *http.Client
+	Headers          map[string]string
+	// Generic disables OpenAI model-name capability inference.
+	Generic bool
+}
+
+// NewResponsesModel creates a reusable Responses protocol model.
+func NewResponsesModel(modelID string, config ResponsesConfig) *ResponsesModel {
+	if config.Provider == "" || config.URL == "" || config.ConfigureRequest == nil {
+		panic("openai: ResponsesConfig requires Provider, URL and ConfigureRequest")
+	}
+	return &ResponsesModel{id: modelID, config: &config}
 }
 
 // ID returns the model ID.
@@ -33,8 +49,11 @@ func (m *ResponsesModel) ID() string {
 	return m.id
 }
 
-// Provider returns "openai.responses".
+// Provider returns the configured provider identity.
 func (m *ResponsesModel) Provider() string {
+	if m.config != nil {
+		return m.config.Provider
+	}
 	return "openai.responses"
 }
 
@@ -58,27 +77,34 @@ func (m *ResponsesModel) doStream(ctx context.Context, options *stream.CallOptio
 		return
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", m.provider.opts.BaseURL+"/responses", bytes.NewReader(reqBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", m.config.URL, bytes.NewReader(reqBody))
 	if err != nil {
 		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
 		return
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+m.provider.opts.APIKey)
-	if m.provider.opts.Organization != "" {
-		req.Header.Set("OpenAI-Organization", m.provider.opts.Organization)
+	for k, v := range m.config.Headers {
+		req.Header.Set(k, v)
 	}
 	for k, v := range options.Headers {
 		req.Header.Set(k, v)
 	}
+	client := http.DefaultClient
+	if err := m.config.ConfigureRequest(req); err != nil {
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+		return
+	}
+	if m.config.HTTPClient != nil {
+		client = m.config.HTTPClient
+	}
 
 	events <- stream.Event{Type: stream.EventStart, Data: stream.StartEvent{Warnings: warnings}}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{
-			Message: "OpenAI Responses API request failed", URL: req.URL.String(), RequestBodyValues: json.RawMessage(reqBody),
+			Message: m.Provider() + " API request failed", URL: req.URL.String(), RequestBodyValues: json.RawMessage(reqBody),
 			Cause: err, IsRetryable: ctx.Err() == nil, IsRetryableSet: true,
 		})}}
 		return
@@ -119,18 +145,32 @@ func (m *ResponsesModel) buildRequest(options *stream.CallOptions) ([]byte, []st
 		warnings = append(warnings, stream.UnsupportedWarning("stopSequences", ""))
 	}
 
-	// Get systemMessageMode from options
-	// Default to "system" for non-reasoning models (matching ai-sdk behavior)
-	// Reasoning models (o1, o3, o4-mini, gpt-5) should pass "developer" explicitly
-	systemMessageMode := "system"
+	caps := GetLanguageModelCapabilities(m.id)
+	if m.config != nil && m.config.Generic {
+		caps = LanguageModelCapabilities{SystemMessageMode: "system"}
+	}
+	systemMessageMode := caps.SystemMessageMode
+	if opts.ForceReasoning {
+		systemMessageMode = "developer"
+	}
 	if opts.SystemMessageMode != "" {
 		systemMessageMode = opts.SystemMessageMode
 	}
+	if systemMessageMode != "system" && systemMessageMode != "developer" && systemMessageMode != "remove" {
+		return nil, warnings, fmt.Errorf("invalid systemMessageMode: %s", systemMessageMode)
+	}
+	if opts.Conversation != "" && opts.PreviousResponseID != "" {
+		return nil, warnings, errors.New("conversation and previousResponseId are mutually exclusive")
+	}
 
 	req := responsesRequest{
-		Model:  m.id,
-		Stream: true,
-		Input:  convertToResponsesInput(options.Messages, systemMessageMode, opts.PassThroughUnsupportedFiles),
+		Model:              m.id,
+		Stream:             true,
+		Input:              convertToResponsesInput(options.Messages, systemMessageMode, opts.PassThroughUnsupportedFiles),
+		Conversation:       opts.Conversation,
+		PreviousResponseID: opts.PreviousResponseID,
+		Instructions:       opts.Instructions,
+		MaxToolCalls:       opts.MaxToolCalls,
 	}
 
 	if options.Temperature != nil {
@@ -164,6 +204,16 @@ func (m *ResponsesModel) buildRequest(options *stream.CallOptions) ([]byte, []st
 	}
 	if effort != "" {
 		req.Reasoning = &reasoningConfig{Effort: effort}
+	}
+	if (caps.IsReasoningModel || opts.ForceReasoning) && (effort != "none" || !caps.SupportsNonReasoningParameters) {
+		if req.Temperature != nil {
+			warnings = append(warnings, stream.UnsupportedWarning("temperature", "not supported for reasoning models"))
+			req.Temperature = nil
+		}
+		if req.TopP != nil {
+			warnings = append(warnings, stream.UnsupportedWarning("topP", "not supported for reasoning models"))
+			req.TopP = nil
+		}
 	}
 
 	// reasoningSummary
@@ -210,7 +260,43 @@ func (m *ResponsesModel) buildRequest(options *stream.CallOptions) ([]byte, []st
 
 	// include - extra fields to include in response
 	if len(opts.Include) > 0 {
-		req.Include = opts.Include
+		req.Include = append([]string(nil), opts.Include...)
+	}
+	if opts.Logprobs != nil {
+		var n int
+		switch v := opts.Logprobs.(type) {
+		case bool:
+			if v {
+				n = 20
+			}
+		case int:
+			n = v
+		case float64:
+			n = int(v)
+		}
+		if n > 0 {
+			req.TopLogprobs = &n
+			found := false
+			for _, field := range req.Include {
+				if field == "message.output_text.logprobs" {
+					found = true
+				}
+			}
+			if !found {
+				req.Include = append(req.Include, "message.output_text.logprobs")
+			}
+		}
+	}
+	if (caps.IsReasoningModel || opts.ForceReasoning) && req.Store != nil && !*req.Store {
+		found := false
+		for _, field := range req.Include {
+			if field == "reasoning.encrypted_content" {
+				found = true
+			}
+		}
+		if !found {
+			req.Include = append(req.Include, "reasoning.encrypted_content")
+		}
 	}
 
 	// user - unique identifier for end-user
@@ -326,13 +412,16 @@ func (m *ResponsesModel) processStream(ctx context.Context, body io.Reader, tool
 		toolsByName[t.Name] = t
 	}
 
-	scanner := bufio.NewScanner(body)
+	streamReader := goaiinternal.NewStreamReader(body)
+	scanner := bufio.NewScanner(streamReader)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB buffer
 
 	var textStarted bool
 	var currentToolCalls = make(map[int]*responsesToolCallAccumulator)
 	var currentReasoningID string // Track current reasoning item ID
 	var usage stream.Usage
+	var responseID, serviceTier string
+	var logprobTokens []chatLogprobToken
 	var finishReason stream.FinishReason
 	// rawFinishReason preserves the provider's original finish-reason
 	// string (e.g., "max_tokens", "content_filter") alongside the
@@ -347,6 +436,7 @@ func (m *ResponsesModel) processStream(ctx context.Context, body io.Reader, tool
 	// errors are surfaced as a terminating error so retry/fallback logic can
 	// see a failed stream; errors after real output stay streamed error parts.
 	var outputStarted bool
+	var terminal bool
 
 	events <- stream.Event{Type: stream.EventStartStep, Data: stream.StartStepEvent{}}
 
@@ -359,11 +449,11 @@ func (m *ResponsesModel) processStream(ctx context.Context, body io.Reader, tool
 		}
 
 		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
+		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
 
-		data := strings.TrimPrefix(line, "data: ")
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if data == "[DONE]" {
 			break
 		}
@@ -374,28 +464,32 @@ func (m *ResponsesModel) processStream(ctx context.Context, body io.Reader, tool
 
 		var chunk responsesChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			continue
+			events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: &goaierrors.JSONParseError{Text: data, Cause: err}}}
+			return
+		}
+		if chunk.Type == "" {
+			events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: invalidStreamError("expected Responses event type", data)}}
+			return
 		}
 
 		// Mark output as started for any chunk that isn't a lifecycle-only or
 		// error frame (ai-sdk #15922 isResponseOutputChunk). Once true, error
 		// frames are treated as late (streamed) rather than early (fatal).
 		switch chunk.Type {
-		case "response.created", "response.failed", "error":
-		default:
+		case "response.output_item.added", "response.output_item.done", "response.output_text.delta", "response.function_call_arguments.delta", "response.reasoning_summary_text.delta", "response.reasoning_text.delta", "response.output_text.annotation.added":
 			outputStarted = true
 		}
 
 		switch chunk.Type {
 		case "response.created":
-			// Response started - metadata available
 			if chunk.Response != nil {
-				// Could emit metadata event here if needed
+				responseID = chunk.Response.ID
 			}
 
 		case "response.output_item.added":
 			if chunk.Item == nil {
-				continue
+				events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: invalidStreamError("output item event is missing its item", data)}}
+				return
 			}
 			switch chunk.Item.Type {
 			case "message":
@@ -439,12 +533,26 @@ func (m *ResponsesModel) processStream(ctx context.Context, body io.Reader, tool
 			}
 
 		case "response.output_text.delta":
+			logprobTokens = append(logprobTokens, chunk.Logprobs...)
 			if chunk.Delta != "" {
+				if !textStarted {
+					textStarted = true
+					events <- stream.Event{Type: stream.EventTextStart, Data: stream.TextStartEvent{}}
+				}
 				events <- stream.Event{Type: stream.EventTextDelta, Data: stream.TextDeltaEvent{Text: chunk.Delta}}
+			}
+
+		case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+			if chunk.Delta != "" {
+				events <- stream.Event{Type: stream.EventReasoningDelta, Data: stream.ReasoningDeltaEvent{ID: currentReasoningID, Text: chunk.Delta}}
 			}
 
 		case "response.function_call_arguments.delta":
 			acc, exists := currentToolCalls[chunk.OutputIndex]
+			if !exists {
+				events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: invalidStreamError("tool argument delta has no matching output item", data)}}
+				return
+			}
 			if exists && chunk.Delta != "" {
 				acc.arguments += chunk.Delta
 				events <- stream.Event{
@@ -455,7 +563,8 @@ func (m *ResponsesModel) processStream(ctx context.Context, body io.Reader, tool
 
 		case "response.output_item.done":
 			if chunk.Item == nil {
-				continue
+				events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: invalidStreamError("output item event is missing its item", data)}}
+				return
 			}
 			switch chunk.Item.Type {
 			case "message":
@@ -538,26 +647,47 @@ func (m *ResponsesModel) processStream(ctx context.Context, body io.Reader, tool
 			}
 
 		case "response.completed", "response.incomplete", "response.failed":
+			terminal = true
+			if chunk.Response == nil {
+				events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: invalidStreamError("terminal event is missing its response", data)}}
+				return
+			}
 			// A response.failed carrying an error before any output is an
 			// early failure: surface it as a terminating error so retry/
 			// fallback logic sees a failed stream (ai-sdk #15922).
-			if chunk.Type == "response.failed" && chunk.Response != nil && chunk.Response.Error != nil && !outputStarted {
+			if chunk.Type == "response.failed" && chunk.Response.Error != nil {
 				e := chunk.Response.Error
 				events <- stream.Event{
 					Type: stream.EventError,
 					Data: stream.ErrorEvent{
-						Error: fmt.Errorf("OpenAI Responses API error: [%s] %s", e.Code, e.Message),
+						Error: streamAPIError(m.Provider(), e.Code, e.Message, data),
 					},
 				}
-				return
+				if !outputStarted {
+					return
+				}
 			}
 			if chunk.Response != nil {
+				if chunk.Response.ID != "" {
+					responseID = chunk.Response.ID
+				}
+				serviceTier = chunk.Response.ServiceTier
 				// Handle usage
 				if chunk.Response.Usage != nil {
 					usage = stream.UsageFrom(
 						chunk.Response.Usage.InputTokens,
 						chunk.Response.Usage.OutputTokens,
 					)
+					u := chunk.Response.Usage
+					cached, reasoning := 0, 0
+					if u.InputTokensDetails != nil {
+						cached = u.InputTokensDetails.CachedTokens
+					}
+					if u.OutputTokensDetails != nil {
+						reasoning = u.OutputTokensDetails.ReasoningTokens
+					}
+					usage.InputTokens.CacheRead, usage.InputTokens.NoCache = stream.IntPtr(cached), stream.IntPtr(u.InputTokens-cached)
+					usage.OutputTokens.Reasoning, usage.OutputTokens.Text = stream.IntPtr(reasoning), stream.IntPtr(u.OutputTokens-reasoning)
 				}
 
 				// Handle finish reason. For response.failed (ai-sdk
@@ -579,21 +709,34 @@ func (m *ResponsesModel) processStream(ctx context.Context, body io.Reader, tool
 					rawFinishReason = reason
 				}
 			}
+			if chunk.Type == "response.completed" && len(currentToolCalls) > 0 {
+				events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: invalidStreamError("response completed with unfinished tool calls", data)}}
+				return
+			}
 
 		case "error":
+			if chunk.Error == nil {
+				chunk.Error = &responsesError{Code: chunk.Code, Message: chunk.Message}
+			}
 			if chunk.Error != nil {
-				err := fmt.Errorf("OpenAI Responses API error: [%s] %s", chunk.Error.Code, chunk.Error.Message)
+				err := streamAPIError(m.Provider(), chunk.Error.Code, chunk.Error.Message, data)
 				events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
 				// A pre-output error frame is fatal: stop the stream so the
 				// failure propagates instead of a partial result (ai-sdk #15922).
 				if !outputStarted {
 					return
 				}
+				terminal = true
+				finishReason = stream.FinishReasonError
 			}
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: fmt.Errorf("OpenAI Responses stream read: %w", err)}}
+	if err := streamReader.Err(ctx, scanner.Err()); err != nil {
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+		return
+	}
+	if !terminal {
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: incompleteStreamError()}}
 		return
 	}
 
@@ -602,11 +745,22 @@ func (m *ResponsesModel) processStream(ctx context.Context, body io.Reader, tool
 		events <- stream.Event{Type: stream.EventTextEnd, Data: stream.TextEndEvent{}}
 	}
 
-	var providerMetadata map[string]any
+	metadata := make(map[string]any)
 	if rawFinishReason != "" {
-		providerMetadata = map[string]any{
-			"openai": map[string]any{"rawFinishReason": rawFinishReason},
-		}
+		metadata["rawFinishReason"] = rawFinishReason
+	}
+	if responseID != "" {
+		metadata["responseId"] = responseID
+	}
+	if serviceTier != "" {
+		metadata["serviceTier"] = serviceTier
+	}
+	if len(logprobTokens) > 0 {
+		metadata["logprobs"] = mapLogprobTokens(logprobTokens)
+	}
+	var providerMetadata map[string]any
+	if len(metadata) > 0 {
+		providerMetadata = map[string]any{"openai": metadata}
 	}
 
 	// Emit finish step

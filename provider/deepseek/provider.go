@@ -4,6 +4,7 @@ package deepseek
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/airlockrun/goai/model"
 	"github.com/airlockrun/goai/provider"
@@ -35,13 +36,60 @@ func New(opts Options) *Provider {
 	}
 	return &Provider{
 		compat: openaicompat.New(openaicompat.Options{
-			ProviderID:       "deepseek",
-			BaseURL:          baseURL,
-			APIKey:           opts.APIKey,
-			Headers:          opts.Headers,
-			RequestModifier:  deepseekRequestModifier,
-			CallWarner:       deepseekCallWarner,
+			ProviderID:      "deepseek",
+			BaseURL:         baseURL,
+			APIKey:          opts.APIKey,
+			Headers:         opts.Headers,
+			RequestModifier: deepseekRequestModifier,
+			CallWarner:      deepseekCallWarner,
+			ModelCallWarner: func(id string, options *stream.CallOptions) []stream.Warning {
+				opts, err := provider.ParseProviderOptions[ChatOptions](options.ProviderOptions)
+				if err != nil {
+					return nil
+				}
+				thinking := (id == "deepseek-reasoner" || strings.Contains(id, "deepseek-v4") || opts.Thinking != nil || options.Reasoning != "" && options.Reasoning != "provider-default") && options.Reasoning != "none"
+				if opts.Thinking != nil {
+					thinking = opts.Thinking.Type != "disabled"
+				}
+				var warnings []stream.Warning
+				if thinking && options.Temperature != nil {
+					warnings = append(warnings, stream.UnsupportedWarning("temperature", "thinking is enabled"))
+				}
+				if thinking && options.TopP != nil {
+					warnings = append(warnings, stream.UnsupportedWarning("topP", "thinking is enabled"))
+				}
+				return warnings
+			},
 			MessageConverter: convertMessages,
+			TransformRequest: func(id string, body map[string]any) error {
+				thinking, _ := body["thinking"].(map[string]any)
+				if effort, ok := body["reasoning_effort"].(string); ok {
+					if thinking == nil {
+						typeName := "enabled"
+						if effort == "none" {
+							typeName = "disabled"
+						}
+						thinking = map[string]any{"type": typeName}
+						body["thinking"] = thinking
+					}
+					switch effort {
+					case "minimal":
+						body["reasoning_effort"] = "low"
+					case "medium":
+						body["reasoning_effort"] = "high"
+					case "xhigh":
+						body["reasoning_effort"] = "max"
+					}
+					if thinking["type"] == "disabled" || effort == "none" {
+						delete(body, "reasoning_effort")
+					}
+				}
+				if thinking["type"] != "disabled" && (thinking != nil || id == "deepseek-reasoner" || strings.Contains(id, "deepseek-v4")) {
+					delete(body, "temperature")
+					delete(body, "top_p")
+				}
+				return nil
+			},
 		}),
 	}
 }
@@ -54,13 +102,17 @@ func deepseekRequestModifier(providerOptions map[string]any) (map[string]any, []
 	}
 
 	extra := make(map[string]any)
+	var warnings []stream.Warning
 
 	// DeepSeek's current API accepts the same typed thinking object exposed by
 	// ai-sdk. Leaving it unset preserves the provider default.
 	if opts.Thinking != nil {
 		switch opts.Thinking.Type {
-		case "adaptive", "enabled", "disabled":
-			extra["thinking"] = map[string]string{"type": opts.Thinking.Type}
+		case "adaptive":
+			extra["thinking"] = map[string]any{"type": "enabled"}
+			warnings = append(warnings, stream.UnsupportedWarning("thinking.type", "adaptive is mapped to enabled"))
+		case "enabled", "disabled":
+			extra["thinking"] = map[string]any{"type": opts.Thinking.Type}
 		default:
 			return nil, nil, fmt.Errorf("unsupported DeepSeek thinking type %q", opts.Thinking.Type)
 		}
@@ -69,10 +121,23 @@ func deepseekRequestModifier(providerOptions map[string]any) (map[string]any, []
 	// reasoning_effort tunes thinking strength on V4 reasoning models. It is
 	// suppressed when thinking is disabled, matching ai-sdk #15235.
 	if opts.ReasoningEffort != "" && !(opts.Thinking != nil && opts.Thinking.Type == "disabled") {
-		extra["reasoning_effort"] = opts.ReasoningEffort
+		effort := opts.ReasoningEffort
+		switch effort {
+		case "medium":
+			effort = "high"
+		case "xhigh":
+			effort = "max"
+		case "low", "high", "max":
+		default:
+			return nil, nil, fmt.Errorf("unsupported DeepSeek reasoning effort %q", effort)
+		}
+		if effort != opts.ReasoningEffort {
+			warnings = append(warnings, stream.UnsupportedWarning("reasoningEffort", "mapped to "+effort))
+		}
+		extra["reasoning_effort"] = effort
 	}
 
-	return extra, nil, nil
+	return extra, warnings, nil
 }
 
 // deepseekCallWarner emits DeepSeek chat unsupported-option warnings.
@@ -80,6 +145,15 @@ func deepseekCallWarner(options *stream.CallOptions) []stream.Warning {
 	var warnings []stream.Warning
 	if options.TopK != nil {
 		warnings = append(warnings, stream.UnsupportedWarning("topK", ""))
+	}
+	if options.Seed != nil {
+		warnings = append(warnings, stream.UnsupportedWarning("seed", ""))
+	}
+	if options.FrequencyPenalty != nil {
+		warnings = append(warnings, stream.UnsupportedWarning("frequencyPenalty", "not supported by DeepSeek"))
+	}
+	if options.PresencePenalty != nil {
+		warnings = append(warnings, stream.UnsupportedWarning("presencePenalty", "not supported by DeepSeek"))
 	}
 	return warnings
 }

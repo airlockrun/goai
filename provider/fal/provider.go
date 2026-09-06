@@ -48,10 +48,14 @@ func (p *Provider) ImageModel(modelID string) model.ImageModel {
 		provider: p,
 	}
 }
-func (p *Provider) EmbeddingModel(modelID string) model.EmbeddingModel         { return nil }
-func (p *Provider) SpeechModel(modelID string) model.SpeechModel               { return nil }
-func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel { return nil }
-func (p *Provider) RerankingModel(modelID string) model.RerankingModel         { return nil }
+func (p *Provider) EmbeddingModel(modelID string) model.EmbeddingModel { return nil }
+func (p *Provider) SpeechModel(modelID string) model.SpeechModel {
+	return &FalSpeechModel{id: modelID, provider: p}
+}
+func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel {
+	return &FalTranscriptionModel{id: modelID, provider: p}
+}
+func (p *Provider) RerankingModel(modelID string) model.RerankingModel { return nil }
 
 var _ provider.Provider = (*Provider)(nil)
 

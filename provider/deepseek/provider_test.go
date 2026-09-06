@@ -14,6 +14,52 @@ import (
 
 // Translated from ai-sdk patterns for OpenAI-compatible providers
 
+func TestV4SamplingNormalization(t *testing.T) {
+	for _, tc := range []struct {
+		name, reasoning, thinking, wantEffort string
+		sampling                              bool
+	}{
+		{"default", "", "", "", false},
+		{"neutral reasoning", "xhigh", "", "max", false},
+		{"disabled", "", "disabled", "", true},
+		{"neutral none", "none", "", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+				}
+				_, hasTemperature := body["temperature"]
+				_, hasTopP := body["top_p"]
+				if hasTemperature != tc.sampling || hasTopP != tc.sampling {
+					t.Errorf("sampling = %v", body)
+				}
+				effort, _ := body["reasoning_effort"].(string)
+				if effort != tc.wantEffort {
+					t.Errorf("effort = %q", effort)
+				}
+				w.Write([]byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
+			}))
+			defer server.Close()
+			temperature, topP := 0.5, 0.9
+			opts := &stream.CallOptions{Temperature: &temperature, TopP: &topP, Reasoning: tc.reasoning}
+			if tc.thinking != "" {
+				opts.ProviderOptions = map[string]any{"thinking": map[string]any{"type": tc.thinking}}
+			}
+			events, err := New(Options{BaseURL: server.URL}).Model("deepseek-v4-flash").Stream(context.Background(), opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for event := range events {
+				if event.Type == stream.EventError {
+					t.Fatal(event.Data)
+				}
+			}
+		})
+	}
+}
+
 func TestDeepSeekProvider_ID(t *testing.T) {
 	provider := New(Options{APIKey: "test-key"})
 
@@ -293,7 +339,7 @@ func TestDeepSeekRequestModifier_ThinkingEnabled(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	thinking, ok := extra["thinking"].(map[string]string)
+	thinking, ok := extra["thinking"].(map[string]any)
 	if !ok || thinking["type"] != "enabled" {
 		t.Errorf("expected thinking enabled, got %v", extra["thinking"])
 	}
@@ -311,7 +357,7 @@ func TestDeepSeekRequestModifier_ThinkingDisabled(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	thinking, ok := extra["thinking"].(map[string]string)
+	thinking, ok := extra["thinking"].(map[string]any)
 	if !ok || thinking["type"] != "disabled" {
 		t.Errorf("expected thinking disabled, got %v", extra["thinking"])
 	}
@@ -324,9 +370,9 @@ func TestDeepSeekRequestModifier_ThinkingAdaptive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	thinking, ok := extra["thinking"].(map[string]string)
-	if !ok || thinking["type"] != "adaptive" {
-		t.Errorf("expected thinking adaptive, got %v", extra["thinking"])
+	thinking, ok := extra["thinking"].(map[string]any)
+	if !ok || thinking["type"] != "enabled" {
+		t.Errorf("expected thinking enabled, got %v", extra["thinking"])
 	}
 }
 
@@ -374,7 +420,7 @@ func TestDeepSeekRequestModifier_ReasoningEffort(t *testing.T) {
 				"reasoningEffort": "xhigh",
 				"thinking":        map[string]any{"type": "enabled"},
 			},
-			wantValue: "xhigh",
+			wantValue: "max",
 			wantSet:   true,
 		},
 		{

@@ -76,6 +76,11 @@ type RerankingProvider interface {
 	RerankingModel(modelID string) model.RerankingModel
 }
 
+// FilesProvider is an optional provider-level file management capability.
+type FilesProvider interface {
+	Files() model.Files
+}
+
 // Options contains common provider configuration.
 type Options struct {
 	// APIKey is the API key for authentication.

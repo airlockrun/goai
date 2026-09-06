@@ -8,6 +8,9 @@
 package openai
 
 import (
+	"net/http"
+	"strings"
+
 	"github.com/airlockrun/goai/model"
 	"github.com/airlockrun/goai/provider"
 	"github.com/airlockrun/goai/stream"
@@ -56,10 +59,20 @@ func (p *Provider) Chat(modelID string) stream.Model {
 
 // Responses returns a model instance using the Responses API (/responses).
 func (p *Provider) Responses(modelID string) stream.Model {
-	return &ResponsesModel{
-		id:       modelID,
-		provider: p,
+	headers := map[string]string{"Authorization": "Bearer " + p.opts.APIKey}
+	if p.opts.Organization != "" {
+		headers["OpenAI-Organization"] = p.opts.Organization
 	}
+	if p.opts.Project != "" {
+		headers["OpenAI-Project"] = p.opts.Project
+	}
+	for k, v := range p.opts.Headers {
+		headers[http.CanonicalHeaderKey(k)] = v
+	}
+	return NewResponsesModel(modelID, ResponsesConfig{
+		Provider: "openai.responses", URL: strings.TrimRight(p.opts.BaseURL, "/") + "/responses", Headers: headers,
+		ConfigureRequest: func(*http.Request) error { return nil },
+	})
 }
 
 // ImageModel returns an image generation model instance.

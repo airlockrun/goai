@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path"
 	"strings"
 
 	goaierrors "github.com/airlockrun/goai/errors"
+	goaiinternal "github.com/airlockrun/goai/internal"
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/provider"
 	"github.com/airlockrun/goai/stream"
@@ -53,8 +55,8 @@ func (m *GoogleModel) doStream(ctx context.Context, options *stream.CallOptions,
 		return
 	}
 
-	url := fmt.Sprintf("%s/models/%s:streamGenerateContent?key=%s&alt=sse",
-		m.provider.opts.BaseURL, m.id, m.provider.opts.APIKey)
+	url := fmt.Sprintf("%s/%s:streamGenerateContent?key=%s&alt=sse",
+		strings.TrimRight(m.provider.opts.BaseURL, "/"), modelPath(m.id), m.provider.opts.APIKey)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBody))
 	if err != nil {
@@ -112,10 +114,11 @@ func (m *GoogleModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 	}
 
 	// Unsupported CallOptions on Google (ai-sdk parity).
-	if options.FrequencyPenalty != nil {
+	isGemini25 := strings.HasPrefix(strings.ToLower(path.Base(m.id)), "gemini-2.5-")
+	if options.FrequencyPenalty != nil && isGemini25 {
 		warnings = append(warnings, stream.UnsupportedWarning("frequencyPenalty", ""))
 	}
-	if options.PresencePenalty != nil {
+	if options.PresencePenalty != nil && isGemini25 {
 		warnings = append(warnings, stream.UnsupportedWarning("presencePenalty", ""))
 	}
 
@@ -212,6 +215,17 @@ func (m *GoogleModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 	// Generation config
 	config := &geminiGenerationConfig{}
 	hasConfig := false
+	config.Seed = options.Seed
+	if options.Seed != nil {
+		hasConfig = true
+	}
+	if !isGemini25 {
+		config.FrequencyPenalty = options.FrequencyPenalty
+		config.PresencePenalty = options.PresencePenalty
+		if options.FrequencyPenalty != nil || options.PresencePenalty != nil {
+			hasConfig = true
+		}
+	}
 
 	if options.Temperature != nil {
 		config.Temperature = options.Temperature
@@ -271,6 +285,11 @@ func (m *GoogleModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 			}
 		}
 	}
+	if opts.SafetySettings == nil && opts.Threshold != "" {
+		for _, category := range []string{"HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_DANGEROUS_CONTENT", "HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_CIVIC_INTEGRITY"} {
+			req.SafetySettings = append(req.SafetySettings, geminiSafetySetting{Category: category, Threshold: opts.Threshold})
+		}
+	}
 
 	// cachedContent
 	if opts.CachedContent != "" {
@@ -278,15 +297,15 @@ func (m *GoogleModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 	}
 
 	// thinkingConfig
-	if opts.ThinkingConfig != nil {
+	thinking, err := ThinkingConfiguration(m.id, options.Reasoning, options.ProviderOptions["thinkingConfig"])
+	if err != nil {
+		return nil, warnings, err
+	}
+	if thinking != nil {
 		if req.GenerationConfig == nil {
 			req.GenerationConfig = &geminiGenerationConfig{}
 		}
-		req.GenerationConfig.ThinkingConfig = &geminiThinkingConfig{
-			ThinkingBudget:  opts.ThinkingConfig.ThinkingBudget,
-			IncludeThoughts: opts.ThinkingConfig.IncludeThoughts,
-			ThinkingLevel:   opts.ThinkingConfig.ThinkingLevel,
-		}
+		req.GenerationConfig.ThinkingConfig = thinking
 	}
 
 	// responseModalities
@@ -332,25 +351,29 @@ func (m *GoogleModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 		}
 	}
 
-	// serviceTier (ai-sdk #4e22c2c): send as request-root
-	// generationConfig.serviceTier. Vertex's mapping to
-	// SERVICE_TIER_STANDARD/FLEX/PRIORITY is handled in the Vertex
-	// provider wrapper, not here.
-	if opts.ServiceTier != "" {
+	req.ServiceTier = opts.ServiceTier
+	req.Labels = opts.Labels
+	if opts.ImageConfig != nil {
 		if req.GenerationConfig == nil {
 			req.GenerationConfig = &geminiGenerationConfig{}
 		}
-		req.GenerationConfig.ServiceTier = opts.ServiceTier
+		req.GenerationConfig.ImageConfig = opts.ImageConfig
+	}
+	if opts.RetrievalConfig != nil {
+		if req.ToolConfig == nil {
+			req.ToolConfig = &geminiToolConfig{}
+		}
+		req.ToolConfig.RetrievalConfig = opts.RetrievalConfig
 	}
 
-	// streamFunctionCallArguments — only relevant for streaming
-	// requests with function tools on Gemini 3+ over Vertex AI.
-	// Default is false (ai-sdk #46a3584 flipped the earlier default).
-	if opts.StreamFunctionCallArguments != nil {
-		if req.GenerationConfig == nil {
-			req.GenerationConfig = &geminiGenerationConfig{}
-		}
-		req.GenerationConfig.StreamFunctionCallArguments = opts.StreamFunctionCallArguments
+	if opts.StreamFunctionCallArguments != nil && *opts.StreamFunctionCallArguments {
+		warnings = append(warnings, stream.UnsupportedWarning("streamFunctionCallArguments", "Only supported by Vertex AI."))
+	}
+	if opts.SharedRequestType != "" {
+		warnings = append(warnings, stream.UnsupportedWarning("sharedRequestType", "Only supported by Vertex AI."))
+	}
+	if opts.RequestType != "" {
+		warnings = append(warnings, stream.UnsupportedWarning("requestType", "Only supported by Vertex AI."))
 	}
 
 	body, err := json.Marshal(req)
@@ -364,10 +387,12 @@ func (m *GoogleModel) processStream(ctx context.Context, body io.Reader, tools [
 		toolsByName[t.Name] = t
 	}
 
-	scanner := bufio.NewScanner(body)
+	streamReader := goaiinternal.NewStreamReader(body)
+	scanner := bufio.NewScanner(streamReader)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
 	var textStarted bool
+	var reasoningStarted bool
 	var usage stream.Usage
 	var finishReason stream.FinishReason
 	var pendingToolCalls []stream.ToolCallEvent
@@ -386,11 +411,14 @@ func (m *GoogleModel) processStream(ctx context.Context, body io.Reader, tools [
 		}
 
 		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
+		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
 
-		data := strings.TrimPrefix(line, "data: ")
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "" {
+			continue
+		}
 
 		if includeRawChunks {
 			events <- stream.Event{Type: stream.EventRawChunk, Data: stream.RawChunkEvent{RawValue: data}}
@@ -398,7 +426,15 @@ func (m *GoogleModel) processStream(ctx context.Context, body io.Reader, tools [
 
 		var chunk geminiStreamChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			continue
+			events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: fmt.Errorf("%w: %v", goaierrors.ErrInvalidResponse, err)}}
+			return
+		}
+		if chunk.Error != nil {
+			events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{Message: chunk.Error.Message, StatusCode: chunk.Error.Code, ResponseBody: data})}}
+			return
+		}
+		if chunk.PromptFeedback != nil && chunk.PromptFeedback.BlockReason != "" {
+			finishReason = stream.FinishReasonContentFilter
 		}
 
 		// Process candidates
@@ -421,13 +457,37 @@ func (m *GoogleModel) processStream(ctx context.Context, body io.Reader, tools [
 			// Process content parts
 			if candidate.Content != nil {
 				for _, part := range candidate.Content.Parts {
+					if part.Thought {
+						if textStarted {
+							events <- stream.Event{Type: stream.EventTextEnd, Data: stream.TextEndEvent{}}
+							textStarted = false
+						}
+						if !reasoningStarted {
+							reasoningStarted = true
+							events <- stream.Event{Type: stream.EventReasoningStart, Data: stream.ReasoningStartEvent{ID: "reasoning"}}
+						}
+						metadata := map[string]any(nil)
+						if part.ThoughtSignature != "" {
+							metadata = map[string]any{"google": map[string]any{"thoughtSignature": part.ThoughtSignature}}
+						}
+						events <- stream.Event{Type: stream.EventReasoningDelta, Data: stream.ReasoningDeltaEvent{ID: "reasoning", Text: part.Text, ProviderMetadata: metadata}}
+						continue
+					}
 					// Text content
 					if part.Text != "" {
+						if reasoningStarted {
+							events <- stream.Event{Type: stream.EventReasoningEnd, Data: stream.ReasoningEndEvent{ID: "reasoning"}}
+							reasoningStarted = false
+						}
 						if !textStarted {
 							textStarted = true
 							events <- stream.Event{Type: stream.EventTextStart, Data: stream.TextStartEvent{}}
 						}
-						events <- stream.Event{Type: stream.EventTextDelta, Data: stream.TextDeltaEvent{Text: part.Text}}
+						metadata := map[string]any(nil)
+						if part.ThoughtSignature != "" {
+							metadata = map[string]any{"google": map[string]any{"thoughtSignature": part.ThoughtSignature}}
+						}
+						events <- stream.Event{Type: stream.EventTextDelta, Data: stream.TextDeltaEvent{Text: part.Text, ProviderMetadata: metadata}}
 					}
 
 					// Function call. Vertex emits no-args calls as
@@ -474,8 +534,19 @@ func (m *GoogleModel) processStream(ctx context.Context, body io.Reader, tools [
 			}
 		}
 	}
+	if err := streamReader.Err(ctx, scanner.Err()); err != nil {
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+		return
+	}
 
 	// End text if started
+	if finishReason == "" {
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: fmt.Errorf("%w: Gemini stream ended without a finish reason", goaierrors.ErrInvalidResponse)}}
+		return
+	}
+	if reasoningStarted {
+		events <- stream.Event{Type: stream.EventReasoningEnd, Data: stream.ReasoningEndEvent{ID: "reasoning"}}
+	}
 	if textStarted {
 		events <- stream.Event{Type: stream.EventTextEnd, Data: stream.TextEndEvent{}}
 	}
@@ -497,7 +568,7 @@ func (m *GoogleModel) processStream(ctx context.Context, body io.Reader, tools [
 	}
 
 	// Set finish reason if there were tool calls
-	if len(pendingToolCalls) > 0 && finishReason == "" {
+	if len(pendingToolCalls) > 0 && finishReason == stream.FinishReasonStop {
 		finishReason = stream.FinishReasonToolCalls
 	}
 
@@ -632,7 +703,7 @@ func mapGeminiFinishReason(reason string) stream.FinishReason {
 		return stream.FinishReasonStop
 	case "MAX_TOKENS":
 		return stream.FinishReasonLength
-	case "SAFETY":
+	case "SAFETY", "IMAGE_SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII":
 		return stream.FinishReasonContentFilter
 	case "RECITATION":
 		return stream.FinishReasonContentFilter

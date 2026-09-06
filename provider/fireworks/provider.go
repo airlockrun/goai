@@ -46,10 +46,21 @@ func New(opts Options) *Provider {
 	}
 	return &Provider{
 		compat: openaicompat.New(openaicompat.Options{
-			ProviderID: "fireworks",
-			BaseURL:    baseURL,
-			APIKey:     opts.APIKey,
-			Headers:    opts.Headers,
+			ProviderID:                "fireworks",
+			BaseURL:                   baseURL,
+			APIKey:                    opts.APIKey,
+			Headers:                   opts.Headers,
+			SupportsStructuredOutputs: true,
+			RequestModifier:           fireworksRequestModifier,
+			TransformRequest: func(_ string, body map[string]any) error {
+				switch body["reasoning_effort"] {
+				case "minimal":
+					body["reasoning_effort"] = "low"
+				case "xhigh":
+					body["reasoning_effort"] = "high"
+				}
+				return nil
+			},
 		}),
 		baseURL:        baseURL,
 		apiKey:         opts.APIKey,
@@ -74,7 +85,9 @@ func (p *Provider) ImageModel(modelID string) model.ImageModel {
 	}
 }
 
-func (p *Provider) EmbeddingModel(modelID string) model.EmbeddingModel         { return nil }
+func (p *Provider) EmbeddingModel(modelID string) model.EmbeddingModel {
+	return p.compat.EmbeddingModel(modelID)
+}
 func (p *Provider) SpeechModel(modelID string) model.SpeechModel               { return nil }
 func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel { return nil }
 func (p *Provider) RerankingModel(modelID string) model.RerankingModel         { return nil }

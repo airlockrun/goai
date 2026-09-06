@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	goaierrors "github.com/airlockrun/goai/errors"
+	goaiinternal "github.com/airlockrun/goai/internal"
 	"github.com/airlockrun/goai/provider"
 	"github.com/airlockrun/goai/stream"
 	"github.com/airlockrun/goai/tool"
@@ -63,6 +64,12 @@ func (m *ChatModel) doStream(ctx context.Context, options *stream.CallOptions, e
 	req.Header.Set("Authorization", "Bearer "+m.provider.opts.APIKey)
 	if m.provider.opts.Organization != "" {
 		req.Header.Set("OpenAI-Organization", m.provider.opts.Organization)
+	}
+	if m.provider.opts.Project != "" {
+		req.Header.Set("OpenAI-Project", m.provider.opts.Project)
+	}
+	for k, v := range m.provider.opts.Headers {
+		req.Header.Set(k, v)
 	}
 	for k, v := range options.Headers {
 		req.Header.Set(k, v)
@@ -145,14 +152,51 @@ func (m *ChatModel) buildRequest(options *stream.CallOptions) ([]byte, []stream.
 	if effort == "" {
 		effort = options.Reasoning
 	}
-	if effort != "" && GetLanguageModelCapabilities(m.id).IsReasoningModel {
+	caps := GetLanguageModelCapabilities(m.id)
+	isReasoning := caps.IsReasoningModel || opts.ForceReasoning
+	if effort != "" && isReasoning {
 		req.ReasoningEffort = effort
 	}
+	mode := opts.SystemMessageMode
+	if mode == "" {
+		mode = caps.SystemMessageMode
+		if opts.ForceReasoning {
+			mode = "developer"
+		}
+	}
+	if mode != "system" && mode != "developer" && mode != "remove" {
+		return nil, warnings, fmt.Errorf("invalid systemMessageMode: %s", mode)
+	}
+	filtered := req.Messages[:0]
+	for _, msg := range req.Messages {
+		if msg.Role == "system" {
+			if mode == "remove" {
+				continue
+			}
+			msg.Role = mode
+		}
+		filtered = append(filtered, msg)
+	}
+	req.Messages = filtered
+	req.Seed = options.Seed
+	req.PresencePenalty, req.FrequencyPenalty = options.PresencePenalty, options.FrequencyPenalty
+	if opts.PresencePenalty != nil {
+		req.PresencePenalty = opts.PresencePenalty
+	}
+	if opts.FrequencyPenalty != nil {
+		req.FrequencyPenalty = opts.FrequencyPenalty
+	}
+	req.LogitBias, req.ParallelToolCalls = opts.LogitBias, opts.ParallelToolCalls
+	req.Store, req.User = opts.Store, opts.User
+	req.MaxCompletionTokens = opts.MaxCompletionTokens
+	req.ServiceTier, req.Metadata = opts.ServiceTier, opts.Metadata
+	req.SafetyIdentifier, req.PromptCacheKey = opts.SafetyIdentifier, opts.PromptCacheKey
+	req.PromptCacheRetention, req.Verbosity = opts.PromptCacheRetention, opts.TextVerbosity
 
 	// Map ResponseFormat to chat response_format.
 	// Mirrors ai-sdk openai-chat-language-model.ts:147-160.
 	if options.ResponseFormat != nil && options.ResponseFormat.Type == "json" {
-		if len(options.ResponseFormat.Schema) > 0 {
+		if len(options.ResponseFormat.Schema) > 0 && (opts.StructuredOutputs == nil || *opts.StructuredOutputs) {
 			strict := false
 			if opts.StrictJsonSchema != nil {
 				strict = *opts.StrictJsonSchema
@@ -208,6 +252,38 @@ func (m *ChatModel) buildRequest(options *stream.CallOptions) ([]byte, []stream.
 		}
 	}
 
+	if isReasoning {
+		if effort != "none" || !caps.SupportsNonReasoningParameters {
+			if req.Temperature != nil {
+				warnings = append(warnings, stream.UnsupportedWarning("temperature", "not supported for reasoning models"))
+				req.Temperature = nil
+			}
+			if req.TopP != nil {
+				warnings = append(warnings, stream.UnsupportedWarning("topP", "not supported for reasoning models"))
+				req.TopP = nil
+			}
+			if req.Logprobs != nil {
+				warnings = append(warnings, stream.UnsupportedWarning("logprobs", "not supported for reasoning models"))
+				req.Logprobs, req.TopLogprobs = nil, nil
+			}
+		}
+		if req.PresencePenalty != nil {
+			warnings = append(warnings, stream.UnsupportedWarning("presencePenalty", "not supported for reasoning models"))
+			req.PresencePenalty = nil
+		}
+		if req.FrequencyPenalty != nil {
+			warnings = append(warnings, stream.UnsupportedWarning("frequencyPenalty", "not supported for reasoning models"))
+			req.FrequencyPenalty = nil
+		}
+		if req.LogitBias != nil {
+			warnings = append(warnings, stream.UnsupportedWarning("logitBias", "not supported for reasoning models"))
+			req.LogitBias = nil
+		}
+		if req.MaxCompletionTokens == nil {
+			req.MaxCompletionTokens = req.MaxTokens
+		}
+		req.MaxTokens = nil
+	}
 	// Stream options for usage
 	req.StreamOptions = &chatStreamOptions{IncludeUsage: true}
 
@@ -222,11 +298,15 @@ func (m *ChatModel) processStream(ctx context.Context, body io.Reader, tools []t
 		toolsByName[t.Name] = t
 	}
 
-	scanner := bufio.NewScanner(body)
+	streamReader := goaiinternal.NewStreamReader(body)
+	scanner := bufio.NewScanner(streamReader)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB buffer
 
 	var textStarted bool
 	var currentToolCalls = make(map[int]*chatToolCallAccumulator)
+	toolCallsByID := make(map[string]*chatToolCallAccumulator)
+	var toolCalls []*chatToolCallAccumulator
+	var latestToolCall *chatToolCallAccumulator
 	var usage stream.Usage
 	var finishReason stream.FinishReason
 	var logprobTokens []chatLogprobToken
@@ -235,6 +315,7 @@ func (m *ChatModel) processStream(ctx context.Context, body io.Reader, tools []t
 	// (e.g. insufficient_quota). Such pre-output errors terminate the stream
 	// so retry/fallback logic sees the failure; later errors stay streamed.
 	var outputStarted bool
+	var terminal bool
 
 	events <- stream.Event{Type: stream.EventStartStep, Data: stream.StartStepEvent{}}
 
@@ -247,11 +328,11 @@ func (m *ChatModel) processStream(ctx context.Context, body io.Reader, tools []t
 		}
 
 		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
+		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
 
-		data := strings.TrimPrefix(line, "data: ")
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if data == "[DONE]" {
 			break
 		}
@@ -262,7 +343,12 @@ func (m *ChatModel) processStream(ctx context.Context, body io.Reader, tools []t
 
 		var chunk chatCompletionChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			continue
+			events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: &goaierrors.JSONParseError{Text: data, Cause: err}}}
+			return
+		}
+		if chunk.Choices == nil && chunk.Usage == nil && chunk.Error == nil {
+			events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: invalidStreamError("expected chat choices, usage or error", data)}}
+			return
 		}
 
 		// A top-level error frame is fatal when it arrives before any output
@@ -275,12 +361,14 @@ func (m *ChatModel) processStream(ctx context.Context, body io.Reader, tools []t
 			events <- stream.Event{
 				Type: stream.EventError,
 				Data: stream.ErrorEvent{
-					Error: fmt.Errorf("OpenAI API error: [%s] %s", code, chunk.Error.Message),
+					Error: streamAPIError(m.Provider(), code, chunk.Error.Message, data),
 				},
 			}
 			if !outputStarted {
 				return
 			}
+			terminal = true
+			finishReason = stream.FinishReasonError
 			continue
 		}
 
@@ -323,6 +411,7 @@ func (m *ChatModel) processStream(ctx context.Context, body io.Reader, tools []t
 
 		// Handle finish reason
 		if choice.FinishReason != "" {
+			terminal = true
 			finishReason = mapChatFinishReason(choice.FinishReason)
 		}
 
@@ -349,42 +438,60 @@ func (m *ChatModel) processStream(ctx context.Context, body io.Reader, tools []t
 			outputStarted = true
 		}
 		for _, tc := range delta.ToolCalls {
-			acc, exists := currentToolCalls[tc.Index]
-			if !exists {
-				acc = &chatToolCallAccumulator{
-					index: tc.Index,
-				}
-				currentToolCalls[tc.Index] = acc
-
-				if tc.ID != "" {
-					acc.id = tc.ID
-				}
-				if tc.Function.Name != "" {
-					acc.name = tc.Function.Name
-					events <- stream.Event{
-						Type: stream.EventToolInputStart,
-						Data: stream.ToolInputStartEvent{ID: acc.id, ToolName: acc.name},
-					}
+			if tc.Type != "" && tc.Type != "function" {
+				events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: invalidStreamError("expected function tool call", data)}}
+				return
+			}
+			acc := toolCallsByID[tc.ID]
+			if acc == nil && tc.Index != nil {
+				candidate := currentToolCalls[*tc.Index]
+				if candidate != nil && (tc.ID == "" || candidate.id == "" || candidate.id == tc.ID) {
+					acc = candidate
 				}
 			}
-
+			if acc == nil && tc.Index == nil && tc.ID == "" {
+				acc = latestToolCall
+			}
+			if acc == nil {
+				acc = &chatToolCallAccumulator{index: len(toolCalls)}
+				if tc.Index != nil {
+					acc.index = *tc.Index
+				}
+				toolCalls = append(toolCalls, acc)
+			}
+			if tc.Index != nil {
+				currentToolCalls[*tc.Index] = acc
+			}
+			latestToolCall = acc
 			if tc.ID != "" && acc.id == "" {
 				acc.id = tc.ID
+				toolCallsByID[tc.ID] = acc
 			}
 			if tc.Function.Name != "" && acc.name == "" {
 				acc.name = tc.Function.Name
 			}
 			if tc.Function.Arguments != "" {
 				acc.arguments += tc.Function.Arguments
+			}
+			if !acc.started && acc.id != "" && acc.name != "" {
+				acc.started = true
+				events <- stream.Event{Type: stream.EventToolInputStart, Data: stream.ToolInputStartEvent{ID: acc.id, ToolName: acc.name}}
+			}
+			if acc.started && len(acc.arguments) > acc.emitted {
 				events <- stream.Event{
 					Type: stream.EventToolInputDelta,
-					Data: stream.ToolInputDeltaEvent{ID: acc.id, Delta: tc.Function.Arguments},
+					Data: stream.ToolInputDeltaEvent{ID: acc.id, Delta: acc.arguments[acc.emitted:]},
 				}
+				acc.emitted = len(acc.arguments)
 			}
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: fmt.Errorf("OpenAI stream read: %w", err)}}
+	if err := streamReader.Err(ctx, scanner.Err()); err != nil {
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+		return
+	}
+	if !terminal {
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: incompleteStreamError()}}
 		return
 	}
 
@@ -394,13 +501,21 @@ func (m *ChatModel) processStream(ctx context.Context, body io.Reader, tools []t
 	}
 
 	// Process completed tool calls
-	toolCallIndices := make([]int, 0, len(currentToolCalls))
-	for index := range currentToolCalls {
-		toolCallIndices = append(toolCallIndices, index)
-	}
-	sort.Ints(toolCallIndices)
-	for _, index := range toolCallIndices {
-		acc := currentToolCalls[index]
+	sort.SliceStable(toolCalls, func(i, j int) bool { return toolCalls[i].index < toolCalls[j].index })
+	for _, acc := range toolCalls {
+		if acc.name == "" {
+			events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: invalidStreamError("tool call is missing its function name", acc.arguments)}}
+			return
+		}
+		if !acc.started {
+			if acc.id == "" {
+				acc.id = "call_" + newSourceID()
+			}
+			events <- stream.Event{Type: stream.EventToolInputStart, Data: stream.ToolInputStartEvent{ID: acc.id, ToolName: acc.name}}
+			if acc.arguments != "" {
+				events <- stream.Event{Type: stream.EventToolInputDelta, Data: stream.ToolInputDeltaEvent{ID: acc.id, Delta: acc.arguments}}
+			}
+		}
 		events <- stream.Event{
 			Type: stream.EventToolInputEnd,
 			Data: stream.ToolInputEndEvent{ID: acc.id},
@@ -473,6 +588,8 @@ func mapLogprobTokens(toks []chatLogprobToken) []map[string]any {
 }
 
 type chatToolCallAccumulator struct {
+	started   bool
+	emitted   int
 	index     int
 	id        string
 	name      string

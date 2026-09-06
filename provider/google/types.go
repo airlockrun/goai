@@ -19,6 +19,8 @@ type geminiRequest struct {
 	ToolConfig        *geminiToolConfig       `json:"toolConfig,omitempty"`
 	SafetySettings    []geminiSafetySetting   `json:"safetySettings,omitempty"`
 	CachedContent     string                  `json:"cachedContent,omitempty"`
+	ServiceTier       string                  `json:"serviceTier,omitempty"`
+	Labels            map[string]string       `json:"labels,omitempty"`
 }
 
 // geminiToolConfig configures tool calling. Mirrors Gemini's toolConfig wire
@@ -32,6 +34,7 @@ type geminiRequest struct {
 // field (ai-sdk PR #14767). goai's vertex package is implemented separately
 // and does not share this struct.
 type geminiToolConfig struct {
+	RetrievalConfig                  *RetrievalConfig             `json:"retrievalConfig,omitempty"`
 	FunctionCallingConfig            *geminiFunctionCallingConfig `json:"functionCallingConfig,omitempty"`
 	IncludeServerSideToolInvocations bool                         `json:"includeServerSideToolInvocations,omitempty"`
 }
@@ -53,6 +56,7 @@ type geminiContent struct {
 }
 
 type geminiPart struct {
+	Thought          bool                    `json:"thought,omitempty"`
 	Text             string                  `json:"text,omitempty"`
 	InlineData       *geminiInlineData       `json:"inlineData,omitempty"`
 	FileData         *geminiFileData         `json:"fileData,omitempty"`
@@ -99,26 +103,21 @@ type geminiFunctionResponse struct {
 }
 
 type geminiGenerationConfig struct {
-	Temperature                 *float64              `json:"temperature,omitempty"`
-	TopP                        *float64              `json:"topP,omitempty"`
-	TopK                        *int                  `json:"topK,omitempty"`
-	MaxOutputTokens             *int                  `json:"maxOutputTokens,omitempty"`
-	StopSequences               []string              `json:"stopSequences,omitempty"`
-	ResponseModalities          []string              `json:"responseModalities,omitempty"`
-	ResponseMimeType            string                `json:"responseMimeType,omitempty"`
-	ResponseSchema              json.RawMessage       `json:"responseSchema,omitempty"`
-	ThinkingConfig              *geminiThinkingConfig `json:"thinkingConfig,omitempty"`
-	AudioTimestamp              *bool                 `json:"audioTimestamp,omitempty"`
-	MediaResolution             string                `json:"mediaResolution,omitempty"`
-	ServiceTier                 string                `json:"serviceTier,omitempty"`
-	StreamFunctionCallArguments *bool                 `json:"streamFunctionCallArguments,omitempty"`
-}
-
-// geminiThinkingConfig configures thinking/reasoning behavior.
-type geminiThinkingConfig struct {
-	ThinkingBudget  int    `json:"thinkingBudget,omitempty"`
-	IncludeThoughts *bool  `json:"includeThoughts,omitempty"`
-	ThinkingLevel   string `json:"thinkingLevel,omitempty"`
+	Seed               *int            `json:"seed,omitempty"`
+	FrequencyPenalty   *float64        `json:"frequencyPenalty,omitempty"`
+	PresencePenalty    *float64        `json:"presencePenalty,omitempty"`
+	Temperature        *float64        `json:"temperature,omitempty"`
+	TopP               *float64        `json:"topP,omitempty"`
+	TopK               *int            `json:"topK,omitempty"`
+	MaxOutputTokens    *int            `json:"maxOutputTokens,omitempty"`
+	StopSequences      []string        `json:"stopSequences,omitempty"`
+	ResponseModalities []string        `json:"responseModalities,omitempty"`
+	ResponseMimeType   string          `json:"responseMimeType,omitempty"`
+	ResponseSchema     json.RawMessage `json:"responseSchema,omitempty"`
+	ThinkingConfig     map[string]any  `json:"thinkingConfig,omitempty"`
+	AudioTimestamp     *bool           `json:"audioTimestamp,omitempty"`
+	MediaResolution    string          `json:"mediaResolution,omitempty"`
+	ImageConfig        *ImageConfig    `json:"imageConfig,omitempty"`
 }
 
 // geminiTool is a single entry in the Gemini request's tools[] array.
@@ -127,6 +126,7 @@ type geminiThinkingConfig struct {
 //   - GoogleSearch / GoogleSearchRetrieval / GoogleMaps / EnterpriseWebSearch /
 //     URLContext / CodeExecution: provider-defined grounding tools.
 type geminiTool struct {
+	FileSearch            json.RawMessage              `json:"fileSearch,omitempty"`
 	FunctionDeclarations  []geminiFunctionDeclaration  `json:"functionDeclarations,omitempty"`
 	GoogleSearch          *geminiGoogleSearch          `json:"googleSearch,omitempty"`
 	GoogleSearchRetrieval *geminiGoogleSearchRetrieval `json:"googleSearchRetrieval,omitempty"`
@@ -174,6 +174,13 @@ type geminiFunctionDeclaration struct {
 // Response types
 
 type geminiStreamChunk struct {
+	Error *struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	} `json:"error,omitempty"`
+	PromptFeedback *struct {
+		BlockReason string `json:"blockReason"`
+	} `json:"promptFeedback,omitempty"`
 	Candidates    []geminiCandidate    `json:"candidates,omitempty"`
 	UsageMetadata *geminiUsageMetadata `json:"usageMetadata,omitempty"`
 }
@@ -369,17 +376,24 @@ func convertAssistantParts(content message.Content) []geminiPart {
 	result := make([]geminiPart, 0)
 
 	// Add text if present
-	text := getTextFromContent(content)
+	text := content.Text
 	if text != "" {
 		result = append(result, geminiPart{Text: text})
 	}
 
 	// Add tool calls as function calls
 	for _, part := range content.Parts {
+		switch p := part.(type) {
+		case message.TextPart:
+			result = append(result, geminiPart{Text: p.Text, ThoughtSignature: ThoughtSignature(p.ProviderOptions)})
+		case message.ReasoningPart:
+			result = append(result, geminiPart{Text: p.Text, Thought: true, ThoughtSignature: ThoughtSignature(p.ProviderOptions)})
+		}
 		if tc, ok := part.(message.ToolCallPart); ok {
 			var args map[string]any
 			json.Unmarshal(tc.Input, &args)
 			result = append(result, geminiPart{
+				ThoughtSignature: ThoughtSignature(tc.ProviderOptions),
 				FunctionCall: &geminiFunctionCall{
 					ID:   tc.ID,
 					Name: tc.Name,

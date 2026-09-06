@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -35,27 +36,27 @@ func (m *BedrockEmbeddingModel) Embed(ctx context.Context, opts model.EmbedCallO
 		var reqBody []byte
 		var err error
 
-		if strings.HasPrefix(m.id, "amazon.titan-embed") {
+		id := bedrockModelName(m.id)
+		if strings.HasPrefix(id, "amazon.titan-embed") {
 			reqBody, err = json.Marshal(map[string]any{
 				"inputText": text,
 			})
-		} else if strings.HasPrefix(m.id, "cohere.embed") {
+		} else if strings.HasPrefix(id, "cohere.embed") {
 			reqBody, err = json.Marshal(map[string]any{
 				"texts":      []string{text},
 				"input_type": "search_document",
 			})
+		} else if strings.HasPrefix(id, "amazon.nova-") && strings.Contains(id, "embed") {
+			reqBody, err = json.Marshal(map[string]any{"taskType": "SINGLE_EMBEDDING", "singleEmbeddingParams": map[string]any{"embeddingPurpose": "GENERIC_INDEX", "embeddingDimension": 1024, "text": map[string]any{"truncationMode": "END", "value": text}}})
 		} else {
-			// Default to Titan format
-			reqBody, err = json.Marshal(map[string]any{
-				"inputText": text,
-			})
+			return nil, fmt.Errorf("unsupported Bedrock embedding model %q", m.id)
 		}
 
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal request: %w", err)
 		}
 
-		url := fmt.Sprintf("%s/model/%s/invoke", m.provider.baseURL(), m.id)
+		url := fmt.Sprintf("%s/model/%s/invoke", m.provider.baseURL(), escapeModelID(m.id))
 
 		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBody))
 		if err != nil {
@@ -63,19 +64,20 @@ func (m *BedrockEmbeddingModel) Embed(ctx context.Context, opts model.EmbedCallO
 		}
 
 		req.Header.Set("Content-Type", "application/json")
-		m.signRequest(req, reqBody)
-
+		for k, v := range m.provider.opts.Headers {
+			req.Header.Set(k, v)
+		}
 		for k, v := range opts.Headers {
 			req.Header.Set(k, v)
 		}
+		m.signRequest(req, reqBody)
 
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("request failed: %w", err)
 		}
-		defer resp.Body.Close()
-
 		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
 		if err != nil {
 			return nil, fmt.Errorf("failed to read response: %w", err)
 		}
@@ -90,12 +92,22 @@ func (m *BedrockEmbeddingModel) Embed(ctx context.Context, opts model.EmbedCallO
 		}
 
 		// Extract embedding based on model
+		if embs, ok := embResp["embeddings"].(map[string]any); ok {
+			embResp["embeddings"] = embs["float"]
+		}
+		if embs, ok := embResp["embeddings"].([]any); ok && len(embs) > 0 {
+			if nova, ok := embs[0].(map[string]any); ok {
+				embResp["embedding"] = nova["embedding"]
+			}
+		}
 		var embedding []float64
 		if emb, ok := embResp["embedding"].([]any); ok {
 			embedding = make([]float64, len(emb))
 			for j, v := range emb {
 				if f, ok := v.(float64); ok {
 					embedding[j] = f
+				} else {
+					return nil, fmt.Errorf("Bedrock embedding contains nonnumeric value at index %d", j)
 				}
 			}
 		} else if embs, ok := embResp["embeddings"].([]any); ok && len(embs) > 0 {
@@ -105,11 +117,16 @@ func (m *BedrockEmbeddingModel) Embed(ctx context.Context, opts model.EmbedCallO
 				for j, v := range emb {
 					if f, ok := v.(float64); ok {
 						embedding[j] = f
+					} else {
+						return nil, fmt.Errorf("Bedrock embedding contains nonnumeric value at index %d", j)
 					}
 				}
 			}
 		}
 
+		if len(embedding) == 0 {
+			return nil, fmt.Errorf("Bedrock returned no embedding for input %d", i)
+		}
 		embeddings[i] = model.Embedding{
 			Values: embedding,
 			Index:  i,
@@ -117,6 +134,8 @@ func (m *BedrockEmbeddingModel) Embed(ctx context.Context, opts model.EmbedCallO
 
 		// Track tokens if available
 		if tokens, ok := embResp["inputTextTokenCount"].(float64); ok {
+			totalTokens += int(tokens)
+		} else if tokens, ok := embResp["inputTokenCount"].(float64); ok {
 			totalTokens += int(tokens)
 		}
 	}
@@ -159,7 +178,7 @@ func (m *BedrockEmbeddingModel) signRequest(req *http.Request, payload []byte) {
 
 	canonicalRequest := strings.Join([]string{
 		req.Method,
-		req.URL.Path,
+		strings.ReplaceAll(url.PathEscape(req.URL.EscapedPath()), "%2F", "/"),
 		req.URL.RawQuery,
 		canonicalHeaders,
 		signedHeaders,

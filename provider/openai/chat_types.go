@@ -12,18 +12,32 @@ import (
 // Chat Completions API request types
 
 type chatRequest struct {
-	Model           string              `json:"model"`
-	Messages        []chatMessage       `json:"messages"`
-	Stream          bool                `json:"stream"`
-	Temperature     *float64            `json:"temperature,omitempty"`
-	TopP            *float64            `json:"top_p,omitempty"`
-	MaxTokens       *int                `json:"max_tokens,omitempty"`
-	Stop            []string            `json:"stop,omitempty"`
-	Tools           []chatTool          `json:"tools,omitempty"`
-	ToolChoice      any                 `json:"tool_choice,omitempty"`
-	ResponseFormat  *chatResponseFormat `json:"response_format,omitempty"`
-	StreamOptions   *chatStreamOptions  `json:"stream_options,omitempty"`
-	ReasoningEffort string              `json:"reasoning_effort,omitempty"`
+	Model                string              `json:"model"`
+	Messages             []chatMessage       `json:"messages"`
+	Stream               bool                `json:"stream"`
+	Temperature          *float64            `json:"temperature,omitempty"`
+	TopP                 *float64            `json:"top_p,omitempty"`
+	MaxTokens            *int                `json:"max_tokens,omitempty"`
+	MaxCompletionTokens  *int                `json:"max_completion_tokens,omitempty"`
+	Seed                 *int                `json:"seed,omitempty"`
+	PresencePenalty      *float64            `json:"presence_penalty,omitempty"`
+	FrequencyPenalty     *float64            `json:"frequency_penalty,omitempty"`
+	LogitBias            map[string]int      `json:"logit_bias,omitempty"`
+	ParallelToolCalls    *bool               `json:"parallel_tool_calls,omitempty"`
+	Store                *bool               `json:"store,omitempty"`
+	User                 string              `json:"user,omitempty"`
+	ServiceTier          string              `json:"service_tier,omitempty"`
+	Metadata             any                 `json:"metadata,omitempty"`
+	SafetyIdentifier     string              `json:"safety_identifier,omitempty"`
+	PromptCacheKey       string              `json:"prompt_cache_key,omitempty"`
+	PromptCacheRetention string              `json:"prompt_cache_retention,omitempty"`
+	Verbosity            string              `json:"verbosity,omitempty"`
+	Stop                 []string            `json:"stop,omitempty"`
+	Tools                []chatTool          `json:"tools,omitempty"`
+	ToolChoice           any                 `json:"tool_choice,omitempty"`
+	ResponseFormat       *chatResponseFormat `json:"response_format,omitempty"`
+	StreamOptions        *chatStreamOptions  `json:"stream_options,omitempty"`
+	ReasoningEffort      string              `json:"reasoning_effort,omitempty"`
 
 	// Modalities + Audio drive multimodal chat-audio models (gpt-audio,
 	// gpt-4o[-mini]-audio-preview): the model emits/accepts audio through
@@ -166,10 +180,34 @@ type chatChunkDelta struct {
 }
 
 type chatChunkToolCall struct {
-	Index    int              `json:"index"`
+	Index    *int             `json:"index"`
 	ID       string           `json:"id,omitempty"`
 	Type     string           `json:"type,omitempty"`
 	Function chatFunctionCall `json:"function"`
+}
+
+func (c *chatChunkToolCall) UnmarshalJSON(data []byte) error {
+	type wire chatChunkToolCall
+	var value struct {
+		*wire
+		ID json.RawMessage `json:"id"`
+	}
+	value.wire = (*wire)(c)
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	if len(value.ID) == 0 || string(value.ID) == "null" {
+		return nil
+	}
+	if value.ID[0] == '"' {
+		return json.Unmarshal(value.ID, &c.ID)
+	}
+	var number json.Number
+	if err := json.Unmarshal(value.ID, &number); err != nil {
+		return err
+	}
+	c.ID = number.String()
+	return nil
 }
 
 type chatUsage struct {

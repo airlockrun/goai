@@ -32,6 +32,7 @@ type Provider struct {
 
 // New creates a new Mistral provider.
 func New(opts Options) *Provider {
+	strictJSONSchema := false
 	baseURL := opts.BaseURL
 	if baseURL == "" {
 		baseURL = defaultBaseURL
@@ -46,8 +47,31 @@ func New(opts Options) *Provider {
 			RequestModifier:           mistralRequestModifier,
 			CallWarner:                mistralCallWarner,
 			SupportsStructuredOutputs: true,
+			DefaultStrictJSONSchema:   &strictJSONSchema,
+			SupportsPenalties:         true,
+			MessageConverter:          convertMessages,
+			TransformRequest: func(id string, body map[string]any) error {
+				if !supportsReasoningEffort(id) {
+					delete(body, "reasoning_effort")
+					return nil
+				}
+				if effort, ok := body["reasoning_effort"].(string); ok && effort != "none" {
+					body["reasoning_effort"] = "high"
+				}
+				return nil
+			},
+			ModelCallWarner: func(id string, options *stream.CallOptions) []stream.Warning {
+				if !supportsReasoningEffort(id) && options.Reasoning != "" && options.Reasoning != "provider-default" {
+					return []stream.Warning{stream.UnsupportedWarning("reasoning", "this model does not support reasoning configuration")}
+				}
+				return nil
+			},
 		}),
 	}
+}
+
+func supportsReasoningEffort(id string) bool {
+	return id == "mistral-small-latest" || id == "mistral-small-2603" || id == "mistral-medium-3" || id == "mistral-medium-3.5"
 }
 
 // mistralRequestModifier applies Mistral-specific options to the request.
@@ -81,12 +105,6 @@ func mistralCallWarner(options *stream.CallOptions) []stream.Warning {
 	if options.TopK != nil {
 		warnings = append(warnings, stream.UnsupportedWarning("topK", ""))
 	}
-	if options.FrequencyPenalty != nil {
-		warnings = append(warnings, stream.UnsupportedWarning("frequencyPenalty", ""))
-	}
-	if options.PresencePenalty != nil {
-		warnings = append(warnings, stream.UnsupportedWarning("presencePenalty", ""))
-	}
 	return warnings
 }
 
@@ -118,14 +136,14 @@ func (p *Provider) EmbeddingModel(modelID string) model.EmbeddingModel {
 	}
 }
 
-// SpeechModel returns nil as Mistral doesn't support speech generation.
+// SpeechModel returns a speech generation model.
 func (p *Provider) SpeechModel(modelID string) model.SpeechModel {
-	return nil
+	return &MistralSpeechModel{id: modelID, provider: p}
 }
 
-// TranscriptionModel returns nil as Mistral doesn't support transcription.
+// TranscriptionModel returns an audio transcription model.
 func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel {
-	return nil
+	return &MistralTranscriptionModel{id: modelID, provider: p}
 }
 
 // RerankingModel returns nil as Mistral doesn't support reranking.

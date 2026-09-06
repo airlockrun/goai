@@ -101,10 +101,11 @@ func (p *FilePart) UnmarshalJSON(data []byte) error {
 
 // ToolCallPart represents a tool invocation by the assistant.
 type ToolCallPart struct {
-	ID              string          `json:"toolCallId"`
-	Name            string          `json:"toolName"`
-	Input           json.RawMessage `json:"args"`
-	ProviderOptions map[string]any  `json:"providerOptions,omitempty"`
+	ProviderExecuted bool            `json:"providerExecuted,omitempty"`
+	ID               string          `json:"toolCallId"`
+	Name             string          `json:"toolName"`
+	Input            json.RawMessage `json:"args"`
+	ProviderOptions  map[string]any  `json:"providerOptions,omitempty"`
 }
 
 func (ToolCallPart) partType() ContentType { return ContentTypeToolCall }

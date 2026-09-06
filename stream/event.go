@@ -134,8 +134,9 @@ func (TextEndEvent) eventType() EventType { return EventTextEnd }
 
 // ToolInputStartEvent signals the start of tool input streaming.
 type ToolInputStartEvent struct {
-	ID       string `json:"id"`
-	ToolName string `json:"toolName"`
+	ProviderExecuted bool   `json:"providerExecuted,omitempty"`
+	ID               string `json:"id"`
+	ToolName         string `json:"toolName"`
 }
 
 func (ToolInputStartEvent) eventType() EventType { return EventToolInputStart }
@@ -157,6 +158,7 @@ func (ToolInputEndEvent) eventType() EventType { return EventToolInputEnd }
 
 // ToolCallEvent signals a complete tool call ready for execution.
 type ToolCallEvent struct {
+	ProviderExecuted bool            `json:"providerExecuted,omitempty"`
 	ToolCallID       string          `json:"toolCallId"`
 	ToolName         string          `json:"toolName"`
 	Input            json.RawMessage `json:"input"`
@@ -173,39 +175,73 @@ func (ToolCallEvent) eventType() EventType { return EventToolCall }
 // render a curated activity log — e.g. airlock's build log — use these to
 // summarize a call without dumping the full model-facing Output.
 type ToolResultEvent struct {
-	ToolCallID string                   `json:"toolCallId"`
-	ToolName   string                   `json:"toolName"`
-	Input      json.RawMessage          `json:"input,omitempty"`
-	Output     message.ToolResultOutput `json:"output"`
-	Title      string                   `json:"title,omitempty"`
-	Metadata   map[string]any           `json:"metadata,omitempty"`
+	ProviderExecuted bool                     `json:"providerExecuted,omitempty"`
+	ProviderMetadata map[string]any           `json:"providerMetadata,omitempty"`
+	ToolCallID       string                   `json:"toolCallId"`
+	ToolName         string                   `json:"toolName"`
+	Input            json.RawMessage          `json:"input,omitempty"`
+	Output           message.ToolResultOutput `json:"output"`
+	Title            string                   `json:"title,omitempty"`
+	Metadata         map[string]any           `json:"metadata,omitempty"`
 }
 
 func (ToolResultEvent) eventType() EventType { return EventToolResult }
 
 func (e ToolResultEvent) MarshalJSON() ([]byte, error) {
-	return marshalToolEvent(e.ToolCallID, e.ToolName, e.Input, e.Output, e.Title, e.Metadata)
+	type alias ToolResultEvent
+	out, err := message.MarshalOutput(e.Output)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(struct {
+		alias
+		Output json.RawMessage `json:"output"`
+	}{alias(e), out})
 }
 func (e *ToolResultEvent) UnmarshalJSON(b []byte) error {
-	return unmarshalToolEvent(b, &e.ToolCallID, &e.ToolName, &e.Input, &e.Output, &e.Title, &e.Metadata)
+	type alias ToolResultEvent
+	var a struct {
+		alias
+		Output json.RawMessage `json:"output"`
+	}
+	if err := json.Unmarshal(b, &a); err != nil {
+		return err
+	}
+	*e = ToolResultEvent(a.alias)
+	if len(a.Output) == 0 || string(a.Output) == "null" {
+		return nil
+	}
+	output, err := message.UnmarshalOutput(a.Output)
+	if err != nil {
+		return err
+	}
+	e.Output = output
+	return nil
 }
 
 // ToolErrorEvent signals a failed tool execution. Output carries the
 // error variant (error-text | error-json).
 type ToolErrorEvent struct {
-	ToolCallID string                   `json:"toolCallId"`
-	ToolName   string                   `json:"toolName"`
-	Input      json.RawMessage          `json:"input,omitempty"`
-	Output     message.ToolResultOutput `json:"output"`
+	ProviderExecuted bool                     `json:"providerExecuted,omitempty"`
+	ProviderMetadata map[string]any           `json:"providerMetadata,omitempty"`
+	ToolCallID       string                   `json:"toolCallId"`
+	ToolName         string                   `json:"toolName"`
+	Input            json.RawMessage          `json:"input,omitempty"`
+	Output           message.ToolResultOutput `json:"output"`
 }
 
 func (ToolErrorEvent) eventType() EventType { return EventToolError }
 
 func (e ToolErrorEvent) MarshalJSON() ([]byte, error) {
-	return marshalToolEvent(e.ToolCallID, e.ToolName, e.Input, e.Output, "", nil)
+	return json.Marshal(ToolResultEvent{ToolCallID: e.ToolCallID, ToolName: e.ToolName, Input: e.Input, Output: e.Output, ProviderExecuted: e.ProviderExecuted, ProviderMetadata: e.ProviderMetadata})
 }
 func (e *ToolErrorEvent) UnmarshalJSON(b []byte) error {
-	return unmarshalToolEvent(b, &e.ToolCallID, &e.ToolName, &e.Input, &e.Output, nil, nil)
+	var result ToolResultEvent
+	if err := json.Unmarshal(b, &result); err != nil {
+		return err
+	}
+	*e = ToolErrorEvent{ToolCallID: result.ToolCallID, ToolName: result.ToolName, Input: result.Input, Output: result.Output, ProviderExecuted: result.ProviderExecuted, ProviderMetadata: result.ProviderMetadata}
+	return nil
 }
 
 // ErrorText returns the error message text for this event.
@@ -248,61 +284,6 @@ func ToolOutcomeEvent(toolCallID, toolName string, input json.RawMessage, out me
 			Title: title, Metadata: metadata,
 		}}
 	}
-}
-
-// marshalToolEvent serializes a tool result/error event with the Output
-// union carrying its discriminated "type". title/metadata are the
-// presentation hints carried by ToolResultEvent; the error event passes
-// "", nil and the omitempty tags keep its wire shape unchanged.
-func marshalToolEvent(id, name string, input json.RawMessage, out message.ToolResultOutput, title string, metadata map[string]any) ([]byte, error) {
-	raw, err := message.MarshalOutput(out)
-	if err != nil {
-		return nil, err
-	}
-	return json.Marshal(struct {
-		ToolCallID string          `json:"toolCallId"`
-		ToolName   string          `json:"toolName"`
-		Input      json.RawMessage `json:"input,omitempty"`
-		Output     json.RawMessage `json:"output"`
-		Title      string          `json:"title,omitempty"`
-		Metadata   map[string]any  `json:"metadata,omitempty"`
-	}{id, name, input, raw, title, metadata})
-}
-
-// unmarshalToolEvent is the inverse of marshalToolEvent. title/metadata are
-// nil for the error event (which has no such fields); pass nil pointers to
-// skip them.
-func unmarshalToolEvent(b []byte, id, name *string, input *json.RawMessage, out *message.ToolResultOutput, title *string, metadata *map[string]any) error {
-	var a struct {
-		ToolCallID string          `json:"toolCallId"`
-		ToolName   string          `json:"toolName"`
-		Input      json.RawMessage `json:"input,omitempty"`
-		Output     json.RawMessage `json:"output"`
-		Title      string          `json:"title,omitempty"`
-		Metadata   map[string]any  `json:"metadata,omitempty"`
-	}
-	if err := json.Unmarshal(b, &a); err != nil {
-		return err
-	}
-	*id = a.ToolCallID
-	*name = a.ToolName
-	*input = a.Input
-	if title != nil {
-		*title = a.Title
-	}
-	if metadata != nil {
-		*metadata = a.Metadata
-	}
-	if len(a.Output) == 0 || string(a.Output) == "null" {
-		*out = nil
-		return nil
-	}
-	o, err := message.UnmarshalOutput(a.Output)
-	if err != nil {
-		return err
-	}
-	*out = o
-	return nil
 }
 
 // ReasoningStartEvent signals the start of reasoning/thinking.
@@ -366,6 +347,19 @@ type Usage struct {
 	Raw          map[string]any `json:"raw,omitempty"`
 }
 
+// Normalized clamps reported token counts to zero without changing Raw or the
+// provider's pointers. Unreported counts remain nil.
+func (u Usage) Normalized() Usage {
+	u.InputTokens.Total = addIntPtrs(u.InputTokens.Total, nil)
+	u.InputTokens.NoCache = addIntPtrs(u.InputTokens.NoCache, nil)
+	u.InputTokens.CacheRead = addIntPtrs(u.InputTokens.CacheRead, nil)
+	u.InputTokens.CacheWrite = addIntPtrs(u.InputTokens.CacheWrite, nil)
+	u.OutputTokens.Total = addIntPtrs(u.OutputTokens.Total, nil)
+	u.OutputTokens.Text = addIntPtrs(u.OutputTokens.Text, nil)
+	u.OutputTokens.Reasoning = addIntPtrs(u.OutputTokens.Reasoning, nil)
+	return u
+}
+
 // InputTokens holds the prompt-side token breakdown.
 type InputTokens struct {
 	// Total is the total number of input (prompt) tokens.
@@ -421,7 +415,11 @@ func (u Usage) OutputTotal() int {
 // GrandTotal returns InputTotal + OutputTotal for callers that want a
 // single aggregate number (replaces the old TotalTokens field).
 func (u Usage) GrandTotal() int {
-	return u.InputTotal() + u.OutputTotal()
+	total := addIntPtrs(u.InputTokens.Total, u.OutputTokens.Total)
+	if total == nil {
+		return 0
+	}
+	return *total
 }
 
 // Add accumulates another Usage into the receiver. Nil fields on either
@@ -429,6 +427,8 @@ func (u Usage) GrandTotal() int {
 // field is nil only when both sides had nil. This mirrors the common
 // multi-step aggregation pattern in goai.GenerateText / StreamText.
 func (u *Usage) Add(other Usage) {
+	// Raw belongs to an individual provider response, never an aggregate.
+	u.Raw = nil
 	u.InputTokens.Total = addIntPtrs(u.InputTokens.Total, other.InputTokens.Total)
 	u.InputTokens.NoCache = addIntPtrs(u.InputTokens.NoCache, other.InputTokens.NoCache)
 	u.InputTokens.CacheRead = addIntPtrs(u.InputTokens.CacheRead, other.InputTokens.CacheRead)
@@ -444,13 +444,17 @@ func addIntPtrs(a, b *int) *int {
 	}
 	av := 0
 	if a != nil {
-		av = *a
+		av = max(0, *a)
 	}
 	bv := 0
 	if b != nil {
-		bv = *b
+		bv = max(0, *b)
 	}
-	sum := av + bv
+	maxInt := int(^uint(0) >> 1)
+	sum := maxInt
+	if bv <= maxInt-av {
+		sum = av + bv
+	}
 	return &sum
 }
 

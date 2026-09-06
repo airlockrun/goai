@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	goaierrors "github.com/airlockrun/goai/errors"
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/stream"
 	"github.com/airlockrun/goai/tool"
@@ -38,6 +39,160 @@ func createTestProvider(serverURL string) *Provider {
 	})
 }
 
+func TestAnthropicStreamValidation(t *testing.T) {
+	start := `{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":1}}}`
+	for _, tc := range []struct {
+		name      string
+		chunks    []string
+		retryable bool
+	}{
+		{"malformed", []string{start, `{"type":`}, false},
+		{"missing type", []string{start, `{}`, `{"type":"message_stop"}`}, false},
+		{"incomplete", []string{start}, false},
+		{"overlapping generation", []string{start, start}, false},
+		{"second generation", []string{start, `{"type":"message_stop"}`, start}, false},
+		{"unclosed block", []string{start, `{"type":"content_block_start","index":0,"content_block":{"type":"text"}}`, `{"type":"message_stop"}`}, false},
+		{"orphan delta", []string{start, `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"bad"}}`}, false},
+		{"overload", []string{start, `{"type":"error","error":{"type":"overloaded_error","message":"busy"}}`}, true},
+		{"invalid request", []string{`{"type":"error","error":{"type":"invalid_request_error","message":"bad"}}`}, false},
+		{"invalid tool JSON", []string{start, `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"lookup","input":{}}}`, `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"[]"}}`, `{"type":"content_block_stop","index":0}`}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wire := ""
+			for _, chunk := range tc.chunks {
+				wire += "data:" + chunk + "\n\n"
+			}
+			events := make(chan stream.Event, 30)
+			ProcessStream(context.Background(), strings.NewReader(wire), nil, events, false, false)
+			close(events)
+			var got error
+			for e := range events {
+				if d, ok := e.Data.(stream.ErrorEvent); ok {
+					got = d.Error
+				}
+				if e.Type == stream.EventFinish || e.Type == stream.EventFinishStep {
+					t.Fatal("false finish")
+				}
+			}
+			var apiErr *goaierrors.APICallError
+			if !errors.As(got, &apiErr) || apiErr.IsRetryable != tc.retryable {
+				t.Fatalf("%v", got)
+			}
+		})
+	}
+}
+
+func TestAnthropicSSEMultiline(t *testing.T) {
+	input := "event: message_start\r\ndata: {\r\ndata: \"type\":\"message_start\",\"message\":{\"id\":\"msg_1\"}}\r\n\r\n" +
+		"data: {\"type\":\"message_stop\"}\n\n"
+	events := make(chan stream.Event, 10)
+	ProcessStream(context.Background(), strings.NewReader(input), nil, events, false, false)
+	close(events)
+	finished := false
+	for e := range events {
+		if d, ok := e.Data.(stream.ErrorEvent); ok {
+			t.Fatal(d.Error)
+		}
+		if e.Type == stream.EventFinish {
+			finished = true
+		}
+	}
+	if !finished {
+		t.Fatal("missing finish")
+	}
+}
+
+func TestAnthropicToolReplayObjects(t *testing.T) {
+	for _, input := range []string{"", `null`, `[]`, `"text"`, `{bad}`, `{"query":"Go"}`} {
+		t.Run(input, func(t *testing.T) {
+			parts := convertAssistantContent(message.Content{Parts: []message.Part{message.ToolCallPart{ID: "t1", Name: "lookup", Input: json.RawMessage(input)}}}, nil)
+			var object map[string]any
+			if err := json.Unmarshal(parts[0].Input, &object); err != nil || object == nil {
+				t.Fatalf("%s", parts[0].Input)
+			}
+			if input == `{"query":"Go"}` && object["query"] != "Go" {
+				t.Fatal(object)
+			}
+		})
+	}
+}
+
+func TestAnthropicHostedToolRoundtrip(t *testing.T) {
+	for _, kind := range []string{"server_tool_use", "mcp_tool_use"} {
+		t.Run(kind, func(t *testing.T) {
+			resultType := "web_search_tool_result"
+			if kind == "mcp_tool_use" {
+				resultType = "mcp_tool_result"
+			}
+			wire := []string{
+				`{"type":"message_start","message":{"id":"msg_1"}}`,
+				`{"type":"content_block_start","index":0,"content_block":{"type":"` + kind + `","id":"srv_1","name":"web_search","server_name":"search","input":{"query":"Go"}}}`,
+				`{"type":"content_block_stop","index":0}`,
+				`{"type":"content_block_start","index":1,"content_block":{"type":"` + resultType + `","tool_use_id":"srv_1","content":[{"type":"web_search_result","url":"https://go.dev","title":"Go","encrypted_content":"opaque"}]}}`,
+				`{"type":"content_block_stop","index":1}`,
+				`{"type":"content_block_start","index":2,"content_block":{"type":"text","text":"Search complete"}}`,
+				`{"type":"content_block_stop","index":2}`,
+				`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":10}}`,
+				`{"type":"message_stop"}`,
+			}
+			sse := ""
+			for _, chunk := range wire {
+				sse += "data: " + chunk + "\n\n"
+			}
+			events := make(chan stream.Event, 30)
+			ProcessStream(context.Background(), strings.NewReader(sse), nil, events, false, false)
+			close(events)
+			var parts []message.Part
+			for e := range events {
+				switch d := e.Data.(type) {
+				case stream.ErrorEvent:
+					t.Fatal(d.Error)
+				case stream.TextDeltaEvent:
+					parts = append(parts, message.TextPart{Text: d.Text})
+				case stream.ToolCallEvent:
+					if !d.ProviderExecuted || string(d.Input) != `{"query":"Go"}` {
+						t.Fatalf("%+v", d)
+					}
+					parts = append(parts, message.ToolCallPart{ID: d.ToolCallID, Name: d.ToolName, Input: d.Input, ProviderExecuted: d.ProviderExecuted, ProviderOptions: d.ProviderMetadata})
+				case stream.ToolResultEvent:
+					if !d.ProviderExecuted {
+						t.Fatal("not provider executed")
+					}
+					parts = append(parts, message.ToolResultPart{ToolCallID: d.ToolCallID, ToolName: d.ToolName, Output: d.Output, ProviderExecuted: true, ProviderOptions: d.ProviderMetadata})
+				}
+			}
+			if len(parts) != 3 {
+				t.Fatalf("parts: %v", parts)
+			}
+			msg := message.NewAssistantMessageWithParts(parts...)
+			// Persist and reload to exercise raw metadata after generic JSON decoding.
+			persisted, err := json.Marshal(msg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(persisted, &msg); err != nil {
+				t.Fatal(err)
+			}
+			body, _, _, err := BuildRequestBody(Config{}, "claude-sonnet-5", &stream.CallOptions{Messages: []message.Message{message.NewUserMessage("search"), msg}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var req struct {
+				Messages []struct {
+					Content []map[string]any `json:"content"`
+				} `json:"messages"`
+			}
+			if err := json.Unmarshal(body, &req); err != nil {
+				t.Fatal(err)
+			}
+			content := req.Messages[1].Content
+			if len(content) != 3 || content[0]["type"] != kind || content[1]["type"] != resultType || content[2]["text"] != "Search complete" || !strings.Contains(string(body), "opaque") {
+				t.Fatalf("%s", body)
+			}
+		})
+	}
+}
+
 func TestAnthropicModel_ProcessStreamReadError(t *testing.T) {
 	readErr := errors.New("connection reset")
 	events := make(chan stream.Event, 10)
@@ -58,8 +213,13 @@ func TestAnthropicModel_ProcessStreamReadError(t *testing.T) {
 		switch event.Type {
 		case stream.EventError:
 			sawError = true
-			if !errors.Is(event.Data.(stream.ErrorEvent).Error, readErr) {
-				t.Fatalf("expected read error, got %v", event.Data.(stream.ErrorEvent).Error)
+			eventErr := event.Data.(stream.ErrorEvent).Error
+			if !errors.Is(eventErr, readErr) {
+				t.Fatalf("expected read error, got %v", eventErr)
+			}
+			var apiErr *goaierrors.APICallError
+			if !errors.As(eventErr, &apiErr) || !apiErr.IsRetryable {
+				t.Fatalf("error = %v, want retryable APICallError", eventErr)
 			}
 		case stream.EventFinish, stream.EventFinishStep:
 			sawFinish = true
@@ -258,8 +418,8 @@ func TestAnthropicModel_RequestBody(t *testing.T) {
 		if receivedBody["temperature"] != 0.5 {
 			t.Errorf("expected temperature 0.5, got %v", receivedBody["temperature"])
 		}
-		if receivedBody["top_p"] != 0.9 {
-			t.Errorf("expected top_p 0.9, got %v", receivedBody["top_p"])
+		if receivedBody["top_p"] != nil {
+			t.Errorf("expected top_p omitted when temperature is set, got %v", receivedBody["top_p"])
 		}
 		if receivedBody["top_k"] != float64(10) {
 			t.Errorf("expected top_k 10, got %v", receivedBody["top_k"])

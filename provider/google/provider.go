@@ -70,14 +70,14 @@ func (p *Provider) EmbeddingModel(modelID string) model.EmbeddingModel {
 	}
 }
 
-// SpeechModel returns nil as Google AI doesn't support speech generation.
+// SpeechModel returns a Gemini text-to-speech model.
 func (p *Provider) SpeechModel(modelID string) model.SpeechModel {
-	return nil
+	return &GoogleSpeechModel{id: modelID, provider: p}
 }
 
-// TranscriptionModel returns nil as Google AI doesn't support transcription.
+// TranscriptionModel returns a unary Gemini transcription model.
 func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel {
-	return nil
+	return &GoogleTranscriptionModel{id: modelID, provider: p}
 }
 
 // RerankingModel returns nil as Google AI doesn't support reranking.

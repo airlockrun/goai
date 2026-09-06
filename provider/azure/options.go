@@ -1,5 +1,10 @@
 package azure
 
+import "github.com/airlockrun/goai/provider/openai"
+
+// ResponsesOptions configures the default Responses API model.
+type ResponsesOptions = openai.ResponsesOptions
+
 // ChatOptions contains provider-specific options for the Azure OpenAI API.
 // Azure OpenAI uses the same options as OpenAI.
 // See: ai-sdk/packages/openai/src/responses/openai-responses-options.ts

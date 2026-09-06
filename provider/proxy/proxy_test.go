@@ -15,6 +15,49 @@ import (
 	"github.com/airlockrun/goai/stream"
 )
 
+type failingReadCloser struct {
+	err error
+}
+
+func (r *failingReadCloser) Read([]byte) (int, error) { return 0, r.err }
+func (r *failingReadCloser) Close() error             { return nil }
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestStreamReadErrorIsRetryable(t *testing.T) {
+	readErr := errors.New("connection reset")
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       &failingReadCloser{err: readErr},
+			Request:    req,
+		}, nil
+	})}
+
+	events, err := Model("", Options{BaseURL: "http://proxy.test", Client: client}).Stream(context.Background(), &stream.CallOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var eventErr error
+	for event := range events {
+		if event.Type == stream.EventError {
+			eventErr = event.Data.(stream.ErrorEvent).Error
+		}
+		if event.Type == stream.EventFinish || event.Type == stream.EventFinishStep {
+			t.Fatal("unexpected finish after stream read error")
+		}
+	}
+	var apiErr *goaierrors.APICallError
+	if !errors.Is(eventErr, readErr) || !errors.As(eventErr, &apiErr) || !apiErr.IsRetryable {
+		t.Fatalf("error = %v, want retryable APICallError wrapping read error", eventErr)
+	}
+}
+
 func TestStreamRetriesRetryableSetupStatus(t *testing.T) {
 	var attempts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

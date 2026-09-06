@@ -10,12 +10,44 @@ import (
 	"testing"
 
 	"github.com/airlockrun/goai/message"
+	"github.com/airlockrun/goai/provider/anthropic"
 	"github.com/airlockrun/goai/stream"
 	"github.com/airlockrun/goai/tool"
 )
 
 // Translated from ai-sdk/packages/google-vertex/src/anthropic/
 // google-vertex-anthropic-provider.test.ts.
+
+func TestCurrentModelsAndEscapedURL(t *testing.T) {
+	p := New(Options{Project: "project/other", Location: "global"})
+	if !strings.Contains(p.baseURL(), "project%2Fother") {
+		t.Fatal(p.baseURL())
+	}
+	if got := p.config("claude-sonnet-5/test?x=1").BuildRequestURL("https://example.test/models", true); got != "https://example.test/models/claude-sonnet-5%2Ftest%3Fx=1:streamRawPredict" {
+		t.Fatal(got)
+	}
+	for _, id := range []string{"claude-sonnet-5", "claude-opus-5", "claude-fable-5-1"} {
+		t.Run(id, func(t *testing.T) {
+			temp := 0.5
+			body, _, _, err := anthropic.BuildRequestBody(p.config(id), id, &stream.CallOptions{Temperature: &temp, ResponseFormat: &stream.ResponseFormat{Type: "json", Schema: json.RawMessage(`{"type":"object"}`)}, ProviderOptions: map[string]any{"structuredOutputMode": "outputFormat"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var req map[string]any
+			if err := json.Unmarshal(body, &req); err != nil {
+				t.Fatal(err)
+			}
+			if req["max_tokens"] != float64(128000) || req["temperature"] != nil || req["output_config"] != nil || req["model"] != nil || req["anthropic_version"] != "vertex-2023-10-16" {
+				t.Fatalf("%s", body)
+			}
+			for _, raw := range req["tools"].([]any) {
+				if raw.(map[string]any)["strict"] != nil {
+					t.Fatalf("%s", body)
+				}
+			}
+		})
+	}
+}
 
 func TestProvider_ID(t *testing.T) {
 	p := New(Options{Project: "test-project", Location: "us-east5"})

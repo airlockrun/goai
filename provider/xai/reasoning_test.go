@@ -2,12 +2,45 @@ package xai
 
 import (
 	"context"
+	"encoding/json"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/stream"
 )
+
+func TestStableReasoningPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		id, effort, want string
+		warning          bool
+	}{
+		{"grok-4.5", "xhigh", "high", false}, {"grok-4.6", "xhigh", "xhigh", false}, {"grok-4.20-reasoning", "high", "", true}, {"grok-4.20-0309-non-reasoning", "none", "", true}, {"grok-4.20-multi-agent", "minimal", "low", false}, {"grok-4.6", "provider-default", "", false},
+	} {
+		t.Run(tc.id+tc.effort, func(t *testing.T) {
+			m := New(Options{}).Responses(tc.id).(*XaiResponsesModel)
+			data, warnings, err := m.buildRequest(&stream.CallOptions{Reasoning: tc.effort})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var body struct {
+				Reasoning *struct {
+					Effort string `json:"effort"`
+				} `json:"reasoning"`
+			}
+			if err := json.Unmarshal(data, &body); err != nil {
+				t.Fatal(err)
+			}
+			got := ""
+			if body.Reasoning != nil {
+				got = body.Reasoning.Effort
+			}
+			if got != tc.want || (len(warnings) > 0) != tc.warning {
+				t.Fatalf("effort=%q warnings=%v", got, warnings)
+			}
+		})
+	}
+}
 
 // CallOptions.Reasoning lowers into reasoning.effort on xAI Responses,
 // matching the v4 reasoning enum. Provider-specific opts.ReasoningEffort

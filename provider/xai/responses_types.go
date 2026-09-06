@@ -254,15 +254,26 @@ type responsesItem struct {
 }
 
 type responsesUsage struct {
-	InputTokens        int `json:"input_tokens"`
-	OutputTokens       int `json:"output_tokens"`
-	TotalTokens        int `json:"total_tokens,omitempty"`
+	Raw                map[string]any `json:"-"`
+	InputTokens        int            `json:"input_tokens"`
+	OutputTokens       int            `json:"output_tokens"`
+	TotalTokens        int            `json:"total_tokens,omitempty"`
 	InputTokensDetails *struct {
 		CachedTokens int `json:"cached_tokens,omitempty"`
 	} `json:"input_tokens_details,omitempty"`
 	OutputTokensDetails *struct {
 		ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 	} `json:"output_tokens_details,omitempty"`
+}
+
+func (u *responsesUsage) UnmarshalJSON(data []byte) error {
+	type wireUsage responsesUsage
+	var value wireUsage
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*u = responsesUsage(value)
+	return json.Unmarshal(data, &u.Raw)
 }
 
 type responsesError struct {

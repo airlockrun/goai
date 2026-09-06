@@ -13,17 +13,20 @@ import (
 // Request types
 
 type chatRequest struct {
-	Model          string          `json:"model"`
-	Messages       []any           `json:"messages"`
-	Stream         bool            `json:"stream"`
-	Temperature    *float64        `json:"temperature,omitempty"`
-	TopP           *float64        `json:"top_p,omitempty"`
-	MaxTokens      *int            `json:"max_tokens,omitempty"`
-	Stop           []string        `json:"stop,omitempty"`
-	Tools          []chatTool      `json:"tools,omitempty"`
-	ToolChoice     any             `json:"tool_choice,omitempty"`
-	ResponseFormat *responseFormat `json:"response_format,omitempty"`
-	StreamOptions  *streamOptions  `json:"stream_options,omitempty"`
+	Model            string          `json:"model"`
+	Messages         []any           `json:"messages"`
+	Stream           bool            `json:"stream"`
+	Temperature      *float64        `json:"temperature,omitempty"`
+	TopP             *float64        `json:"top_p,omitempty"`
+	FrequencyPenalty *float64        `json:"frequency_penalty,omitempty"`
+	PresencePenalty  *float64        `json:"presence_penalty,omitempty"`
+	MaxTokens        *int            `json:"max_tokens,omitempty"`
+	Stop             []string        `json:"stop,omitempty"`
+	Tools            []chatTool      `json:"tools,omitempty"`
+	ToolChoice       any             `json:"tool_choice,omitempty"`
+	ResponseFormat   *responseFormat `json:"response_format,omitempty"`
+	StreamOptions    *streamOptions  `json:"stream_options,omitempty"`
+	ReasoningEffort  string          `json:"reasoning_effort,omitempty"`
 }
 
 // responseFormat mirrors OpenAI chat response_format.
@@ -57,6 +60,7 @@ type chatContentPart struct {
 	Type     string        `json:"type"`
 	Text     string        `json:"text,omitempty"`
 	ImageURL *chatImageURL `json:"image_url,omitempty"`
+	VideoURL *chatImageURL `json:"video_url,omitempty"`
 }
 
 type chatImageURL struct {
@@ -95,6 +99,7 @@ type chatCompletionChunk struct {
 	Model    string            `json:"model"`
 	Choices  []chatChunkChoice `json:"choices"`
 	UsageRaw json.RawMessage   `json:"usage,omitempty"`
+	Error    json.RawMessage   `json:"error,omitempty"`
 }
 
 type chatChunkChoice struct {
@@ -105,14 +110,60 @@ type chatChunkChoice struct {
 
 type chatChunkDelta struct {
 	Role             string              `json:"role,omitempty"`
-	Content          string              `json:"content,omitempty"`
+	Content          chatContent         `json:"content,omitempty"`
 	ReasoningContent string              `json:"reasoning_content,omitempty"`
 	Reasoning        string              `json:"reasoning,omitempty"`
 	ToolCalls        []chatChunkToolCall `json:"tool_calls,omitempty"`
 }
 
+type chatContent []struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+func (c *chatContent) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		return nil
+	}
+	var text string
+	if json.Unmarshal(data, &text) == nil {
+		*c = chatContent{{Type: "text", Text: text}}
+		return nil
+	}
+	var parts []struct {
+		Type     string `json:"type"`
+		Text     any    `json:"text"`
+		Thinking any    `json:"thinking"`
+	}
+	if err := json.Unmarshal(data, &parts); err != nil {
+		return err
+	}
+	for _, p := range parts {
+		switch p.Type {
+		case "text":
+			if text, ok := p.Text.(string); ok {
+				*c = append(*c, chatContent{{Type: "text", Text: text}}...)
+			}
+		case "thinking":
+			var text strings.Builder
+			thinking, _ := p.Thinking.([]any)
+			for _, part := range thinking {
+				item, ok := part.(map[string]any)
+				if !ok || item["type"] != "text" {
+					continue
+				}
+				if value, ok := item["text"].(string); ok {
+					text.WriteString(value)
+				}
+			}
+			*c = append(*c, chatContent{{Type: "reasoning", Text: text.String()}}...)
+		}
+	}
+	return nil
+}
+
 type chatChunkToolCall struct {
-	Index    int              `json:"index"`
+	Index    *int             `json:"index"`
 	ID       string           `json:"id,omitempty"`
 	Type     string           `json:"type,omitempty"`
 	Function chatFunctionCall `json:"function"`
@@ -149,6 +200,8 @@ type completionTokensDetails struct {
 // Mirrors ai-sdk's convert-openai-compatible-chat-usage.ts (plus the Mistral
 // #14889 and DeepSeek prompt_cache_hit_tokens variants).
 func usageFromChat(u chatUsage) stream.Usage {
+	u.PromptTokens = max(0, u.PromptTokens)
+	u.CompletionTokens = max(0, u.CompletionTokens)
 	cached := u.NumCachedTokens
 	if cached == 0 && u.PromptTokensDetails != nil {
 		cached = u.PromptTokensDetails.CachedTokens
@@ -163,6 +216,8 @@ func usageFromChat(u chatUsage) stream.Usage {
 	if u.CompletionTokensDetails != nil {
 		reasoning = u.CompletionTokensDetails.ReasoningTokens
 	}
+	cached = max(0, cached)
+	reasoning = max(0, reasoning)
 
 	out := stream.Usage{
 		InputTokens:  stream.InputTokens{Total: stream.IntPtr(u.PromptTokens)},
@@ -170,13 +225,13 @@ func usageFromChat(u chatUsage) stream.Usage {
 	}
 	if cached > 0 {
 		out.InputTokens.CacheRead = stream.IntPtr(cached)
-		out.InputTokens.NoCache = stream.IntPtr(u.PromptTokens - cached)
+		out.InputTokens.NoCache = stream.IntPtr(max(0, u.PromptTokens-cached))
 	} else {
 		out.InputTokens.NoCache = stream.IntPtr(u.PromptTokens)
 	}
 	if reasoning > 0 {
 		out.OutputTokens.Reasoning = stream.IntPtr(reasoning)
-		out.OutputTokens.Text = stream.IntPtr(u.CompletionTokens - reasoning)
+		out.OutputTokens.Text = stream.IntPtr(max(0, u.CompletionTokens-reasoning))
 	} else {
 		out.OutputTokens.Text = stream.IntPtr(u.CompletionTokens)
 	}
@@ -184,6 +239,17 @@ func usageFromChat(u chatUsage) stream.Usage {
 }
 
 // Conversion functions
+
+// ConvertMessages exposes the compatible wire messages for provider-specific conversion.
+func ConvertMessages(messages []message.Message) ([]any, error) {
+	data, err := json.Marshal(convertToMessages(messages))
+	if err != nil {
+		return nil, err
+	}
+	var out []any
+	err = json.Unmarshal(data, &out)
+	return out, err
+}
 
 func convertToMessages(messages []message.Message) []chatMessage {
 	result := make([]chatMessage, 0, len(messages))
@@ -303,12 +369,13 @@ func getTextFromContent(content message.Content) string {
 	if content.Text != "" {
 		return content.Text
 	}
+	var text strings.Builder
 	for _, part := range content.Parts {
 		if tp, ok := part.(message.TextPart); ok {
-			return tp.Text
+			text.WriteString(tp.Text)
 		}
 	}
-	return ""
+	return text.String()
 }
 
 func convertUserContent(content message.Content) any {
@@ -344,7 +411,9 @@ func convertUserContent(content message.Content) any {
 		case message.FilePart:
 			switch d := p.Data.(type) {
 			case message.FileDataBytes:
-				if strings.HasPrefix(p.MimeType, "image/") {
+				if strings.HasPrefix(p.MimeType, "video/") {
+					result = append(result, chatContentPart{Type: "video_url", VideoURL: &chatImageURL{URL: "data:" + p.MimeType + ";base64," + d.Data}})
+				} else if strings.HasPrefix(p.MimeType, "image/") {
 					// d.Data is raw base64 — wrap it in a data: URL. Bare base64
 					// is not a valid URL and OpenAI-compatible providers reject
 					// it ("Expected a valid URL, but got a value with an invalid
@@ -368,7 +437,9 @@ func convertUserContent(content message.Content) any {
 				// Other byte media types are skipped: the openai-compatible
 				// chat surface only carries images and inline text.
 			case message.FileDataURL:
-				if strings.HasPrefix(p.MimeType, "image/") {
+				if strings.HasPrefix(p.MimeType, "video/") {
+					result = append(result, chatContentPart{Type: "video_url", VideoURL: &chatImageURL{URL: d.URL}})
+				} else if strings.HasPrefix(p.MimeType, "image/") {
 					result = append(result, chatContentPart{
 						Type: "image_url",
 						ImageURL: &chatImageURL{

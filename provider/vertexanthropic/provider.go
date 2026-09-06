@@ -6,6 +6,7 @@ package vertexanthropic
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/airlockrun/goai/model"
@@ -65,7 +66,7 @@ func (p *Provider) baseURL() string {
 	}
 	return fmt.Sprintf(
 		"https://%s/v1/projects/%s/locations/%s/publishers/anthropic/models",
-		vertexHost(p.opts.Location), p.opts.Project, p.opts.Location,
+		vertexHost(p.opts.Location), url.PathEscape(p.opts.Project), url.PathEscape(p.opts.Location),
 	)
 }
 
@@ -97,7 +98,7 @@ func (p *Provider) config(modelID string) anthropic.Config {
 			if streaming {
 				suffix = "streamRawPredict"
 			}
-			return baseURL + "/" + modelID + ":" + suffix
+			return baseURL + "/" + url.PathEscape(modelID) + ":" + suffix
 		},
 
 		TransformRequestBody: func(body map[string]any, betas []string) map[string]any {

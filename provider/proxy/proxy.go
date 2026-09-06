@@ -18,6 +18,7 @@ import (
 	"time"
 
 	goaierrors "github.com/airlockrun/goai/errors"
+	goaiinternal "github.com/airlockrun/goai/internal"
 	"github.com/airlockrun/goai/stream"
 )
 
@@ -172,7 +173,8 @@ func (m *proxyModel) doStream(ctx context.Context, options *stream.CallOptions, 
 	}
 
 	// Parse NDJSON response.
-	scanner := bufio.NewScanner(resp.Body)
+	streamReader := goaiinternal.NewStreamReader(resp.Body)
+	scanner := bufio.NewScanner(streamReader)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -185,8 +187,9 @@ func (m *proxyModel) doStream(ctx context.Context, options *stream.CallOptions, 
 		}
 		events <- event
 	}
-	if err := scanner.Err(); err != nil {
+	if err := streamReader.Err(ctx, scanner.Err()); err != nil {
 		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+		return
 	}
 }
 

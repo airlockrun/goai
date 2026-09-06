@@ -49,13 +49,14 @@ func convertXaiResponsesUsage(usage *responsesUsage) stream.Usage {
 	}
 
 	out := stream.Usage{
+		Raw: usage.Raw,
 		InputTokens: stream.InputTokens{
 			Total:   stream.IntPtr(inputTotal),
 			NoCache: stream.IntPtr(noCache),
 		},
 		OutputTokens: stream.OutputTokens{
 			Total: stream.IntPtr(usage.OutputTokens),
-			Text:  stream.IntPtr(usage.OutputTokens - reasoning),
+			Text:  stream.IntPtr(max(0, usage.OutputTokens-reasoning)),
 		},
 	}
 	if hasCacheRead {

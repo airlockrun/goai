@@ -88,10 +88,22 @@ type OutputParseContext struct {
 
 // ToolCall represents a tool call from the model.
 type ToolCall struct {
-	ID    string          `json:"id"`
-	Name  string          `json:"name"`
-	Input json.RawMessage `json:"input"`
+	// ProviderExecuted calls are replayed but never refined or executed locally.
+	ProviderExecuted bool            `json:"providerExecuted,omitempty"`
+	ProviderMetadata map[string]any  `json:"providerMetadata,omitempty"`
+	ID               string          `json:"id"`
+	Name             string          `json:"name"`
+	Input            json.RawMessage `json:"input"`
 }
+
+// ToolCallExecutionMode controls whether tool calls from one model response
+// execute one at a time or concurrently.
+type ToolCallExecutionMode string
+
+const (
+	ToolCallExecutionSync  ToolCallExecutionMode = "sync"
+	ToolCallExecutionAsync ToolCallExecutionMode = "async"
+)
 
 // StepResultData is the minimal interface for step results needed by callbacks.
 // The full StepResult type is defined in the main goai package.
@@ -229,6 +241,10 @@ type Input struct {
 	// Executor handles tool execution. If nil, tools are executed locally
 	// using their Execute functions. Set this to use remote execution.
 	Executor tool.Executor
+
+	// ToolCallExecutionMode controls execution of tool calls emitted in the
+	// same model response. Empty defaults to sync.
+	ToolCallExecutionMode ToolCallExecutionMode
 }
 
 // StartData is passed to the OnStart callback before the first step.

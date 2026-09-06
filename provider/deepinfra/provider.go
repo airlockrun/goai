@@ -65,7 +65,9 @@ func (p *Provider) EmbeddingModel(modelID string) model.EmbeddingModel {
 	}
 }
 
-func (p *Provider) ImageModel(modelID string) model.ImageModel                 { return nil }
+func (p *Provider) ImageModel(modelID string) model.ImageModel {
+	return &DeepInfraImageModel{id: modelID, provider: p}
+}
 func (p *Provider) SpeechModel(modelID string) model.SpeechModel               { return nil }
 func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel { return nil }
 func (p *Provider) RerankingModel(modelID string) model.RerankingModel         { return nil }

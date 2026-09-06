@@ -11,12 +11,175 @@ import (
 	"strings"
 	"testing"
 
+	goaierrors "github.com/airlockrun/goai/errors"
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/stream"
 	"github.com/airlockrun/goai/tool"
 )
 
 // Test fixtures for Responses API
+
+func TestResponsesModel_ReasoningSettings(t *testing.T) {
+	for _, tt := range []struct {
+		id, effort string
+		sampling   bool
+	}{
+		{"gpt-5.6", "high", false}, {"gpt-5.6", "none", true}, {"gpt-6", "none", true}, {"o12", "none", false},
+	} {
+		t.Run(tt.id+"/"+tt.effort, func(t *testing.T) {
+			v := 0.5
+			body, _, err := (&ResponsesModel{id: tt.id}).buildRequest(&stream.CallOptions{Messages: []message.Message{message.NewSystemMessage("rules")}, Temperature: &v, TopP: &v, Reasoning: tt.effort})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var req map[string]any
+			if err := json.Unmarshal(body, &req); err != nil {
+				t.Fatal(err)
+			}
+			if (req["temperature"] != nil) != tt.sampling || (req["top_p"] != nil) != tt.sampling {
+				t.Fatalf("sampling: %s", body)
+			}
+			if req["input"].([]any)[0].(map[string]any)["role"] != "developer" {
+				t.Fatalf("role: %s", body)
+			}
+		})
+	}
+}
+
+func TestResponsesModel_ContinuationOptions(t *testing.T) {
+	body, _, err := (&ResponsesModel{id: "gpt-4o"}).buildRequest(&stream.CallOptions{ProviderOptions: map[string]any{"previousResponseId": "resp_1", "instructions": "rules", "maxToolCalls": 3, "logprobs": 5}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatal(err)
+	}
+	if req["previous_response_id"] != "resp_1" || req["instructions"] != "rules" || req["max_tool_calls"] != float64(3) || req["top_logprobs"] != float64(5) {
+		t.Fatalf("options: %s", body)
+	}
+	if req["include"].([]any)[0] != "message.output_text.logprobs" {
+		t.Fatalf("include: %s", body)
+	}
+	_, _, err = (&ResponsesModel{}).buildRequest(&stream.CallOptions{ProviderOptions: map[string]any{"conversation": "c", "previousResponseId": "r"}})
+	if err == nil {
+		t.Fatal("expected conflicting continuation error")
+	}
+}
+
+func TestResponsesModel_IncompleteUsageAndMetadata(t *testing.T) {
+	body := "data: " + `{"type":"response.output_text.delta","delta":"partial","logprobs":[{"token":"partial","logprob":-0.1}]}` + "\n\ndata: " + `{"type":"response.incomplete","response":{"id":"resp_1","service_tier":"flex","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":10,"output_tokens":8,"input_tokens_details":{"cached_tokens":4},"output_tokens_details":{"reasoning_tokens":3}}}}` + "\n\n"
+	events := make(chan stream.Event, 20)
+	(&ResponsesModel{}).processStream(context.Background(), strings.NewReader(body), nil, events, false)
+	close(events)
+	var finished bool
+	for event := range events {
+		if event.Type == stream.EventError {
+			t.Fatal(event.Data)
+		}
+		if event.Type != stream.EventFinish {
+			continue
+		}
+		finished = true
+		finish := event.Data.(stream.FinishEvent)
+		if finish.FinishReason != stream.FinishReasonLength {
+			t.Fatalf("finish: %+v", finish)
+		}
+		if *finish.Usage.InputTokens.CacheRead != 4 || *finish.Usage.InputTokens.NoCache != 6 || *finish.Usage.OutputTokens.Reasoning != 3 || *finish.Usage.OutputTokens.Text != 5 {
+			t.Fatalf("usage: %+v", finish.Usage)
+		}
+		meta := finish.ProviderMetadata["openai"].(map[string]any)
+		if meta["responseId"] != "resp_1" || meta["serviceTier"] != "flex" || meta["rawFinishReason"] != "max_output_tokens" || len(meta["logprobs"].([]map[string]any)) != 1 {
+			t.Fatalf("metadata: %v", meta)
+		}
+	}
+	if !finished {
+		t.Fatal("missing finish")
+	}
+}
+
+func TestResponsesModel_ForceReasoningAndRoleOverride(t *testing.T) {
+	for _, mode := range []string{"", "system", "remove"} {
+		t.Run(mode, func(t *testing.T) {
+			temperature := 0.5
+			opts := &stream.CallOptions{Messages: []message.Message{message.NewSystemMessage("rules"), message.NewUserMessage("hi")}, Temperature: &temperature, ProviderOptions: map[string]any{"forceReasoning": true, "reasoningEffort": "high", "systemMessageMode": mode}}
+			for _, api := range []string{"chat", "responses"} {
+				var body []byte
+				var err error
+				if api == "chat" {
+					body, _, err = (&ChatModel{id: "custom"}).buildRequest(opts)
+				} else {
+					body, _, err = (&ResponsesModel{id: "custom"}).buildRequest(opts)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				var req map[string]any
+				if err := json.Unmarshal(body, &req); err != nil {
+					t.Fatal(err)
+				}
+				key := "input"
+				if api == "chat" {
+					key = "messages"
+				}
+				messages := req[key].([]any)
+				role := mode
+				if mode == "" {
+					role = "developer"
+				}
+				if mode == "remove" {
+					role = "user"
+				}
+				if req["temperature"] != nil || messages[0].(map[string]any)["role"] != role {
+					t.Fatalf("%s: %s", api, body)
+				}
+				if api == "responses" && !strings.Contains(string(body), "reasoning.encrypted_content") {
+					t.Fatal("missing encrypted reasoning include")
+				}
+			}
+		})
+	}
+}
+
+func TestResponsesModel_InvalidStreams(t *testing.T) {
+	for _, tt := range []struct {
+		name, body   string
+		parse, retry bool
+	}{
+		{"malformed", "data: {\n\n", true, false},
+		{"invalid shape", "data: {}\n\n", false, false},
+		{"empty", "", false, true},
+		{"truncated", "data:" + `{"type":"response.output_text.delta","delta":"partial"}` + "\n\n", false, true},
+		{"flat error", "data: " + `{"type":"error","code":"server_error","message":"failed"}` + "\n\n", false, true},
+		{"lifecycle then failure", "data: " + `{"type":"response.in_progress","response":{"id":"r"}}` + "\n\ndata: " + `{"type":"response.failed","response":{"error":{"code":"server_error","message":"failed"}}}` + "\n\n", false, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			events := make(chan stream.Event, 20)
+			(&ResponsesModel{}).processStream(context.Background(), strings.NewReader(tt.body), nil, events, false)
+			close(events)
+			var got error
+			for event := range events {
+				if event.Type == stream.EventError {
+					got = event.Data.(stream.ErrorEvent).Error
+				}
+				if event.Type == stream.EventFinish {
+					t.Fatal("unexpected finish")
+				}
+			}
+			if got == nil {
+				t.Fatal("missing error")
+			}
+			var parseErr *goaierrors.JSONParseError
+			if tt.parse && !errors.As(got, &parseErr) {
+				t.Fatalf("not a parse error: %v", got)
+			}
+			var apiErr *goaierrors.APICallError
+			if tt.retry && (!errors.As(got, &apiErr) || !apiErr.IsRetryable) {
+				t.Fatalf("not retryable: %v", got)
+			}
+		})
+	}
+}
 
 func createResponsesStreamChunks(text string, finishReason string) string {
 	var result strings.Builder
@@ -196,8 +359,13 @@ func TestResponsesModel_ProcessStreamReadError(t *testing.T) {
 		switch event.Type {
 		case stream.EventError:
 			sawError = true
-			if !errors.Is(event.Data.(stream.ErrorEvent).Error, readErr) {
-				t.Fatalf("expected read error, got %v", event.Data.(stream.ErrorEvent).Error)
+			eventErr := event.Data.(stream.ErrorEvent).Error
+			if !errors.Is(eventErr, readErr) {
+				t.Fatalf("expected read error, got %v", eventErr)
+			}
+			var apiErr *goaierrors.APICallError
+			if !errors.As(eventErr, &apiErr) || !apiErr.IsRetryable {
+				t.Fatalf("error = %v, want retryable APICallError", eventErr)
 			}
 		case stream.EventFinish, stream.EventFinishStep:
 			sawFinish = true

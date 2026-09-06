@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	goaierrors "github.com/airlockrun/goai/errors"
+	goaiinternal "github.com/airlockrun/goai/internal"
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/provider"
 	"github.com/airlockrun/goai/stream"
@@ -74,6 +75,8 @@ type Options struct {
 	// for unsupported CallOption fields (e.g. topK, frequencyPenalty).
 	// Matches the per-provider inventory in ai-sdk's language models.
 	CallWarner CallWarner
+	// ModelCallWarner reports model-specific unsupported call settings.
+	ModelCallWarner func(string, *stream.CallOptions) []stream.Warning
 
 	// MessageConverter, when set, replaces the default message conversion.
 	// See the MessageConverter type doc for details.
@@ -84,6 +87,8 @@ type Options struct {
 	// a schema request falls back to "json_object" plus prompt injection.
 	// Mirrors ai-sdk's OpenAICompatibleChatConfig.supportsStructuredOutputs.
 	SupportsStructuredOutputs bool
+	// DefaultStrictJSONSchema controls the default strict flag for native schemas.
+	DefaultStrictJSONSchema *bool
 
 	// IncludeUsage controls whether streaming requests send
 	// stream_options.include_usage. Nil preserves the default of true.
@@ -94,6 +99,12 @@ type Options struct {
 	// rejects standard schema keywords use it to sanitize (e.g. xAI strips
 	// additionalProperties:false).
 	ToolSchemaTransformer func(json.RawMessage) json.RawMessage
+
+	// TransformRequest applies model-specific wire normalization after option conversion.
+	TransformRequest func(modelID string, body map[string]any) error
+	// MaxEmbeddingInputs overrides the compatible embedding batch limit.
+	MaxEmbeddingInputs int
+	SupportsPenalties  bool
 }
 
 // Provider implements an OpenAI-compatible provider.
@@ -103,6 +114,7 @@ type Provider struct {
 
 // New creates a new OpenAI-compatible provider.
 func New(opts Options) *Provider {
+	opts.BaseURL = strings.TrimRight(opts.BaseURL, "/")
 	if opts.AuthHeader == "" {
 		opts.AuthHeader = "Authorization"
 	}
@@ -238,6 +250,9 @@ func (m *CompatModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 	if m.provider.opts.CallWarner != nil {
 		warnings = append(warnings, m.provider.opts.CallWarner(options)...)
 	}
+	if m.provider.opts.ModelCallWarner != nil {
+		warnings = append(warnings, m.provider.opts.ModelCallWarner(m.id, options)...)
+	}
 
 	// Repair any assistant tool_call left unanswered by a tool message before
 	// either conversion path runs — Chat Completions (and DeepSeek in
@@ -256,7 +271,11 @@ func (m *CompatModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 			if name == "" {
 				name = "response"
 			}
-			var strict *bool
+			strictValue := true
+			if m.provider.opts.DefaultStrictJSONSchema != nil {
+				strictValue = *m.provider.opts.DefaultStrictJSONSchema
+			}
+			strict := &strictValue
 			if options.ProviderOptions != nil {
 				if v, ok := options.ProviderOptions["strictJsonSchema"].(bool); ok {
 					strict = &v
@@ -299,6 +318,13 @@ func (m *CompatModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 		Stream:         true,
 		Messages:       convertedMessages,
 		ResponseFormat: respFormat,
+	}
+	if options.Reasoning != "" && options.Reasoning != "provider-default" {
+		req.ReasoningEffort = options.Reasoning
+	}
+	if m.provider.opts.SupportsPenalties {
+		req.FrequencyPenalty = options.FrequencyPenalty
+		req.PresencePenalty = options.PresencePenalty
 	}
 
 	if options.Temperature != nil {
@@ -354,12 +380,27 @@ func (m *CompatModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 			for k, v := range extraFields {
 				reqMap[k] = v
 			}
+			if m.provider.opts.TransformRequest != nil {
+				if err := m.provider.opts.TransformRequest(m.id, reqMap); err != nil {
+					return nil, warnings, err
+				}
+			}
 			body, err := json.Marshal(reqMap)
 			return body, warnings, err
 		}
 	}
 
 	body, err := json.Marshal(req)
+	if err == nil && m.provider.opts.TransformRequest != nil {
+		var fields map[string]any
+		if err := json.Unmarshal(body, &fields); err != nil {
+			return nil, warnings, err
+		}
+		if err := m.provider.opts.TransformRequest(m.id, fields); err != nil {
+			return nil, warnings, err
+		}
+		body, err = json.Marshal(fields)
+	}
 	return body, warnings, err
 }
 
@@ -370,11 +411,15 @@ func (m *CompatModel) processStream(ctx context.Context, body io.Reader, tools [
 		toolsByName[t.Name] = t
 	}
 
-	scanner := bufio.NewScanner(body)
+	streamReader := goaiinternal.NewStreamReader(body)
+	scanner := bufio.NewScanner(streamReader)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
 	var textStarted, reasoningStarted bool
 	var currentToolCalls = make(map[int]*toolCallAccumulator)
+	toolIDs := make(map[string]int)
+	toolIndexes := make(map[int]int)
+	lastToolIndex := -1
 	var usage stream.Usage
 	var usageRaw map[string]any
 	var finishReason stream.FinishReason
@@ -390,11 +435,11 @@ func (m *CompatModel) processStream(ctx context.Context, body io.Reader, tools [
 		}
 
 		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
+		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
 
-		data := strings.TrimPrefix(line, "data: ")
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if data == "[DONE]" {
 			break
 		}
@@ -405,18 +450,44 @@ func (m *CompatModel) processStream(ctx context.Context, body io.Reader, tools [
 
 		var chunk chatCompletionChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			continue
+			events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: &goaierrors.JSONParseError{Text: data, Cause: err}}}
+			return
+		}
+		if len(chunk.Error) > 0 && string(chunk.Error) != "null" {
+			var detail struct {
+				Message string
+				Type    string
+				Code    any
+				Param   string
+			}
+			if err := json.Unmarshal(chunk.Error, &detail); err != nil {
+				events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: fmt.Errorf("%w: invalid error payload: %s", goaierrors.ErrInvalidResponse, chunk.Error)}}
+			} else {
+				code := ""
+				if detail.Code != nil {
+					code = fmt.Sprint(detail.Code)
+				}
+				events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: &goaierrors.APIError{Provider: m.Provider(), Message: detail.Message, Code: code, Type: detail.Type, Param: detail.Param}}}
+			}
+			return
+		}
+		if chunk.Choices == nil {
+			events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: fmt.Errorf("%w: missing choices", goaierrors.ErrInvalidResponse)}}
+			return
 		}
 
 		// Handle usage
-		if len(chunk.UsageRaw) > 0 {
+		if len(chunk.UsageRaw) > 0 && string(chunk.UsageRaw) != "null" {
 			var typed chatUsage
-			if err := json.Unmarshal(chunk.UsageRaw, &typed); err == nil {
-				usage = usageFromChat(typed)
+			if err := json.Unmarshal(chunk.UsageRaw, &typed); err != nil {
+				events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: &goaierrors.JSONParseError{Text: string(chunk.UsageRaw), Cause: err}}}
+				return
 			}
+			usage = usageFromChat(typed)
 			var raw map[string]any
 			if err := json.Unmarshal(chunk.UsageRaw, &raw); err == nil {
 				usageRaw = raw
+				usage.Raw = raw
 			}
 		}
 
@@ -440,25 +511,38 @@ func (m *CompatModel) processStream(ctx context.Context, body io.Reader, tools [
 		if reasoningContent == "" {
 			reasoningContent = delta.Reasoning
 		}
+		content := delta.Content
 		if reasoningContent != "" {
-			if !reasoningStarted {
-				reasoningStarted = true
-				events <- stream.Event{Type: stream.EventReasoningStart, Data: stream.ReasoningStartEvent{ID: "reasoning-0"}}
-			}
-			events <- stream.Event{Type: stream.EventReasoningDelta, Data: stream.ReasoningDeltaEvent{ID: "reasoning-0", Text: reasoningContent}}
+			content = append(chatContent{{Type: "reasoning", Text: reasoningContent}}, content...)
 		}
+		for _, part := range content {
+			if part.Text == "" {
+				continue
+			}
+			if part.Type == "reasoning" {
+				if textStarted {
+					events <- stream.Event{Type: stream.EventTextEnd, Data: stream.TextEndEvent{}}
+					textStarted = false
+				}
+				if !reasoningStarted {
+					reasoningStarted = true
+					events <- stream.Event{Type: stream.EventReasoningStart, Data: stream.ReasoningStartEvent{ID: "reasoning-0"}}
+				}
+				events <- stream.Event{Type: stream.EventReasoningDelta, Data: stream.ReasoningDeltaEvent{ID: "reasoning-0", Text: part.Text}}
+			}
 
-		// Handle text content
-		if delta.Content != "" {
-			if reasoningStarted {
-				events <- stream.Event{Type: stream.EventReasoningEnd, Data: stream.ReasoningEndEvent{ID: "reasoning-0"}}
-				reasoningStarted = false
+			// Handle text content
+			if part.Type == "text" {
+				if reasoningStarted {
+					events <- stream.Event{Type: stream.EventReasoningEnd, Data: stream.ReasoningEndEvent{ID: "reasoning-0"}}
+					reasoningStarted = false
+				}
+				if !textStarted {
+					textStarted = true
+					events <- stream.Event{Type: stream.EventTextStart, Data: stream.TextStartEvent{}}
+				}
+				events <- stream.Event{Type: stream.EventTextDelta, Data: stream.TextDeltaEvent{Text: part.Text}}
 			}
-			if !textStarted {
-				textStarted = true
-				events <- stream.Event{Type: stream.EventTextStart, Data: stream.TextStartEvent{}}
-			}
-			events <- stream.Event{Type: stream.EventTextDelta, Data: stream.TextDeltaEvent{Text: delta.Content}}
 		}
 
 		// Handle tool calls. Buffers id + arguments until function.name
@@ -471,19 +555,44 @@ func (m *CompatModel) processStream(ctx context.Context, body io.Reader, tools [
 			reasoningStarted = false
 		}
 		for _, tc := range delta.ToolCalls {
-			acc, exists := currentToolCalls[tc.Index]
+			index := lastToolIndex
+			if tc.Index != nil {
+				index = *tc.Index
+				if known, ok := toolIndexes[*tc.Index]; ok {
+					index = known
+				}
+			}
+			if known, ok := toolIDs[tc.ID]; tc.ID != "" && ok {
+				index = known
+			} else if tc.ID != "" && (tc.Index == nil || (currentToolCalls[index] != nil && currentToolCalls[index].id != "" && currentToolCalls[index].id != tc.ID)) {
+				index = len(currentToolCalls)
+				for currentToolCalls[index] != nil {
+					index++
+				}
+			}
+			if index < 0 {
+				index = 0
+			}
+			lastToolIndex = index
+			if tc.Index != nil {
+				toolIndexes[*tc.Index] = index
+			}
+			acc, exists := currentToolCalls[index]
 			if !exists {
-				acc = &toolCallAccumulator{index: tc.Index}
-				currentToolCalls[tc.Index] = acc
+				acc = &toolCallAccumulator{index: index}
+				currentToolCalls[index] = acc
 			}
 			if tc.ID != "" && acc.id == "" {
 				acc.id = tc.ID
+				toolIDs[tc.ID] = index
 			}
 
 			if !acc.started {
 				acc.arguments += tc.Function.Arguments
 				if tc.Function.Name != "" {
 					acc.name = tc.Function.Name
+				}
+				if acc.name != "" && acc.id != "" {
 					acc.started = true
 					events <- stream.Event{
 						Type: stream.EventToolInputStart,
@@ -508,8 +617,12 @@ func (m *CompatModel) processStream(ctx context.Context, body io.Reader, tools [
 			}
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: fmt.Errorf("%s stream read: %w", m.provider.opts.ProviderID, err)}}
+	if err := streamReader.Err(ctx, scanner.Err()); err != nil {
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+		return
+	}
+	if finishReason == "" {
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: fmt.Errorf("%w: response stream ended without a finish reason", goaierrors.ErrInvalidResponse)}}
 		return
 	}
 
@@ -536,9 +649,9 @@ func (m *CompatModel) processStream(ctx context.Context, body io.Reader, tools [
 			// in the same situation (PR #14760).
 			events <- stream.Event{
 				Type: stream.EventError,
-				Data: stream.ErrorEvent{Error: fmt.Errorf("openaicompat: tool call at index %d has no function.name", acc.index)},
+				Data: stream.ErrorEvent{Error: fmt.Errorf("%w: tool call at index %d has no function.name or id", goaierrors.ErrInvalidResponse, acc.index)},
 			}
-			continue
+			return
 		}
 
 		events <- stream.Event{

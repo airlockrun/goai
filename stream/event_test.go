@@ -2,8 +2,55 @@ package stream
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
+
+	"github.com/airlockrun/goai/message"
 )
+
+func TestUsageNormalizationAndAggregation(t *testing.T) {
+	usage := Usage{InputTokens: InputTokens{Total: IntPtr(-2), CacheRead: IntPtr(3)}, OutputTokens: OutputTokens{Total: IntPtr(4), Text: IntPtr(-1)}, Raw: map[string]any{"providerTokens": -2}}
+	normalized := usage.Normalized()
+	if normalized.InputTotal() != 0 || *normalized.OutputTokens.Text != 0 || normalized.InputTokens.NoCache != nil || !reflect.DeepEqual(normalized.Raw, usage.Raw) || usage.InputTotal() != -2 {
+		t.Fatalf("normalized = %+v, original = %+v", normalized, usage)
+	}
+	total := usage
+	total.Add(UsageFrom(5, 6))
+	if total.InputTotal() != 5 || total.OutputTotal() != 10 || total.Raw != nil || total.InputTokens.NoCache != nil {
+		t.Fatalf("total = %+v", total)
+	}
+	maxInt := int(^uint(0) >> 1)
+	total = UsageFrom(maxInt, maxInt)
+	total.Add(UsageFrom(1, 1))
+	if total.InputTotal() != maxInt || total.OutputTotal() != maxInt || total.GrandTotal() != maxInt {
+		t.Fatal("overflowed aggregate")
+	}
+}
+
+func TestProviderExecutedToolEventJSON(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		event  any
+		target any
+	}{
+		{"call", ToolCallEvent{ToolCallID: "id", Input: json.RawMessage(`{}`), ProviderExecuted: true}, &ToolCallEvent{}},
+		{"result", ToolResultEvent{ToolCallID: "id", ProviderExecuted: true, ProviderMetadata: map[string]any{"id": "remote"}, Output: message.TextOutput{Value: "ok"}}, &ToolResultEvent{}},
+		{"error", ToolErrorEvent{ToolCallID: "id", ProviderExecuted: true, ProviderMetadata: map[string]any{"id": "remote"}, Output: message.ErrorTextOutput{Value: "failed"}}, &ToolErrorEvent{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			encoded, err := json.Marshal(tc.event)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(encoded, tc.target); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(tc.event, reflect.ValueOf(tc.target).Elem().Interface()) {
+				t.Fatalf("round trip = %s -> %#v", encoded, tc.target)
+			}
+		})
+	}
+}
 
 func TestWarningHelpers(t *testing.T) {
 	tests := []struct {

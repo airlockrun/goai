@@ -67,9 +67,15 @@ func TestGetLanguageModelCapabilities_IsReasoningModel(t *testing.T) {
 		{"o4-mini", true},
 		{"o4-mini-2025-04-16", true},
 
-		// Reasoning models (codex, computer-use)
-		{"codex-mini-latest", true},
-		{"computer-use-preview", true},
+		// IDs outside recognizable model families keep conservative defaults.
+		{"codex-mini-latest", false},
+		{"computer-use-preview", false},
+		{"gpt-5.6", true},
+		{"gpt-6", true},
+		{"gpt-6-chat-latest", false},
+		{"o12-mini", true},
+		{"o3custom", false},
+		{"gpt-5custom", false},
 
 		// Reasoning models (GPT-5 series - except chat variant)
 		{"gpt-5", true},
@@ -112,6 +118,10 @@ func TestGetLanguageModelCapabilities_SupportsNonReasoningParameters(t *testing.
 		{"gpt-5.2", true},
 		{"gpt-5.2-pro", true},
 		{"gpt-5.2-chat-latest", true},
+		{"gpt-5.6", true},
+		{"gpt-6", true},
+		{"gpt-6.1-mini", true},
+		{"gpt-5custom", false},
 
 		// Models that don't support non-reasoning parameters
 		{"gpt-5", false},

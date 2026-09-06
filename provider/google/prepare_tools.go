@@ -2,6 +2,8 @@ package google
 
 import (
 	"encoding/json"
+	"path"
+	"regexp"
 	"strings"
 
 	"github.com/airlockrun/goai/tool"
@@ -22,11 +24,9 @@ func prepareGeminiTools(tools []tool.Tool, modelID string) []geminiTool {
 		return nil
 	}
 
-	isGemini2OrNewer := strings.Contains(modelID, "gemini-2") ||
-		strings.Contains(modelID, "gemini-3") ||
-		strings.Contains(modelID, "gemini-flash-latest") ||
-		strings.Contains(modelID, "gemini-flash-lite-latest") ||
-		strings.Contains(modelID, "gemini-pro-latest")
+	name := strings.ToLower(path.Base(modelID))
+	older := regexp.MustCompile(`^gemini-1([.-]|$)|^gemini-pro(-vision)?$|^gemini-robotics-er-1\.5([.-]|$)`).MatchString(name)
+	isGemini2OrNewer := strings.HasPrefix(name, "gemini-") && !older || strings.Contains(name, "nano-banana")
 	supportsDynamicRetrieval := strings.Contains(modelID, "gemini-1.5-flash") &&
 		!strings.Contains(modelID, "-8b")
 
@@ -39,6 +39,12 @@ func prepareGeminiTools(tools []tool.Tool, modelID string) []geminiTool {
 			continue
 		}
 		switch t.ProviderID {
+		case ToolIDFileSearch:
+			if strings.HasPrefix(name, "gemini-2.5-") || strings.HasPrefix(name, "gemini-") && !olderGemini.MatchString(name) {
+				if len(t.Args) > 0 {
+					providerTools = append(providerTools, geminiTool{FileSearch: t.Args})
+				}
+			}
 		case ToolIDGoogleSearch:
 			switch {
 			case isGemini2OrNewer:

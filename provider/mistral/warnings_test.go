@@ -43,8 +43,8 @@ func TestMistralCallWarner(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			warnings := mistralCallWarner(tc.opts)
-			if !hasWarningFeature(warnings, tc.feature) {
-				t.Errorf("expected %s warning, got %+v", tc.feature, warnings)
+			if hasWarningFeature(warnings, tc.feature) != (tc.feature == "topK") {
+				t.Errorf("unexpected %s warnings: %+v", tc.feature, warnings)
 			}
 		})
 	}
