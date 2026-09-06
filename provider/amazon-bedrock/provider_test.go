@@ -1,15 +1,96 @@
 package bedrock
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 
+	goaierrors "github.com/airlockrun/goai/errors"
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/provider/anthropic"
 	"github.com/airlockrun/goai/stream"
 	"github.com/airlockrun/goai/tool"
 )
+
+type failingStreamReader struct {
+	data string
+	err  error
+	sent bool
+}
+
+func (r *failingStreamReader) Read(p []byte) (int, error) {
+	if !r.sent {
+		r.sent = true
+		return copy(p, r.data), nil
+	}
+	return 0, r.err
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func TestBedrockHostedToolReplayOrder(t *testing.T) {
+	m := New(Options{}).Model("us.anthropic.claude-sonnet-4-6").(*BedrockLanguageModel)
+	sse := ""
+	for _, chunk := range []string{
+		`{"type":"message_start","message":{"id":"msg"}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srv","name":"tool_search_tool_regex","input":{"pattern":"weather"}}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"content_block_start","index":1,"content_block":{"type":"tool_search_tool_result","tool_use_id":"srv","content":{"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":"weather"}]}}}`,
+		`{"type":"content_block_stop","index":1}`,
+		`{"type":"content_block_start","index":2,"content_block":{"type":"text","text":"Found weather"}}`,
+		`{"type":"content_block_stop","index":2}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}`,
+		`{"type":"message_stop"}`,
+	} {
+		sse += "data: " + chunk + "\n\n"
+	}
+	events := make(chan stream.Event, 30)
+	m.processAnthropicStream(context.Background(), strings.NewReader(sse), nil, events, false, false)
+	close(events)
+	var parts []message.Part
+	for event := range events {
+		switch e := event.Data.(type) {
+		case stream.ToolCallEvent:
+			parts = append(parts, message.ToolCallPart{ID: e.ToolCallID, Name: e.ToolName, Input: e.Input, ProviderExecuted: e.ProviderExecuted, ProviderOptions: e.ProviderMetadata})
+		case stream.ToolResultEvent:
+			parts = append(parts, message.ToolResultPart{ToolCallID: e.ToolCallID, ToolName: e.ToolName, Output: e.Output, ProviderExecuted: e.ProviderExecuted, ProviderOptions: e.ProviderMetadata})
+		case stream.TextDeltaEvent:
+			parts = append(parts, message.TextPart{Text: e.Text})
+		case stream.ErrorEvent:
+			t.Fatal(e.Error)
+		}
+	}
+	msg := message.NewAssistantMessageWithParts(parts...)
+	raw, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		t.Fatal(err)
+	}
+	body, _, err := m.buildAnthropicRequest(&stream.CallOptions{Messages: []message.Message{msg}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct {
+		Messages []struct{ Content []map[string]any }
+	}
+	if err := json.Unmarshal(body, &wire); err != nil {
+		t.Fatal(err)
+	}
+	content := wire.Messages[0].Content
+	if len(content) != 3 || content[0]["type"] != "server_tool_use" || content[1]["type"] != "tool_search_tool_result" || content[2]["text"] != "Found weather" || !strings.Contains(string(body), `"tool_name":"weather"`) {
+		t.Fatalf("replay = %s", body)
+	}
+}
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 func TestBedrockProvider_ID(t *testing.T) {
 	provider := New(Options{
@@ -20,6 +101,116 @@ func TestBedrockProvider_ID(t *testing.T) {
 
 	if provider.ID() != "amazon-bedrock" {
 		t.Errorf("expected provider ID amazon-bedrock, got %s", provider.ID())
+	}
+}
+
+func TestBedrockLanguageModel_StreamReadErrors(t *testing.T) {
+	readErr := errors.New("connection reset")
+	model := &BedrockLanguageModel{}
+	tests := []struct {
+		name string
+		data string
+		run  func(io.Reader, chan<- stream.Event)
+	}{
+		{
+			name: "anthropic parser",
+			data: `data: {"type":"content_block_start","content_block":{"type":"text"}}` + "\n\n",
+			run: func(reader io.Reader, events chan<- stream.Event) {
+				model.processAnthropicStream(context.Background(), reader, nil, events, false, false)
+			},
+		},
+		{
+			name: "generic parser",
+			data: `{"outputText":"partial"}` + "\n",
+			run: func(reader io.Reader, events chan<- stream.Event) {
+				model.processGenericStream(context.Background(), reader, events, false)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			events := make(chan stream.Event, 10)
+			tt.run(&failingStreamReader{data: tt.data, err: readErr}, events)
+			close(events)
+
+			var eventErr error
+			for event := range events {
+				if event.Type == stream.EventError {
+					eventErr = event.Data.(stream.ErrorEvent).Error
+				}
+				if event.Type == stream.EventFinish || event.Type == stream.EventFinishStep {
+					t.Fatal("unexpected finish after stream read error")
+				}
+			}
+			var apiErr *goaierrors.APICallError
+			if !errors.Is(eventErr, readErr) || !errors.As(eventErr, &apiErr) || !apiErr.IsRetryable {
+				t.Fatalf("error = %v, want retryable APICallError wrapping read error", eventErr)
+			}
+		})
+	}
+}
+
+func TestBedrockLanguageModel_SetupErrorClassification(t *testing.T) {
+	transportErr := errors.New("connection refused")
+	tests := []struct {
+		name          string
+		roundTrip     roundTripFunc
+		wantStatus    int
+		wantRetryable bool
+		wantCause     error
+	}{
+		{
+			name: "transport error",
+			roundTrip: func(*http.Request) (*http.Response, error) {
+				return nil, transportErr
+			},
+			wantRetryable: true,
+			wantCause:     transportErr,
+		},
+		{
+			name: "bad request",
+			roundTrip: func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusBadRequest,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader("invalid request")),
+					Request:    req,
+				}, nil
+			},
+			wantStatus: http.StatusBadRequest,
+		},
+	}
+
+	originalClient := http.DefaultClient
+	t.Cleanup(func() { http.DefaultClient = originalClient })
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			http.DefaultClient = &http.Client{Transport: tt.roundTrip}
+			model := New(Options{AccessKeyID: "key", SecretAccessKey: "secret"}).Model("anthropic.claude-3-haiku")
+			events, err := model.Stream(context.Background(), &stream.CallOptions{
+				Messages: []message.Message{message.NewUserMessage("hello")},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var eventErr error
+			for event := range events {
+				if event.Type == stream.EventError {
+					eventErr = event.Data.(stream.ErrorEvent).Error
+				}
+			}
+			var apiErr *goaierrors.APICallError
+			if !errors.As(eventErr, &apiErr) {
+				t.Fatalf("error = %v, want APICallError", eventErr)
+			}
+			if apiErr.StatusCode != tt.wantStatus || apiErr.IsRetryable != tt.wantRetryable {
+				t.Errorf("status/retryable = %d/%v, want %d/%v", apiErr.StatusCode, apiErr.IsRetryable, tt.wantStatus, tt.wantRetryable)
+			}
+			if tt.wantCause != nil && !errors.Is(apiErr, tt.wantCause) {
+				t.Errorf("error = %v, want cause %v", apiErr, tt.wantCause)
+			}
+		})
 	}
 }
 
@@ -521,6 +712,12 @@ func TestBedrockModel_StructuredOutputOpus47(t *testing.T) {
 	}{
 		{"anthropic.claude-opus-4-7", false},
 		{"us.anthropic.claude-opus-4-7", false},
+		{"global.anthropic.claude-opus-4-8", false},
+		{"us.anthropic.claude-sonnet-5", false},
+		{"eu.anthropic.claude-opus-5", false},
+		{"arn:aws:bedrock:us-east-1:123:inference-profile/us.anthropic.claude-fable-5-1", false},
+		{"anthropic.claude-sonnet-4-6", false},
+		{"anthropic.claude-haiku-4-5", false},
 		{"anthropic.claude-opus-4-6-v1", true},
 	}
 	for _, tt := range tests {
@@ -534,6 +731,31 @@ func TestBedrockModel_StructuredOutputOpus47(t *testing.T) {
 
 // Exercises ai-sdk PRs #df099b9 (serviceTier), #b128d9b (cacheControl TTL),
 // #91f8777 (tool strict mode), #a1a8091 (tool_choice passthrough).
+func TestBedrockStrictExclusions(t *testing.T) {
+	for _, tc := range []struct {
+		id     string
+		strict bool
+	}{{"claude-sonnet-5", false}, {"claude-opus-5", false}, {"claude-fable-5-1", false}, {"claude-opus-4-7", false}, {"claude-opus-4-8", false}, {"claude-sonnet-4-6", true}, {"claude-haiku-4-5", true}, {"claude-opus-4-6", true}} {
+		t.Run(tc.id, func(t *testing.T) {
+			m := New(Options{}).Model("arn:aws:bedrock:us-east-1:123:inference-profile/us.anthropic." + tc.id).(*BedrockLanguageModel)
+			body, _, err := m.buildAnthropicRequest(&stream.CallOptions{Tools: []tool.Tool{{Name: "lookup", InputSchema: json.RawMessage(`{"type":"object"}`)}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var req struct {
+				Tools []map[string]any `json:"tools"`
+			}
+			if err := json.Unmarshal(body, &req); err != nil {
+				t.Fatal(err)
+			}
+			_, strict := req.Tools[0]["strict"]
+			if strict != tc.strict {
+				t.Fatalf("%s", body)
+			}
+		})
+	}
+}
+
 func TestBedrockAnthropic_RequestBodyWiring(t *testing.T) {
 	p := New(Options{AccessKeyID: "k", SecretAccessKey: "s", Region: "us-east-1"})
 	m := p.Model("anthropic.claude-opus-4-6-v1").(*BedrockLanguageModel)

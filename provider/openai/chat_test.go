@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	goaierrors "github.com/airlockrun/goai/errors"
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/provider"
 	"github.com/airlockrun/goai/stream"
@@ -32,6 +33,186 @@ func (r *failingStreamReader) Read(p []byte) (int, error) {
 }
 
 // Test fixtures
+
+func TestChatModel_ReasoningSettings(t *testing.T) {
+	for _, tt := range []struct {
+		id, effort, role    string
+		sampling, reasoning bool
+	}{
+		{"gpt-5.6", "high", "developer", false, true},
+		{"gpt-5.6", "none", "developer", true, true},
+		{"gpt-6", "none", "developer", true, true},
+		{"o12-mini", "none", "developer", false, true},
+		{"gpt-6-chat-latest", "", "system", true, false},
+		{"custom", "", "system", true, false},
+	} {
+		t.Run(tt.id+"/"+tt.effort, func(t *testing.T) {
+			temperature, tokens := 0.4, 123
+			m := &ChatModel{id: tt.id}
+			body, _, err := m.buildRequest(&stream.CallOptions{Messages: []message.Message{message.NewSystemMessage("rules")}, Temperature: &temperature, TopP: &temperature, MaxOutputTokens: &tokens, Reasoning: tt.effort})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var req map[string]any
+			if err := json.Unmarshal(body, &req); err != nil {
+				t.Fatal(err)
+			}
+			if (req["temperature"] != nil) != tt.sampling || (req["top_p"] != nil) != tt.sampling {
+				t.Fatalf("sampling: %s", body)
+			}
+			if req["messages"].([]any)[0].(map[string]any)["role"] != tt.role {
+				t.Fatalf("role: %s", body)
+			}
+			key := "max_tokens"
+			if tt.reasoning {
+				key = "max_completion_tokens"
+			}
+			if req[key] != float64(tokens) {
+				t.Fatalf("tokens: %s", body)
+			}
+		})
+	}
+}
+
+func TestChatModel_DocumentedOptions(t *testing.T) {
+	zero, seed := 0.0, 7
+	body, _, err := (&ChatModel{id: "gpt-4o"}).buildRequest(&stream.CallOptions{
+		Seed: &seed, PresencePenalty: &zero, FrequencyPenalty: &zero,
+		ProviderOptions: map[string]any{"logitBias": map[string]int{"42": 3}, "parallelToolCalls": false, "store": false, "user": "u", "serviceTier": "priority", "metadata": map[string]string{"key": "value"}, "maxCompletionTokens": 77, "safetyIdentifier": "safe", "promptCacheKey": "cache", "promptCacheRetention": "24h", "textVerbosity": "low"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"seed", "presence_penalty", "frequency_penalty", "logit_bias", "parallel_tool_calls", "store", "user", "service_tier", "metadata", "max_completion_tokens", "safety_identifier", "prompt_cache_key", "prompt_cache_retention", "verbosity"} {
+		if _, ok := req[key]; !ok {
+			t.Errorf("missing %s in %s", key, body)
+		}
+	}
+}
+
+func TestChatModel_IrregularToolIDs(t *testing.T) {
+	for _, tt := range []struct{ name, chunks, wantID string }{
+		{"numeric", `{"index":3,"id":42,"function":{"name":"lookup","arguments":"{}"}}`, "42"},
+		{"missing", `{"index":3,"function":{"name":"lookup","arguments":"{}"}}`, ""},
+		{"null", `{"index":3,"id":null,"function":{"name":"lookup","arguments":"{}"}}`, ""},
+		{"delayed", `{"index":3,"function":{"arguments":"{"}}]}}]}` + "\n\ndata: " + `{"choices":[{"delta":{"tool_calls":[{"index":3,"id":"late","function":{"name":"lookup","arguments":"}"}}`, "late"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			body := `data: {"choices":[{"delta":{"tool_calls":[` + tt.chunks + `]}}]}` + "\n\ndata: " + `{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}` + "\n\ndata: [DONE]\n\n"
+			events := make(chan stream.Event, 30)
+			(&ChatModel{}).processStream(context.Background(), strings.NewReader(body), nil, events, false)
+			close(events)
+			var id, args string
+			var calls int
+			for event := range events {
+				switch event.Type {
+				case stream.EventError:
+					t.Fatal(event.Data)
+				case stream.EventToolInputStart:
+					id = event.Data.(stream.ToolInputStartEvent).ID
+					if id == "" {
+						t.Fatal("empty start ID")
+					}
+				case stream.EventToolInputDelta:
+					d := event.Data.(stream.ToolInputDeltaEvent)
+					if d.ID != id {
+						t.Fatal("delta ID mismatch")
+					}
+					args += d.Delta
+				case stream.EventToolCall:
+					c := event.Data.(stream.ToolCallEvent)
+					calls++
+					if c.ToolCallID != id || string(c.Input) != "{}" {
+						t.Fatalf("call: %+v", c)
+					}
+				}
+			}
+			if calls != 1 || args != "{}" || tt.wantID != "" && id != tt.wantID {
+				t.Fatalf("id=%q args=%q calls=%d", id, args, calls)
+			}
+		})
+	}
+}
+
+func TestChatModel_ToolIdentityTracking(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		deltas []string
+	}{
+		{"reused index", []string{`{"index":0,"id":"a","function":{"name":"first","arguments":"{"}}`, `{"index":0,"id":"b","function":{"name":"second","arguments":"{"}}`, `{"index":0,"id":"a","function":{"arguments":"}"}}`, `{"index":0,"id":"b","function":{"arguments":"}"}}`}},
+		{"no indices", []string{`{"id":"a","function":{"name":"first","arguments":"{"}}`, `{"function":{"arguments":"}"}}`, `{"id":"b","function":{"name":"second","arguments":"{"}}`, `{"id":"b","function":{"arguments":"}"}}`}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var body strings.Builder
+			for _, delta := range tt.deltas {
+				fmt.Fprintf(&body, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[%s]}}]}\n\n", delta)
+			}
+			body.WriteString("data: " + `{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}` + "\n\n")
+			events := make(chan stream.Event, 30)
+			(&ChatModel{}).processStream(context.Background(), strings.NewReader(body.String()), nil, events, false)
+			close(events)
+			var ids []string
+			for event := range events {
+				if event.Type == stream.EventError {
+					t.Fatal(event.Data)
+				}
+				if event.Type == stream.EventToolCall {
+					call := event.Data.(stream.ToolCallEvent)
+					ids = append(ids, call.ToolCallID)
+					if string(call.Input) != "{}" {
+						t.Fatalf("arguments: %s", call.Input)
+					}
+				}
+			}
+			if strings.Join(ids, ",") != "a,b" {
+				t.Fatalf("calls: %v", ids)
+			}
+		})
+	}
+}
+
+func TestChatModel_InvalidStreams(t *testing.T) {
+	for _, tt := range []struct {
+		name, body   string
+		parse, retry bool
+	}{
+		{"malformed", "data: {\n\n", true, false},
+		{"invalid shape", "data: {}\n\n", false, false},
+		{"empty", "", false, true},
+		{"truncated", "data:" + `{"choices":[{"delta":{"content":"partial"}}]}` + "\n\n", false, true},
+		{"server error", "data: " + `{"error":{"code":"server_error","message":"failed"}}` + "\n\n", false, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			events := make(chan stream.Event, 20)
+			(&ChatModel{}).processStream(context.Background(), strings.NewReader(tt.body), nil, events, false)
+			close(events)
+			var got error
+			for event := range events {
+				if event.Type == stream.EventError {
+					got = event.Data.(stream.ErrorEvent).Error
+				}
+				if event.Type == stream.EventFinish {
+					t.Fatal("unexpected finish")
+				}
+			}
+			if got == nil {
+				t.Fatal("missing error")
+			}
+			var parseErr *goaierrors.JSONParseError
+			if tt.parse && !errors.As(got, &parseErr) {
+				t.Fatalf("not a parse error: %v", got)
+			}
+			var apiErr *goaierrors.APICallError
+			if tt.retry && (!errors.As(got, &apiErr) || !apiErr.IsRetryable) {
+				t.Fatalf("not retryable: %v", got)
+			}
+		})
+	}
+}
 
 func createTestProvider(baseURL string) *Provider {
 	return New(provider.Options{
@@ -57,8 +238,13 @@ func TestChatModel_ProcessStreamReadError(t *testing.T) {
 		switch event.Type {
 		case stream.EventError:
 			sawError = true
-			if !errors.Is(event.Data.(stream.ErrorEvent).Error, readErr) {
-				t.Fatalf("expected read error, got %v", event.Data.(stream.ErrorEvent).Error)
+			eventErr := event.Data.(stream.ErrorEvent).Error
+			if !errors.Is(eventErr, readErr) {
+				t.Fatalf("expected read error, got %v", eventErr)
+			}
+			var apiErr *goaierrors.APICallError
+			if !errors.As(eventErr, &apiErr) || !apiErr.IsRetryable {
+				t.Fatalf("error = %v, want retryable APICallError", eventErr)
 			}
 		case stream.EventFinish, stream.EventFinishStep:
 			sawFinish = true

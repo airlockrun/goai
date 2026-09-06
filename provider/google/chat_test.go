@@ -3,16 +3,97 @@ package google
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	goaierrors "github.com/airlockrun/goai/errors"
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/stream"
 	"github.com/airlockrun/goai/tool"
 )
+
+type failingStreamReader struct {
+	data string
+	err  error
+	sent bool
+}
+
+func TestGoogleStreamValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name, data   string
+		api, invalid bool
+		finish       stream.FinishReason
+	}{
+		{name: "blocked without candidates", data: `data:{"promptFeedback":{"blockReason":"SAFETY"}}`, finish: stream.FinishReasonContentFilter},
+		{name: "invalid JSON", data: `data: {`, invalid: true},
+		{name: "invalid shape", data: `data: {"candidates":"bad"}`, invalid: true},
+		{name: "API error", data: `data: {"error":{"code":429,"message":"quota"}}`, api: true},
+		{name: "empty stream", invalid: true},
+		{name: "incomplete", data: `data: {"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}`, invalid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			events := make(chan stream.Event, 100)
+			(&GoogleModel{}).processStream(context.Background(), strings.NewReader(tc.data+"\n\n"), nil, events, false)
+			close(events)
+			var gotErr error
+			var finish stream.FinishReason
+			for event := range events {
+				if value, ok := event.Data.(stream.ErrorEvent); ok {
+					gotErr = value.Error
+				}
+				if value, ok := event.Data.(stream.FinishEvent); ok {
+					finish = value.FinishReason
+				}
+			}
+			if tc.invalid && !errors.Is(gotErr, goaierrors.ErrInvalidResponse) {
+				t.Fatalf("error = %v", gotErr)
+			}
+			if tc.api {
+				var api *goaierrors.APICallError
+				if !errors.As(gotErr, &api) {
+					t.Fatalf("error = %v", gotErr)
+				}
+			}
+			if finish != tc.finish {
+				t.Fatalf("finish = %q", finish)
+			}
+		})
+	}
+}
+
+func TestGoogleFutureToolsAndOptions(t *testing.T) {
+	for _, id := range []string{"gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash", "models/GEMINI-4-flash"} {
+		t.Run(id, func(t *testing.T) {
+			body, _, err := (&GoogleModel{id: id}).buildRequest(&stream.CallOptions{Tools: []tool.Tool{GoogleSearch(), GoogleMaps()}, ProviderOptions: map[string]any{"threshold": "OFF", "imageConfig": map[string]any{"imageSize": "512"}, "retrievalConfig": map[string]any{"latLng": map[string]any{"latitude": 1, "longitude": 2}}, "thinkingConfig": map[string]any{"thinkingBudget": 0}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var request map[string]any
+			if err := json.Unmarshal(body, &request); err != nil {
+				t.Fatal(err)
+			}
+			if len(request["tools"].([]any)) != 2 || len(request["safetySettings"].([]any)) != 5 {
+				t.Fatalf("request = %s", body)
+			}
+			config := request["generationConfig"].(map[string]any)
+			if config["thinkingConfig"].(map[string]any)["thinkingBudget"] != float64(0) || config["imageConfig"] == nil || request["toolConfig"] == nil {
+				t.Fatalf("request = %s", body)
+			}
+		})
+	}
+}
+
+func (r *failingStreamReader) Read(p []byte) (int, error) {
+	if !r.sent {
+		r.sent = true
+		return copy(p, r.data), nil
+	}
+	return 0, r.err
+}
 
 // Translated from ai-sdk/packages/google/src/google-generative-ai-language-model.test.ts
 
@@ -21,6 +102,36 @@ func createTestProvider(serverURL string) *Provider {
 		APIKey:  "test-api-key",
 		BaseURL: serverURL,
 	})
+}
+
+func TestGoogleModel_ProcessStreamReadError(t *testing.T) {
+	readErr := errors.New("connection reset")
+	events := make(chan stream.Event, 10)
+	body := &failingStreamReader{
+		data: `data: {"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}` + "\n\n",
+		err:  readErr,
+	}
+
+	(&GoogleModel{}).processStream(context.Background(), body, nil, events, false)
+	close(events)
+
+	var sawError, sawFinish bool
+	for event := range events {
+		switch event.Type {
+		case stream.EventError:
+			sawError = true
+			eventErr := event.Data.(stream.ErrorEvent).Error
+			var apiErr *goaierrors.APICallError
+			if !errors.Is(eventErr, readErr) || !errors.As(eventErr, &apiErr) || !apiErr.IsRetryable {
+				t.Fatalf("error = %v, want retryable APICallError wrapping read error", eventErr)
+			}
+		case stream.EventFinish, stream.EventFinishStep:
+			sawFinish = true
+		}
+	}
+	if !sawError || sawFinish {
+		t.Fatalf("saw error = %v, saw finish = %v; want error without finish", sawError, sawFinish)
+	}
 }
 
 func TestGoogleModel_ID(t *testing.T) {
@@ -952,14 +1063,11 @@ func TestGoogleModel_NewOptionsOnWire(t *testing.T) {
 	}
 
 	gc, _ := captured["generationConfig"].(map[string]any)
-	if gc == nil {
-		t.Fatal("expected generationConfig on request")
+	if captured["serviceTier"] != "priority" || gc["serviceTier"] != nil {
+		t.Errorf("serviceTier must be at request root: %v", captured)
 	}
-	if gc["serviceTier"] != "priority" {
-		t.Errorf("serviceTier = %v, want priority", gc["serviceTier"])
-	}
-	if gc["streamFunctionCallArguments"] != true {
-		t.Errorf("streamFunctionCallArguments = %v, want true", gc["streamFunctionCallArguments"])
+	if gc["streamFunctionCallArguments"] != nil {
+		t.Errorf("streamFunctionCallArguments must be omitted on the Gemini API: %v", gc)
 	}
 
 	tools, _ := captured["tools"].([]any)

@@ -77,7 +77,7 @@ type ResponsesOptions struct {
 	// Values: "auto" (default), "flex" (50% cheaper, higher latency), "priority" (faster, Enterprise), "default"
 	ServiceTier string `json:"serviceTier,omitempty"`
 
-	// Store controls whether to store the generation. Defaults to true.
+	// Store controls whether to store the generation. Defaults to false.
 	Store *bool `json:"store,omitempty"`
 
 	// PassThroughUnsupportedFiles forwards non-image inline file parts as
@@ -87,7 +87,7 @@ type ResponsesOptions struct {
 	PassThroughUnsupportedFiles bool `json:"passThroughUnsupportedFiles,omitempty"`
 
 	// StrictJsonSchema controls whether to use strict JSON schema validation.
-	// Defaults to true.
+	// Defaults to false.
 	StrictJsonSchema *bool `json:"strictJsonSchema,omitempty"`
 
 	// TextVerbosity controls the verbosity of the model's responses.
@@ -115,6 +115,15 @@ type ResponsesOptions struct {
 // These options match ai-sdk's OpenAIChatProviderOptions schema.
 // See: ai-sdk/packages/openai/src/chat/openai-chat-options.ts
 type ChatOptions struct {
+	SystemMessageMode    string `json:"systemMessageMode,omitempty"`
+	ForceReasoning       bool   `json:"forceReasoning,omitempty"`
+	MaxCompletionTokens  *int   `json:"maxCompletionTokens,omitempty"`
+	ServiceTier          string `json:"serviceTier,omitempty"`
+	Metadata             any    `json:"metadata,omitempty"`
+	SafetyIdentifier     string `json:"safetyIdentifier,omitempty"`
+	PromptCacheKey       string `json:"promptCacheKey,omitempty"`
+	PromptCacheRetention string `json:"promptCacheRetention,omitempty"`
+	TextVerbosity        string `json:"textVerbosity,omitempty"`
 	// Logprobs returns the log probabilities of the tokens.
 	// Can be true (return logprobs) or a number 1-20 (return top N logprobs).
 	Logprobs any `json:"logprobs,omitempty"`

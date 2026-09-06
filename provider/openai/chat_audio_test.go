@@ -5,15 +5,46 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	goaierrors "github.com/airlockrun/goai/errors"
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/model"
 	"github.com/airlockrun/goai/provider"
 )
+
+func TestChatAudio_InvalidStreams(t *testing.T) {
+	for _, tt := range []struct {
+		name, body string
+		parse      bool
+	}{
+		{"malformed", "data: {\n\n", true},
+		{"incomplete", "data: " + `{"choices":[{"delta":{"content":"partial"}}]}` + "\n\n", false},
+		{"error", "data: " + `{"error":{"code":"server_error","message":"failed"}}` + "\n\n", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, tt.body) }))
+			defer server.Close()
+			_, err := New(provider.Options{BaseURL: server.URL}).streamChatAudio(context.Background(), chatRequest{Model: "gpt-audio"}, nil)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			var parseErr *goaierrors.JSONParseError
+			var apiErr *goaierrors.APICallError
+			if tt.parse {
+				if !errors.As(err, &parseErr) {
+					t.Fatalf("not parse error: %v", err)
+				}
+			} else if !errors.As(err, &apiErr) {
+				t.Fatalf("not API error: %v", err)
+			}
+		})
+	}
+}
 
 func TestConvertUserContentAudio(t *testing.T) {
 	content := message.Content{Parts: []message.Part{

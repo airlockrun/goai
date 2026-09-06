@@ -12,9 +12,11 @@ import (
 	"strings"
 
 	goaierrors "github.com/airlockrun/goai/errors"
+	goaiinternal "github.com/airlockrun/goai/internal"
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/model"
 	"github.com/airlockrun/goai/provider"
+	"github.com/airlockrun/goai/provider/openaicompat"
 	goairesponse "github.com/airlockrun/goai/response"
 	"github.com/airlockrun/goai/stream"
 	"github.com/airlockrun/goai/tool"
@@ -26,8 +28,10 @@ const (
 
 // Options contains configuration for the Baseten provider.
 type Options struct {
-	APIKey  string
-	Headers map[string]string
+	APIKey string
+	// ModelURL is the deployed embedding model's /sync or /sync/v1 endpoint.
+	ModelURL string
+	Headers  map[string]string
 }
 
 // Provider implements the Baseten provider.
@@ -53,8 +57,17 @@ func (p *Provider) LanguageModel(modelID string) model.LanguageModel {
 	}
 }
 
-func (p *Provider) ImageModel(modelID string) model.ImageModel                 { return nil }
-func (p *Provider) EmbeddingModel(modelID string) model.EmbeddingModel         { return nil }
+func (p *Provider) ImageModel(modelID string) model.ImageModel { return nil }
+func (p *Provider) EmbeddingModel(modelID string) model.EmbeddingModel {
+	baseURL := strings.TrimRight(p.opts.ModelURL, "/")
+	if strings.HasSuffix(baseURL, "/sync") {
+		baseURL += "/v1"
+	}
+	if !strings.HasSuffix(baseURL, "/sync/v1") {
+		panic("baseten: embedding ModelURL must end in /sync or /sync/v1")
+	}
+	return openaicompat.New(openaicompat.Options{ProviderID: p.ID(), BaseURL: baseURL, APIKey: p.opts.APIKey, Headers: p.opts.Headers, MaxEmbeddingInputs: 128}).EmbeddingModel(modelID)
+}
 func (p *Provider) SpeechModel(modelID string) model.SpeechModel               { return nil }
 func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel { return nil }
 func (p *Provider) RerankingModel(modelID string) model.RerankingModel         { return nil }
@@ -181,7 +194,8 @@ func (m *BasetenLanguageModel) doStream(ctx context.Context, options *stream.Cal
 }
 
 func (m *BasetenLanguageModel) processStream(ctx context.Context, body io.Reader, tools []tool.Tool, events chan<- stream.Event) {
-	scanner := bufio.NewScanner(body)
+	streamReader := goaiinternal.NewStreamReader(body)
+	scanner := bufio.NewScanner(streamReader)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
 	var textStarted bool
@@ -228,6 +242,10 @@ func (m *BasetenLanguageModel) processStream(ctx context.Context, body io.Reader
 			}
 			events <- stream.Event{Type: stream.EventTextDelta, Data: stream.TextDeltaEvent{Text: text}}
 		}
+	}
+	if err := streamReader.Err(ctx, scanner.Err()); err != nil {
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+		return
 	}
 
 	if textStarted {

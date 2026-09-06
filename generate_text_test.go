@@ -430,6 +430,7 @@ func TestStreamText_RetriesAsyncSetupErrorBeforeContent(t *testing.T) {
 			attempts++
 			events := make(chan stream.Event, 16)
 			events <- stream.Event{Type: stream.EventStart, Data: stream.StartEvent{}}
+			events <- stream.Event{Type: stream.EventStartStep, Data: stream.StartStepEvent{}}
 			if attempts == 1 {
 				events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{
 					Message: "temporarily unavailable", StatusCode: 502, ResponseHeaders: map[string]string{"Retry-After": "0"},
@@ -459,7 +460,48 @@ func TestStreamText_RetriesAsyncSetupErrorBeforeContent(t *testing.T) {
 	}
 }
 
-func TestStreamText_ClosedSetupStreamCompletes(t *testing.T) {
+func TestStreamText_DoesNotRetryAsyncErrorAfterContent(t *testing.T) {
+	attempts := 0
+	streamErr := goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{
+		Message:         "stream disconnected",
+		Cause:           errors.New("connection reset"),
+		IsRetryable:     true,
+		IsRetryableSet:  true,
+		ResponseHeaders: map[string]string{"Retry-After": "0"},
+	})
+	model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
+		DoStreamFunc: func(context.Context, *stream.CallOptions) (<-chan stream.Event, error) {
+			attempts++
+			events := make(chan stream.Event, 5)
+			events <- stream.Event{Type: stream.EventStart, Data: stream.StartEvent{}}
+			events <- stream.Event{Type: stream.EventStartStep, Data: stream.StartStepEvent{}}
+			events <- stream.Event{Type: stream.EventTextStart, Data: stream.TextStartEvent{}}
+			events <- stream.Event{Type: stream.EventTextDelta, Data: stream.TextDeltaEvent{Text: "partial"}}
+			events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: streamErr}}
+			close(events)
+			return events, nil
+		},
+	})
+
+	result, err := StreamText(context.Background(), stream.Input{
+		Model: model, Messages: []message.Message{message.NewUserMessage("hello")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := result.Text()
+	if !errors.Is(err, streamErr) {
+		t.Fatalf("Text() error = %v, want %v", err, streamErr)
+	}
+	if text != "partial" {
+		t.Fatalf("text = %q, want partial", text)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+}
+
+func TestStreamText_ClosedSetupStreamFails(t *testing.T) {
 	tests := []struct {
 		name  string
 		start bool
@@ -484,8 +526,8 @@ func TestStreamText_ClosedSetupStreamCompletes(t *testing.T) {
 				t.Fatal(err)
 			}
 			text, err := result.Text()
-			if err != nil {
-				t.Fatal(err)
+			if !errors.Is(err, goaierrors.ErrInvalidResponse) {
+				t.Fatalf("Text() error = %v, want invalid response", err)
 			}
 			if text != "" {
 				t.Fatalf("text = %q, want empty", text)
@@ -1291,7 +1333,7 @@ func TestBuildStepMessages_InvalidToolInputSubstitutedWithEmptyObject(t *testing
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			msgs := buildStepMessages("", nil, []stream.ToolCall{
+			msgs := buildStepMessages([]stream.Event{{Type: stream.EventToolCall, Data: stream.ToolCallEvent{ToolCallID: "c1"}}}, []stream.ToolCall{
 				{ID: "c1", Name: "t", Input: tc.input},
 			}, nil)
 			if len(msgs) != 1 {
@@ -1410,7 +1452,7 @@ func TestExecuteTools_OrderedBatch(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			executor := &recordingToolExecutor{responses: tt.responses, errors: tt.errors}
-			results, err := executeTools(context.Background(), executor, toolCalls)
+			results, err := executeTools(context.Background(), executor, toolCalls, stream.ToolCallExecutionSync)
 			if err != nil {
 				t.Fatalf("executeTools() error = %v", err)
 			}
@@ -1460,7 +1502,7 @@ func TestExecuteTools_WrappedFatalError(t *testing.T) {
 			results, err := executeTools(context.Background(), executor, []stream.ToolCall{
 				{ID: "1", Name: "first"},
 				{ID: "2", Name: "second"},
-			})
+			}, stream.ToolCallExecutionSync)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("executeTools() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -1469,6 +1511,144 @@ func TestExecuteTools_WrappedFatalError(t *testing.T) {
 			}
 			if len(results) != tt.wantResults {
 				t.Errorf("len(results) = %d, want %d", len(results), tt.wantResults)
+			}
+		})
+	}
+}
+
+type blockingToolExecutor struct {
+	started chan string
+	release <-chan struct{}
+}
+
+func (e *blockingToolExecutor) Execute(ctx context.Context, req tool.Request) (tool.Response, error) {
+	e.started <- req.ToolName
+	select {
+	case <-e.release:
+		return tool.Response{Output: req.ToolName}, nil
+	case <-ctx.Done():
+		return tool.Response{}, ctx.Err()
+	}
+}
+
+func (*blockingToolExecutor) Tools() []tool.Info { return nil }
+
+func TestExecuteTools_AsyncStartsTogetherAndPreservesResultOrder(t *testing.T) {
+	release := make(chan struct{})
+	executor := &blockingToolExecutor{
+		started: make(chan string, 3),
+		release: release,
+	}
+	toolCalls := []stream.ToolCall{
+		{ID: "3", Name: "third"},
+		{ID: "1", Name: "first"},
+		{ID: "2", Name: "second"},
+	}
+	type execution struct {
+		results []stream.ToolResultEvent
+		err     error
+	}
+	done := make(chan execution, 1)
+	go func() {
+		results, err := executeTools(context.Background(), executor, toolCalls, stream.ToolCallExecutionAsync)
+		done <- execution{results: results, err: err}
+	}()
+
+	started := make(map[string]bool, len(toolCalls))
+	for range toolCalls {
+		started[<-executor.started] = true
+	}
+	for _, tc := range toolCalls {
+		if !started[tc.Name] {
+			t.Fatalf("tool %q did not start", tc.Name)
+		}
+	}
+	close(release)
+
+	outcome := <-done
+	if outcome.err != nil {
+		t.Fatal(outcome.err)
+	}
+	if len(outcome.results) != len(toolCalls) {
+		t.Fatalf("len(results) = %d, want %d", len(outcome.results), len(toolCalls))
+	}
+	for i, result := range outcome.results {
+		if result.ToolCallID != toolCalls[i].ID {
+			t.Errorf("results[%d].ToolCallID = %q, want %q", i, result.ToolCallID, toolCalls[i].ID)
+		}
+	}
+}
+
+type fatalAndBlockingExecutor struct {
+	started chan struct{}
+	release <-chan struct{}
+}
+
+func (e *fatalAndBlockingExecutor) Execute(ctx context.Context, req tool.Request) (tool.Response, error) {
+	if req.ToolName == "fatal" {
+		return tool.Response{}, markedFatalError{fatal: true}
+	}
+	e.started <- struct{}{}
+	select {
+	case <-e.release:
+		return tool.Response{Output: "completed"}, nil
+	case <-ctx.Done():
+		return tool.Response{}, ctx.Err()
+	}
+}
+
+func (*fatalAndBlockingExecutor) Tools() []tool.Info { return nil }
+
+func TestExecuteTools_AsyncRetainsSiblingResultAfterFatalError(t *testing.T) {
+	release := make(chan struct{})
+	executor := &fatalAndBlockingExecutor{
+		started: make(chan struct{}, 1),
+		release: release,
+	}
+	type execution struct {
+		results []stream.ToolResultEvent
+		err     error
+	}
+	done := make(chan execution, 1)
+	go func() {
+		results, err := executeTools(context.Background(), executor, []stream.ToolCall{
+			{ID: "fatal-1", Name: "fatal"},
+			{ID: "write-1", Name: "write"},
+		}, stream.ToolCallExecutionAsync)
+		done <- execution{results: results, err: err}
+	}()
+
+	<-executor.started
+	close(release)
+	outcome := <-done
+	if outcome.err == nil {
+		t.Fatal("executeTools() error = nil, want fatal error")
+	}
+	if len(outcome.results) != 1 || outcome.results[0].ToolCallID != "write-1" {
+		t.Fatalf("results = %#v, want completed write result", outcome.results)
+	}
+}
+
+func TestResolveToolCallExecutionMode(t *testing.T) {
+	tests := []struct {
+		name    string
+		mode    stream.ToolCallExecutionMode
+		want    stream.ToolCallExecutionMode
+		wantErr bool
+	}{
+		{name: "default is sync", want: stream.ToolCallExecutionSync},
+		{name: "sync", mode: stream.ToolCallExecutionSync, want: stream.ToolCallExecutionSync},
+		{name: "async", mode: stream.ToolCallExecutionAsync, want: stream.ToolCallExecutionAsync},
+		{name: "invalid", mode: "parallel", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveToolCallExecutionMode(tt.mode)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("resolveToolCallExecutionMode() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("resolveToolCallExecutionMode() = %q, want %q", got, tt.want)
 			}
 		})
 	}

@@ -1,153 +1,118 @@
 package google
 
 import (
-	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
-	"fmt"
-	"io"
+	"errors"
 	"net/http"
+	"strings"
+	"time"
 
+	goaierrors "github.com/airlockrun/goai/errors"
+	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/model"
 	"github.com/airlockrun/goai/stream"
 )
 
-// GoogleImageModel implements the ImageModel interface for Google AI.
 type GoogleImageModel struct {
 	id       string
 	provider *Provider
 }
 
-// ID returns the model identifier.
-func (m *GoogleImageModel) ID() string {
-	return m.id
-}
+func (m *GoogleImageModel) ID() string            { return m.id }
+func (m *GoogleImageModel) Provider() string      { return "google" }
+func (m *GoogleImageModel) MaxImagesPerCall() int { return 1 }
 
-// Provider returns "google".
-func (m *GoogleImageModel) Provider() string {
-	return "google"
-}
-
-// MaxImagesPerCall returns the maximum number of images that can be generated in a single call.
-func (m *GoogleImageModel) MaxImagesPerCall() int {
-	return 4
-}
-
-// Generate generates images based on the provided options.
 func (m *GoogleImageModel) Generate(ctx context.Context, opts model.ImageCallOptions) (*model.ImageResult, error) {
-	// Mirrors ai-sdk google-generative-ai-image-model.ts: Imagen does not
-	// expose a `size` or `seed` parameter, so both are silently dropped
-	// with a warning.
-	var warnings []stream.Warning
-	if opts.Size != "" {
-		warnings = append(warnings, stream.UnsupportedWarning("size", "This model does not support the `size` option. Use `aspectRatio` instead."))
+	if !strings.HasPrefix(m.id, "gemini-") {
+		return nil, errors.New("Google image models require a gemini- model ID")
+	}
+	if opts.Mask != nil {
+		return nil, errors.New("Gemini image models do not support masks")
+	}
+	if opts.N > 1 {
+		return nil, errors.New("Gemini image models require n <= 1")
+	}
+	parts := []message.Part{message.TextPart{Text: opts.Prompt}}
+	for _, file := range opts.Files {
+		parts = append(parts, message.FilePart{MimeType: http.DetectContentType(file), Data: message.FileDataBytes{Data: base64.StdEncoding.EncodeToString(file)}})
+	}
+	options := make(map[string]any, len(opts.ProviderOptions)+2)
+	for k, v := range opts.ProviderOptions {
+		options[k] = v
+	}
+	imageConfig := map[string]any{}
+	if config, ok := options["imageConfig"]; ok {
+		data, err := json.Marshal(config)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(data, &imageConfig); err != nil {
+			return nil, err
+		}
+		if imageConfig == nil {
+			imageConfig = map[string]any{}
+		}
+	}
+	if opts.AspectRatio != "" {
+		imageConfig["aspectRatio"] = opts.AspectRatio
+	}
+	options["imageConfig"] = imageConfig
+	options["responseModalities"] = []string{"IMAGE"}
+	body, warnings, err := (&GoogleModel{id: m.id, provider: m.provider}).buildRequest(&stream.CallOptions{Messages: []message.Message{{Role: message.RoleUser, Content: message.Content{Parts: parts}}}, ProviderOptions: options})
+	if err != nil {
+		return nil, err
+	}
+	var request map[string]any
+	if err := json.Unmarshal(body, &request); err != nil {
+		return nil, err
 	}
 	if opts.Seed != nil {
-		warnings = append(warnings, stream.UnsupportedWarning("seed", "This model does not support the `seed` option through this provider."))
+		request["generationConfig"].(map[string]any)["seed"] = *opts.Seed
 	}
-
-	// Build request using Imagen API
-	req := imagenRequest{
-		Instances: []imagenInstance{{
-			Prompt: opts.Prompt,
-		}},
-		Parameters: imagenParameters{
-			SampleCount: opts.N,
-		},
+	if search, ok := options["googleSearch"]; ok {
+		request["tools"] = []any{map[string]any{"googleSearch": search}}
 	}
-
-	if req.Parameters.SampleCount <= 0 {
-		req.Parameters.SampleCount = 1
+	if opts.Size != "" {
+		warnings = append(warnings, stream.UnsupportedWarning("size", "Use aspectRatio instead."))
 	}
-
-	// Handle aspect ratio
-	if opts.AspectRatio != "" {
-		req.Parameters.AspectRatio = opts.AspectRatio
-	}
-
-	reqBody, err := json.Marshal(req)
+	var response geminiStreamChunk
+	headers, err := m.provider.post(ctx, m.id, "generateContent", request, opts.Headers, &response)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
+		return nil, err
 	}
-
-	// Create HTTP request
-	url := fmt.Sprintf("%s/models/%s:predict?key=%s",
-		m.provider.opts.BaseURL, m.id, m.provider.opts.APIKey)
-
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBody))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+	if response.PromptFeedback != nil && response.PromptFeedback.BlockReason != "" {
+		return nil, goaierrors.ErrContentFiltered
 	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	for k, v := range opts.Headers {
-		httpReq.Header.Set(k, v)
-	}
-
-	// Execute request
-	resp, err := http.DefaultClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Google AI API error (status %d): %s", resp.StatusCode, string(body))
-	}
-
-	// Parse response
-	var imgResp imagenResponse
-	if err := json.Unmarshal(body, &imgResp); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	// Convert to model result
-	images := make([]model.GeneratedImage, len(imgResp.Predictions))
-	for i, p := range imgResp.Predictions {
-		images[i] = model.GeneratedImage{
-			Base64:   p.BytesBase64Encoded,
-			MimeType: p.MimeType,
-		}
-		if p.MimeType == "" {
-			images[i].MimeType = "image/png"
+	result := &model.ImageResult{Warnings: warnings, Response: model.ImageResponse{Model: m.id, Headers: headers, Timestamp: time.Now().Unix()}}
+	for _, candidate := range response.Candidates {
+		if candidate.Content != nil {
+			for _, part := range candidate.Content.Parts {
+				if part.InlineData != nil && strings.HasPrefix(part.InlineData.MimeType, "image/") {
+					result.Images = append(result.Images, model.GeneratedImage{Base64: part.InlineData.Data, MimeType: part.InlineData.MimeType})
+				}
+			}
 		}
 	}
-
-	return &model.ImageResult{
-		Images:   images,
-		Warnings: warnings,
-		Response: model.ImageResponse{
-			Model: m.id,
-		},
-	}, nil
-}
-
-// Request/response types
-
-type imagenRequest struct {
-	Instances  []imagenInstance `json:"instances"`
-	Parameters imagenParameters `json:"parameters"`
-}
-
-type imagenInstance struct {
-	Prompt string `json:"prompt"`
-}
-
-type imagenParameters struct {
-	SampleCount int    `json:"sampleCount,omitempty"`
-	AspectRatio string `json:"aspectRatio,omitempty"`
-}
-
-type imagenResponse struct {
-	Predictions []imagenPrediction `json:"predictions"`
-}
-
-type imagenPrediction struct {
-	BytesBase64Encoded string `json:"bytesBase64Encoded"`
-	MimeType           string `json:"mimeType"`
+	if response.UsageMetadata != nil {
+		result.Usage = &model.ImageUsage{TotalTokens: response.UsageMetadata.TotalTokenCount}
+	}
+	metadata := map[string]any{}
+	images := make([]map[string]any, len(result.Images))
+	for i := range images {
+		images[i] = map[string]any{}
+	}
+	metadata["images"] = images
+	if len(response.Candidates) > 0 {
+		candidate := response.Candidates[0]
+		if candidate.GroundingMetadata != nil {
+			metadata["groundingMetadata"] = mapGroundingMetadata(candidate.GroundingMetadata)
+		}
+		if candidate.URLContextMetadata != nil {
+			metadata["urlContextMetadata"] = mapURLContextMetadata(candidate.URLContextMetadata)
+		}
+	}
+	result.ProviderMetadata = map[string]any{"google": metadata}
+	return result, nil
 }

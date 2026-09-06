@@ -15,6 +15,44 @@ import (
 
 var testTranscriptionAudio = []byte{1, 2, 3, 4, 5, 6, 7, 8}
 
+func TestOpenAITranscription_Diarization(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Error(err)
+			return
+		}
+		defer r.MultipartForm.RemoveAll()
+		if r.FormValue("response_format") != "diarized_json" || r.FormValue("chunking_strategy") != "auto" {
+			t.Errorf("form: %v", r.MultipartForm.Value)
+		}
+		if r.FormValue("timestamp_granularities[]") != "" {
+			t.Error("diarization must not request timestamp granularities")
+		}
+		if r.FormValue("known_speaker_names[]") != "Alice" {
+			t.Error("missing known speaker")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"text":"Hello","segments":[{"id":"seg_0","speaker":"Alice","start":0,"end":1.5,"text":"Hello"}]}`))
+	}))
+	defer server.Close()
+	m := New(provider.Options{BaseURL: server.URL}).TranscriptionModel("gpt-4o-transcribe-diarize").(*OpenAITranscriptionModel)
+	opts := model.TranscribeCallOptions{Audio: testTranscriptionAudio, ProviderOptions: map[string]any{"knownSpeakerNames": []string{"Alice"}}}
+	result, err := m.TranscribeDetailed(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.DiarizedSegments) != 1 || result.DiarizedSegments[0].ID != "seg_0" || result.DiarizedSegments[0].Speaker != "Alice" {
+		t.Fatalf("result: %+v", result)
+	}
+	shared, err := m.Transcribe(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(shared.Segments) != 1 || len(shared.Warnings) != 1 {
+		t.Fatalf("shared result: %+v", shared)
+	}
+}
+
 func TestOpenAITranscription_DoTranscribe(t *testing.T) {
 	t.Run("should transcribe audio", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

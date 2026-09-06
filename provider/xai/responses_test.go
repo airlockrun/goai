@@ -161,14 +161,13 @@ func TestXaiResponses_ModelID(t *testing.T) {
 	}
 }
 
-// Ensures the curated Responses lineup routes to Responses and other IDs
-// route to Chat via compat.
+// Model selects Responses; Chat explicitly selects Chat Completions.
 func TestXaiResponses_ModelRouting(t *testing.T) {
 	p := newTestProvider("http://localhost")
 
 	responsesIDs := []string{
 		"grok-4.20-non-reasoning", "grok-4.20-reasoning",
-		"grok-4.3", "grok-latest",
+		"grok-4.3", "grok-latest", "grok-4.5", "grok-4.6", "custom-model",
 	}
 	for _, id := range responsesIDs {
 		m := p.Model(id)
@@ -179,7 +178,7 @@ func TestXaiResponses_ModelRouting(t *testing.T) {
 
 	chatIDs := []string{"grok-4", "grok-3-mini", "grok-code-fast-1", "grok-beta"}
 	for _, id := range chatIDs {
-		m := p.Model(id)
+		m := p.Chat(id)
 		if _, ok := m.(*XaiResponsesModel); ok {
 			t.Errorf("Model(%q) = *XaiResponsesModel, want openaicompat", id)
 		}

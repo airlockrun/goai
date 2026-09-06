@@ -21,6 +21,53 @@ func TestHuggingFaceProvider_ID(t *testing.T) {
 	}
 }
 
+func TestHuggingFaceProvider_ResponsesDefault(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" || r.Header.Get("Authorization") != "Bearer key" {
+			t.Errorf("request: %s %v", r.URL, r.Header)
+		}
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Error(err)
+			return
+		}
+		if req["model"] != "org/model:provider" || req["input"] == nil || req["inputs"] != nil {
+			t.Errorf("body: %v", req)
+		}
+		if req["text"].(map[string]any)["format"].(map[string]any)["type"] != "json_object" {
+			t.Errorf("format: %v", req)
+		}
+		w.Write([]byte("data: " + `{"type":"response.output_text.delta","delta":"{}"}` + "\n\ndata: " + `{"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":2}}}` + "\n\n"))
+	}))
+	defer server.Close()
+	p := New(Options{APIKey: "key", ResponsesBaseURL: server.URL + "/v1/"})
+	if p.opts.BaseURL != defaultBaseURL {
+		t.Fatal("Responses endpoint changed inference modality endpoint")
+	}
+	events, err := p.Model("org/model:provider").Stream(context.Background(), &stream.CallOptions{Messages: []message.Message{message.NewUserMessage("hi")}, ResponseFormat: &stream.ResponseFormat{Type: "json"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var text string
+	var finished bool
+	for event := range events {
+		switch event.Type {
+		case stream.EventError:
+			t.Fatal(event.Data)
+		case stream.EventTextDelta:
+			text += event.Data.(stream.TextDeltaEvent).Text
+		case stream.EventFinish:
+			finished = true
+		}
+	}
+	if text != "{}" || !finished {
+		t.Fatalf("text=%q finished=%v", text, finished)
+	}
+	if New(Options{}).opts.ResponsesBaseURL != "https://router.huggingface.co/v1" {
+		t.Fatal("wrong default Responses URL")
+	}
+}
+
 func TestHuggingFaceLanguageModel_ID(t *testing.T) {
 	provider := New(Options{APIKey: "test-key"})
 	m := provider.LanguageModel("meta-llama/Meta-Llama-3.1-8B-Instruct")
@@ -34,8 +81,8 @@ func TestHuggingFaceLanguageModel_Provider(t *testing.T) {
 	provider := New(Options{APIKey: "test-key"})
 	m := provider.LanguageModel("meta-llama/Meta-Llama-3.1-8B-Instruct")
 
-	if m.Provider() != "huggingface" {
-		t.Errorf("expected provider huggingface, got %s", m.Provider())
+	if m.Provider() != "huggingface.responses" {
+		t.Errorf("expected provider huggingface.responses, got %s", m.Provider())
 	}
 }
 
@@ -62,7 +109,7 @@ func TestHuggingFaceLanguageModel_Stream(t *testing.T) {
 			APIKey:  "test-api-key",
 			BaseURL: server.URL,
 		})
-		m := provider.LanguageModel("test-model")
+		m := provider.TextGeneration("test-model")
 
 		events, err := m.Stream(context.Background(), &stream.CallOptions{
 			Messages: []message.Message{
@@ -108,7 +155,7 @@ func TestHuggingFaceLanguageModel_Stream(t *testing.T) {
 			APIKey:  "test-api-key",
 			BaseURL: server.URL,
 		})
-		m := provider.LanguageModel("test-model")
+		m := provider.TextGeneration("test-model")
 
 		events, _ := m.Stream(context.Background(), &stream.CallOptions{
 			Messages: []message.Message{
@@ -396,7 +443,7 @@ func TestHuggingFaceLanguageModel_ResponseFormatInjectsInstruction(t *testing.T)
 	defer server.Close()
 
 	p := New(Options{APIKey: "k", BaseURL: server.URL})
-	m := p.LanguageModel("test-model")
+	m := p.TextGeneration("test-model")
 	schema := json.RawMessage(`{"type":"object","properties":{"name":{"type":"string"}}}`)
 	events, err := m.Stream(context.Background(), &stream.CallOptions{
 		Messages:       []message.Message{message.NewUserMessage("hi")},

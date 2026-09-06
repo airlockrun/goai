@@ -14,7 +14,21 @@ const (
 	ToolIDEnterpriseWebSearch = "google.enterprise_web_search"
 	ToolIDURLContext          = "google.url_context"
 	ToolIDCodeExecution       = "google.code_execution"
+	ToolIDFileSearch          = "google.file_search"
 )
+
+// FileSearchOptions selects the managed stores used for file grounding.
+type FileSearchOptions struct {
+	FileSearchStoreNames []string `json:"fileSearchStoreNames"`
+	MetadataFilter       string   `json:"metadataFilter,omitempty"`
+	TopK                 *int     `json:"topK,omitempty"`
+}
+
+// FileSearch grounds responses in managed file stores on Gemini 2.5 and newer.
+func FileSearch(options FileSearchOptions) tool.Tool {
+	args, _ := json.Marshal(options)
+	return tool.Tool{Type: "provider", ProviderID: ToolIDFileSearch, Name: "file_search", Args: args}
+}
 
 // GoogleSearchOptions configures the google_search grounding tool.
 //

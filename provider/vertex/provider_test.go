@@ -11,11 +11,135 @@ import (
 	"strings"
 	"testing"
 
+	goaierrors "github.com/airlockrun/goai/errors"
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/model"
-	"github.com/airlockrun/goai/provider"
 	"github.com/airlockrun/goai/stream"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func TestVertexStreamValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name, data   string
+		api, invalid bool
+		finish       stream.FinishReason
+	}{
+		{name: "blocked", data: `data:{"promptFeedback":{"blockReason":"SAFETY"}}`, finish: stream.FinishReasonContentFilter},
+		{name: "invalid", data: `data: {`, invalid: true},
+		{name: "API error", data: `data: {"error":{"code":503,"message":"unavailable"}}`, api: true},
+		{name: "empty", invalid: true},
+		{name: "incomplete", data: `data: {"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}`, invalid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			events := make(chan stream.Event, 100)
+			(&VertexLanguageModel{}).processStream(context.Background(), strings.NewReader(tc.data+"\n\n"), nil, events, false)
+			close(events)
+			var gotErr error
+			var finish stream.FinishReason
+			for event := range events {
+				if value, ok := event.Data.(stream.ErrorEvent); ok {
+					gotErr = value.Error
+				}
+				if value, ok := event.Data.(stream.FinishEvent); ok {
+					finish = value.FinishReason
+				}
+			}
+			if tc.invalid && !errors.Is(gotErr, goaierrors.ErrInvalidResponse) {
+				t.Fatalf("error = %v", gotErr)
+			}
+			if tc.api {
+				var api *goaierrors.APICallError
+				if !errors.As(gotErr, &api) {
+					t.Fatalf("error = %v", gotErr)
+				}
+			}
+			if finish != tc.finish {
+				t.Fatalf("finish = %q", finish)
+			}
+		})
+	}
+}
+
+func TestVertexEmbeddingRoutes(t *testing.T) {
+	for _, id := range []string{"text-embedding-005", "gemini-embedding-2", "gemini-embedding-2-preview"} {
+		t.Run(id, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var request map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Error(err)
+				}
+				if strings.HasPrefix(id, "gemini-") {
+					if !strings.HasSuffix(r.URL.Path, ":embedContent") || request["embedContentConfig"].(map[string]any)["outputDimensionality"] != float64(2) {
+						t.Errorf("request = %s %v", r.URL.Path, request)
+					}
+					_, _ = w.Write([]byte(`{"embedding":{"values":[1,2]}}`))
+				} else {
+					if !strings.HasSuffix(r.URL.Path, ":predict") {
+						t.Errorf("path = %s", r.URL.Path)
+					}
+					_, _ = w.Write([]byte(`{"predictions":[{"embeddings":{"values":[1,2]}}]}`))
+				}
+			}))
+			defer server.Close()
+			m := New(Options{BaseURL: server.URL}).EmbeddingModel(id)
+			dimensions := 2
+			result, err := m.Embed(context.Background(), model.EmbedCallOptions{Values: []string{"test"}, Dimensions: &dimensions})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Embeddings) != 1 {
+				t.Fatalf("result = %+v", result)
+			}
+			if strings.HasPrefix(id, "gemini-") {
+				if m.MaxEmbeddingsPerCall() != 1 {
+					t.Fatal("must limit batch to one")
+				}
+				if _, err := m.Embed(context.Background(), model.EmbedCallOptions{Values: []string{"a", "b"}}); err == nil {
+					t.Fatal("oversized batch must fail")
+				}
+			}
+		})
+	}
+}
+
+func TestVertexLanguageOptions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+		}
+		if request["serviceTier"] != nil || r.Header.Get("X-Vertex-AI-LLM-Shared-Request-Type") != "priority" || r.Header.Get("X-Vertex-AI-LLM-Request-Type") != "shared" {
+			t.Errorf("tier = %v %v", request, r.Header)
+		}
+		config := request["generationConfig"].(map[string]any)
+		if config["thinkingConfig"].(map[string]any)["thinkingLevel"] != "low" || config["imageConfig"] == nil || config["streamFunctionCallArguments"] != nil {
+			t.Errorf("config = %v", config)
+		}
+		toolConfig := request["toolConfig"].(map[string]any)
+		if toolConfig["functionCallingConfig"].(map[string]any)["streamFunctionCallArguments"] != true || toolConfig["retrievalConfig"] == nil {
+			t.Errorf("tool config = %v", toolConfig)
+		}
+		if request["cachedContent"] != "cache" || request["labels"] == nil || len(request["safetySettings"].([]any)) != 5 {
+			t.Errorf("request = %v", request)
+		}
+		_, _ = w.Write([]byte("data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n"))
+	}))
+	defer server.Close()
+	events, err := New(Options{BaseURL: server.URL}).Model("gemini-3.8-flash").Stream(context.Background(), &stream.CallOptions{Reasoning: "none", ToolChoice: "auto", ProviderOptions: map[string]any{"serviceTier": "priority", "sharedRequestType": "priority", "requestType": "shared", "streamFunctionCallArguments": true, "imageConfig": map[string]any{"imageSize": "2K"}, "retrievalConfig": map[string]any{"latLng": map[string]any{"latitude": 1, "longitude": 2}}, "cachedContent": "cache", "labels": map[string]string{"team": "test"}, "threshold": "OFF"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for event := range events {
+		if event.Type == stream.EventError {
+			t.Fatalf("error = %+v", event.Data)
+		}
+	}
+}
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 func TestVertexProvider_ID(t *testing.T) {
 	provider := New(Options{
@@ -26,6 +150,69 @@ func TestVertexProvider_ID(t *testing.T) {
 
 	if provider.ID() != "vertex" {
 		t.Errorf("expected provider ID vertex, got %s", provider.ID())
+	}
+}
+
+func TestVertexLanguageModel_SetupErrorClassification(t *testing.T) {
+	transportErr := errors.New("connection refused")
+	tests := []struct {
+		name          string
+		roundTrip     roundTripFunc
+		wantStatus    int
+		wantRetryable bool
+		wantCause     error
+	}{
+		{
+			name: "transport error",
+			roundTrip: func(*http.Request) (*http.Response, error) {
+				return nil, transportErr
+			},
+			wantRetryable: true,
+			wantCause:     transportErr,
+		},
+		{
+			name: "bad request",
+			roundTrip: func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusBadRequest,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader("invalid request")),
+					Request:    req,
+				}, nil
+			},
+			wantStatus: http.StatusBadRequest,
+		},
+	}
+
+	originalClient := http.DefaultClient
+	t.Cleanup(func() { http.DefaultClient = originalClient })
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			http.DefaultClient = &http.Client{Transport: tt.roundTrip}
+			model := New(Options{BaseURL: "http://vertex.test", AccessToken: "token"}).Model("gemini-1.5-pro")
+			events, err := model.Stream(context.Background(), &stream.CallOptions{
+				Messages: []message.Message{message.NewUserMessage("hello")},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var eventErr error
+			for event := range events {
+				if event.Type == stream.EventError {
+					eventErr = event.Data.(stream.ErrorEvent).Error
+				}
+			}
+			var apiErr *goaierrors.APICallError
+			if !errors.As(eventErr, &apiErr) {
+				t.Fatalf("error = %v, want APICallError", eventErr)
+			}
+			if apiErr.StatusCode != tt.wantStatus || apiErr.IsRetryable != tt.wantRetryable {
+				t.Errorf("status/retryable = %d/%v, want %d/%v", apiErr.StatusCode, apiErr.IsRetryable, tt.wantStatus, tt.wantRetryable)
+			}
+			if tt.wantCause != nil && !errors.Is(apiErr, tt.wantCause) {
+				t.Errorf("error = %v, want cause %v", apiErr, tt.wantCause)
+			}
+		})
 	}
 }
 
@@ -305,8 +492,20 @@ func TestVertexLanguageModel_ErrorHandling(t *testing.T) {
 	})
 }
 
-func TestVertexLanguageModel_ResponseFormat_ReturnsUnsupported(t *testing.T) {
+func TestVertexLanguageModel_ResponseFormat(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+		}
+		if request["generationConfig"].(map[string]any)["responseMimeType"] != "application/json" {
+			t.Errorf("request = %v", request)
+		}
+		_, _ = w.Write([]byte("data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n"))
+	}))
+	defer server.Close()
 	p := New(Options{
+		BaseURL:     server.URL,
 		ProjectID:   "p",
 		Location:    "us-central1",
 		AccessToken: "t",
@@ -327,11 +526,8 @@ func TestVertexLanguageModel_ResponseFormat_ReturnsUnsupported(t *testing.T) {
 			}
 		}
 	}
-	if gotErr == nil {
-		t.Fatal("expected error event")
-	}
-	if !errors.Is(gotErr, provider.ErrResponseFormatUnsupported) {
-		t.Errorf("expected error to wrap ErrResponseFormatUnsupported, got %v", gotErr)
+	if gotErr != nil {
+		t.Fatal(gotErr)
 	}
 }
 

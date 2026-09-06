@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,101 @@ import (
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func TestCompatStableStreamFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		target     error
+		api        bool
+	}{
+		{"malformed", "data:{broken}\n\n", goaierrors.ErrJSONParseFailed, false},
+		{"missing choices", "data:{}\n\n", goaierrors.ErrInvalidResponse, false},
+		{"missing finish", "data:{\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\ndata:[DONE]\n\n", goaierrors.ErrInvalidResponse, false},
+		{"typed error", "data:{\"error\":{\"message\":\"quota\",\"code\":429,\"type\":\"rate_limit\"}}\n\n", goaierrors.ErrAPIError, true},
+		{"invalid usage", "data:{\"choices\":[],\"usage\":{\"prompt_tokens\":\"oops\"}}\n\n", goaierrors.ErrJSONParseFailed, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New(Options{ProviderID: "test"}).Model("m").(*CompatModel)
+			events := make(chan stream.Event, 30)
+			m.processStream(context.Background(), strings.NewReader(tc.body), nil, events, true)
+			close(events)
+			var got error
+			for event := range events {
+				if event.Type == stream.EventError {
+					got = event.Data.(stream.ErrorEvent).Error
+				}
+				if event.Type == stream.EventFinish {
+					t.Fatal("failure emitted successful finish")
+				}
+			}
+			if !errors.Is(got, tc.target) {
+				t.Fatalf("error = %v, want %v", got, tc.target)
+			}
+			if tc.api {
+				var api *goaierrors.APIError
+				if !errors.As(got, &api) || api.Code != "429" || api.Message != "quota" {
+					t.Fatalf("typed error = %#v", got)
+				}
+			}
+		})
+	}
+}
+
+func TestCompatStableArrayContentAndRawUsage(t *testing.T) {
+	body := `data: {"choices":[{"delta":{"content":[{"type":"text","text":"before"},{"type":"thinking","thinking":[{"type":"text","text":"think"}]},{"type":"text","text":"after"}]},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":8},"completion_tokens_details":{"reasoning_tokens":9},"custom":{"cost":7}}}` + "\n\n" +
+		`data: {"choices":[],"usage":null}` + "\n\ndata: [DONE]\n\n"
+	events := make(chan stream.Event, 30)
+	m := New(Options{ProviderID: "test"}).Model("m").(*CompatModel)
+	m.processStream(context.Background(), strings.NewReader(body), nil, events, false)
+	close(events)
+	var sequence []stream.EventType
+	for event := range events {
+		if event.Type == stream.EventError {
+			t.Fatal(event.Data)
+		}
+		switch event.Type {
+		case stream.EventTextStart, stream.EventTextEnd, stream.EventReasoningStart, stream.EventReasoningEnd:
+			sequence = append(sequence, event.Type)
+		case stream.EventFinish:
+			usage := event.Data.(stream.FinishEvent).Usage
+			if *usage.OutputTokens.Text != 0 || *usage.InputTokens.NoCache != 0 || *usage.OutputTokens.Reasoning != 9 || usage.Raw["custom"] == nil {
+				t.Fatalf("usage = %+v", usage)
+			}
+		}
+	}
+	want := []stream.EventType{stream.EventTextStart, stream.EventTextEnd, stream.EventReasoningStart, stream.EventReasoningEnd, stream.EventTextStart, stream.EventTextEnd}
+	if fmt.Sprint(sequence) != fmt.Sprint(want) {
+		t.Fatalf("sequence = %v", sequence)
+	}
+}
+
+func TestCompatStableToolIdentityAliases(t *testing.T) {
+	body := strings.Join([]string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"a","function":{"name":"first","arguments":"{"}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"b","function":{"name":"second","arguments":"{"}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"b\":2}"}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":5,"id":"a","function":{"arguments":"\"a\":"}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":5,"function":{"arguments":"1}"}}]},"finish_reason":"tool_calls"}]}`,
+		`data: [DONE]`,
+	}, "\n\n") + "\n\n"
+	events := make(chan stream.Event, 30)
+	m := New(Options{ProviderID: "test"}).Model("m").(*CompatModel)
+	m.processStream(context.Background(), strings.NewReader(body), nil, events, false)
+	close(events)
+	got := map[string]string{}
+	for event := range events {
+		if event.Type == stream.EventError {
+			t.Fatal(event.Data)
+		}
+		if event.Type == stream.EventToolCall {
+			call := event.Data.(stream.ToolCallEvent)
+			got[call.ToolCallID] = string(call.Input)
+		}
+	}
+	if got["a"] != `{"a":1}` || got["b"] != `{"b":2}` {
+		t.Fatalf("tool inputs = %v", got)
+	}
+}
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
@@ -72,7 +168,7 @@ func TestOpenAICompatModel_StreamUsesHTTPClient(t *testing.T) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-			Body:       io.NopCloser(strings.NewReader("data: [DONE]\n\n")),
+			Body:       io.NopCloser(strings.NewReader("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")),
 			Request:    req,
 		}, nil
 	})}
@@ -115,8 +211,16 @@ func TestOpenAICompatModel_ProcessStreamReadError(t *testing.T) {
 		switch event.Type {
 		case stream.EventError:
 			sawError = true
-			if !errors.Is(event.Data.(stream.ErrorEvent).Error, readErr) {
-				t.Fatalf("expected read error, got %v", event.Data.(stream.ErrorEvent).Error)
+			eventErr := event.Data.(stream.ErrorEvent).Error
+			if !errors.Is(eventErr, readErr) {
+				t.Fatalf("expected read error, got %v", eventErr)
+			}
+			var apiErr *goaierrors.APICallError
+			if !errors.As(eventErr, &apiErr) {
+				t.Fatalf("error type = %T, want *errors.APICallError", eventErr)
+			}
+			if !apiErr.IsRetryable {
+				t.Fatal("stream read error is not retryable")
 			}
 		case stream.EventFinish, stream.EventFinishStep:
 			sawFinish = true

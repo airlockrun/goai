@@ -15,27 +15,31 @@ import (
 // See: https://platform.openai.com/docs/api-reference/responses
 
 type responsesRequest struct {
-	Model             string               `json:"model"`
-	Input             []responsesInputItem `json:"input"`
-	Stream            bool                 `json:"stream,omitempty"`
-	Temperature       *float64             `json:"temperature,omitempty"`
-	TopP              *float64             `json:"top_p,omitempty"`
-	MaxOutputTokens   *int                 `json:"max_output_tokens,omitempty"`
-	Tools             []responsesToolWire  `json:"tools,omitempty"`
-	ToolChoice        any                  `json:"tool_choice,omitempty"` // "auto", "none", "required", or {type: "function", name: "..."}
-	Instructions      string               `json:"instructions,omitempty"`
-	Store             *bool                `json:"store,omitempty"`
-	Reasoning         *reasoningConfig     `json:"reasoning,omitempty"`
-	PromptCacheKey    string               `json:"prompt_cache_key,omitempty"` // Session ID for prompt caching
-	Include           []string             `json:"include,omitempty"`          // Extra fields to include: "reasoning.encrypted_content", "file_search_call.results", "message.output_text.logprobs"
-	User              string               `json:"user,omitempty"`             // Unique identifier for end-user
-	ParallelToolCalls *bool                `json:"parallel_tool_calls,omitempty"`
-	Metadata          any                  `json:"metadata,omitempty"`
-	Text              *textConfig          `json:"text,omitempty"`                   // Text verbosity config
-	Truncation        string               `json:"truncation,omitempty"`             // "auto" or "disabled"
-	ServiceTier       string               `json:"service_tier,omitempty"`           // "auto", "flex", "priority", "default"
-	SafetyIdentifier  string               `json:"safety_identifier,omitempty"`      // Safety monitoring identifier
-	PromptCacheRetent string               `json:"prompt_cache_retention,omitempty"` // "in_memory" or "24h"
+	Model              string               `json:"model"`
+	Input              []responsesInputItem `json:"input"`
+	Stream             bool                 `json:"stream,omitempty"`
+	Temperature        *float64             `json:"temperature,omitempty"`
+	TopP               *float64             `json:"top_p,omitempty"`
+	MaxOutputTokens    *int                 `json:"max_output_tokens,omitempty"`
+	Tools              []responsesToolWire  `json:"tools,omitempty"`
+	ToolChoice         any                  `json:"tool_choice,omitempty"` // "auto", "none", "required", or {type: "function", name: "..."}
+	Instructions       string               `json:"instructions,omitempty"`
+	Conversation       string               `json:"conversation,omitempty"`
+	PreviousResponseID string               `json:"previous_response_id,omitempty"`
+	MaxToolCalls       *int                 `json:"max_tool_calls,omitempty"`
+	TopLogprobs        *int                 `json:"top_logprobs,omitempty"`
+	Store              *bool                `json:"store,omitempty"`
+	Reasoning          *reasoningConfig     `json:"reasoning,omitempty"`
+	PromptCacheKey     string               `json:"prompt_cache_key,omitempty"` // Session ID for prompt caching
+	Include            []string             `json:"include,omitempty"`          // Extra fields to include: "reasoning.encrypted_content", "file_search_call.results", "message.output_text.logprobs"
+	User               string               `json:"user,omitempty"`             // Unique identifier for end-user
+	ParallelToolCalls  *bool                `json:"parallel_tool_calls,omitempty"`
+	Metadata           any                  `json:"metadata,omitempty"`
+	Text               *textConfig          `json:"text,omitempty"`                   // Text verbosity config
+	Truncation         string               `json:"truncation,omitempty"`             // "auto" or "disabled"
+	ServiceTier        string               `json:"service_tier,omitempty"`           // "auto", "flex", "priority", "default"
+	SafetyIdentifier   string               `json:"safety_identifier,omitempty"`      // Safety monitoring identifier
+	PromptCacheRetent  string               `json:"prompt_cache_retention,omitempty"` // "in_memory" or "24h"
 }
 
 // textConfig controls text output behavior
@@ -249,14 +253,17 @@ type responsesChunk struct {
 	Item        *responsesItem `json:"item,omitempty"`
 
 	// For delta events
-	ItemID string `json:"item_id,omitempty"`
-	Delta  string `json:"delta,omitempty"`
+	ItemID   string             `json:"item_id,omitempty"`
+	Delta    string             `json:"delta,omitempty"`
+	Logprobs []chatLogprobToken `json:"logprobs,omitempty"`
 
 	// For annotation events
 	Annotation *responsesAnnotation `json:"annotation,omitempty"`
 
 	// For error events
-	Error *responsesError `json:"error,omitempty"`
+	Error   *responsesError `json:"error,omitempty"`
+	Code    string          `json:"code,omitempty"`
+	Message string          `json:"message,omitempty"`
 }
 
 type responsesData struct {

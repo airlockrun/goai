@@ -37,6 +37,15 @@ func New(opts Options) *Provider {
 			BaseURL:                   baseURL,
 			Headers:                   opts.Headers,
 			SupportsStructuredOutputs: true,
+			RequestModifier:           cerebrasRequestModifier,
+			MessageConverter:          convertMessages,
+			TransformRequest: func(_ string, body map[string]any) error {
+				if value, ok := body["max_tokens"]; ok {
+					body["max_completion_tokens"] = value
+					delete(body, "max_tokens")
+				}
+				return nil
+			},
 		}),
 	}
 }

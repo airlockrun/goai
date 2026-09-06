@@ -49,8 +49,10 @@ func (p *Provider) SpeechModel(modelID string) model.SpeechModel {
 		provider: p,
 	}
 }
-func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel { return nil }
-func (p *Provider) RerankingModel(modelID string) model.RerankingModel         { return nil }
+func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel {
+	return &ElevenLabsTranscriptionModel{id: modelID, provider: p}
+}
+func (p *Provider) RerankingModel(modelID string) model.RerankingModel { return nil }
 
 var _ provider.Provider = (*Provider)(nil)
 

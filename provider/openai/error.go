@@ -2,11 +2,34 @@ package openai
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/airlockrun/goai/errors"
 	"github.com/airlockrun/goai/response"
 )
+
+func streamAPIError(provider, code, message, raw string) *errors.APICallError {
+	return errors.NewAPICallError(errors.APICallErrorOptions{
+		Message:      fmt.Sprintf("%s API error: [%s] %s", provider, code, message),
+		ResponseBody: raw, Data: map[string]any{"code": code, "message": message},
+		IsRetryable: code == "server_error" || code == "rate_limit_exceeded", IsRetryableSet: true,
+	})
+}
+
+func incompleteStreamError() *errors.APICallError {
+	return errors.NewAPICallError(errors.APICallErrorOptions{
+		Message: "stream ended before a terminal event", Cause: errors.ErrInvalidResponse,
+		IsRetryable: true, IsRetryableSet: true,
+	})
+}
+
+func invalidStreamError(message, raw string) *errors.APICallError {
+	return errors.NewAPICallError(errors.APICallErrorOptions{
+		Message: message, ResponseBody: raw, Cause: errors.ErrInvalidResponse,
+		IsRetryable: false, IsRetryableSet: true,
+	})
+}
 
 // OpenAIErrorData represents the structure of an OpenAI API error response.
 // This schema is designed to handle both standard OpenAI errors and

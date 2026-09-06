@@ -58,11 +58,13 @@ func perplexityCallWarner(options *stream.CallOptions) []stream.Warning {
 	return warnings
 }
 
-func (p *Provider) ID() string                                                 { return "perplexity" }
-func (p *Provider) Model(modelID string) stream.Model                          { return p.compat.Model(modelID) }
-func (p *Provider) LanguageModel(modelID string) model.LanguageModel           { return p.Model(modelID) }
-func (p *Provider) ImageModel(modelID string) model.ImageModel                 { return nil }
-func (p *Provider) EmbeddingModel(modelID string) model.EmbeddingModel         { return nil }
+func (p *Provider) ID() string                                       { return "perplexity" }
+func (p *Provider) Model(modelID string) stream.Model                { return p.compat.Model(modelID) }
+func (p *Provider) LanguageModel(modelID string) model.LanguageModel { return p.Model(modelID) }
+func (p *Provider) ImageModel(modelID string) model.ImageModel       { return nil }
+func (p *Provider) EmbeddingModel(modelID string) model.EmbeddingModel {
+	return &PerplexityEmbeddingModel{id: modelID, provider: p}
+}
 func (p *Provider) SpeechModel(modelID string) model.SpeechModel               { return nil }
 func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel { return nil }
 func (p *Provider) RerankingModel(modelID string) model.RerankingModel         { return nil }

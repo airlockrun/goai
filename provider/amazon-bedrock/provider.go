@@ -9,16 +9,21 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
+	goaierrors "github.com/airlockrun/goai/errors"
+	goaiinternal "github.com/airlockrun/goai/internal"
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/model"
 	"github.com/airlockrun/goai/provider"
 	"github.com/airlockrun/goai/provider/anthropic"
+	goairesponse "github.com/airlockrun/goai/response"
 	"github.com/airlockrun/goai/stream"
 	"github.com/airlockrun/goai/tool"
 )
@@ -46,18 +51,21 @@ var bedrockToolBetaMap = map[string]string{
 // shared builder for Bedrock's InvokeModel endpoint (bedrock-2023-05-31
 // wire version, strict function tools, in-body anthropic_beta list).
 //
-// Bedrock rejects output_config.format for claude-opus-4-7 (including the
-// us./eu. cross-region inference profiles), so native structured output is
-// disabled for that model and the builder falls back to synthetic JSON-tool
-// injection. Mirrors ai-sdk's createAmazonBedrockAnthropic
-// supportsNativeStructuredOutput (references/ai-sdk/packages/amazon-bedrock/
-// src/anthropic/amazon-bedrock-anthropic-provider.ts).
+// Bedrock validates strict tools and native output against its own model
+// capabilities, including inference profile and ARN model identifiers.
 func bedrockAnthropicConfig(modelID string) anthropic.Config {
-	supportsNativeStructuredOutput := !strings.Contains(modelID, "claude-opus-4-7")
+	supportsStrict := true
+	for _, name := range []string{"claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-fable-5", "claude-sonnet-5"} {
+		if strings.Contains(modelID, name) {
+			supportsStrict = false
+		}
+	}
+	supportsNativeStructuredOutput := supportsStrict && !strings.Contains(modelID, "claude-sonnet-4-6") && !strings.Contains(modelID, "claude-haiku-4-5")
 	return anthropic.Config{
 		ProviderID:                     "amazon-bedrock",
 		ToolBetaMap:                    bedrockToolBetaMap,
 		ToolsStrict:                    true,
+		SupportsStrictTools:            &supportsStrict,
 		EmitBetasInBody:                true,
 		SupportsNativeStructuredOutput: &supportsNativeStructuredOutput,
 		TransformRequestBody: func(body map[string]any, betas []string) map[string]any {
@@ -124,7 +132,9 @@ func (p *Provider) EmbeddingModel(modelID string) model.EmbeddingModel {
 
 func (p *Provider) SpeechModel(modelID string) model.SpeechModel               { return nil }
 func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel { return nil }
-func (p *Provider) RerankingModel(modelID string) model.RerankingModel         { return nil }
+func (p *Provider) RerankingModel(modelID string) model.RerankingModel {
+	return &BedrockRerankingModel{id: modelID, provider: p}
+}
 
 func (p *Provider) baseURL() string {
 	return fmt.Sprintf("https://bedrock-runtime.%s.amazonaws.com", p.opts.Region)
@@ -161,33 +171,47 @@ func (m *BedrockLanguageModel) doStream(ctx context.Context, options *stream.Cal
 	// The anthropic family uses synthetic-tool injection (matches Phase B in
 	// goai/provider/anthropic); all other families lack a structured-output API
 	// so they get prompt injection via buildXxxRequest.
-	isAnthropicFamily := strings.HasPrefix(m.id, "anthropic.") || (!strings.HasPrefix(m.id, "amazon.titan") && !strings.HasPrefix(m.id, "meta.llama") && !strings.HasPrefix(m.id, "mistral.") && !strings.HasPrefix(m.id, "cohere."))
+	id := bedrockModelName(m.id)
+	isAnthropicFamily := strings.HasPrefix(id, "anthropic.")
 	jsonToolInjected := false
 	if isAnthropicFamily && options.ResponseFormat != nil && options.ResponseFormat.Type == "json" && len(options.ResponseFormat.Schema) > 0 {
 		jsonToolInjected = true
 	}
 
-	if strings.HasPrefix(m.id, "anthropic.") {
+	if isAnthropicFamily {
 		reqBody, warnings, err = m.buildAnthropicRequest(options)
-	} else if strings.HasPrefix(m.id, "amazon.titan") {
+	} else if strings.HasPrefix(id, "amazon.titan") {
 		reqBody, warnings, err = m.buildTitanRequest(options)
-	} else if strings.HasPrefix(m.id, "meta.llama") {
+	} else if strings.HasPrefix(id, "meta.llama") {
 		reqBody, warnings, err = m.buildLlamaRequest(options)
-	} else if strings.HasPrefix(m.id, "mistral.") {
+	} else if strings.HasPrefix(id, "mistral.") {
 		reqBody, warnings, err = m.buildMistralRequest(options)
-	} else if strings.HasPrefix(m.id, "cohere.") {
+	} else if strings.HasPrefix(id, "cohere.") {
 		reqBody, warnings, err = m.buildCohereRequest(options)
 	} else {
-		// Default to Anthropic-style for unknown models
-		reqBody, warnings, err = m.buildAnthropicRequest(options)
+		reqBody, warnings, err = m.buildConverseRequest(options)
 	}
 
 	if err != nil {
 		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
 		return
 	}
+	if jsonToolInjected {
+		var body struct {
+			OutputConfig struct {
+				Format json.RawMessage `json:"format"`
+			} `json:"output_config"`
+		}
+		_ = json.Unmarshal(reqBody, &body)
+		jsonToolInjected = len(body.OutputConfig.Format) == 0
+	}
 
-	url := fmt.Sprintf("%s/model/%s/invoke-with-response-stream", m.provider.baseURL(), m.id)
+	endpoint := "invoke-with-response-stream"
+	converse := !isAnthropicFamily && !strings.HasPrefix(id, "amazon.titan") && !strings.HasPrefix(id, "meta.llama") && !strings.HasPrefix(id, "mistral.") && !strings.HasPrefix(id, "cohere.")
+	if converse {
+		endpoint = "converse-stream"
+	}
+	url := fmt.Sprintf("%s/model/%s/%s", m.provider.baseURL(), escapeModelID(m.id), endpoint)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBody))
 	if err != nil {
@@ -211,25 +235,30 @@ func (m *BedrockLanguageModel) doStream(ctx context.Context, options *stream.Cal
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{
+			Message: "Bedrock API request failed", URL: req.URL.String(), RequestBodyValues: json.RawMessage(reqBody),
+			Cause: err, IsRetryable: ctx.Err() == nil, IsRetryableSet: true,
+		})}}
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		events <- stream.Event{
-			Type: stream.EventError,
-			Data: stream.ErrorEvent{Error: fmt.Errorf("Bedrock API error (status %d): %s", resp.StatusCode, string(body))},
-		}
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{
+			Message: "Bedrock API error: " + string(body), URL: req.URL.String(), RequestBodyValues: json.RawMessage(reqBody),
+			StatusCode: resp.StatusCode, ResponseHeaders: goairesponse.ExtractResponseHeaders(resp), ResponseBody: string(body),
+		})}}
 		return
 	}
 
 	// Process based on model type
-	if strings.HasPrefix(m.id, "anthropic.") {
-		m.processAnthropicStream(ctx, resp.Body, options.Tools, events, jsonToolInjected, options.IncludeRawChunks)
+	if converse {
+		m.processConverseStream(ctx, resp.Body, events, options.IncludeRawChunks)
+	} else if isAnthropicFamily {
+		m.processAnthropicStream(ctx, &eventStreamReader{body: resp.Body, sse: true}, options.Tools, events, jsonToolInjected, options.IncludeRawChunks)
 	} else {
-		m.processGenericStream(ctx, resp.Body, events, options.IncludeRawChunks)
+		m.processGenericStream(ctx, &eventStreamReader{body: resp.Body}, events, options.IncludeRawChunks)
 	}
 }
 
@@ -259,6 +288,11 @@ func (m *BedrockLanguageModel) buildAnthropicRequest(options *stream.CallOptions
 				reasoning["max_reasoning_effort"] = chatOpts.ReasoningConfig.MaxReasoningEffort
 			}
 			body["thinking"] = reasoning
+			if chatOpts.ReasoningConfig.Type == "enabled" || chatOpts.ReasoningConfig.Type == "adaptive" {
+				delete(body, "temperature")
+				delete(body, "top_p")
+				delete(body, "top_k")
+			}
 		}
 		if chatOpts.ServiceTier != "" {
 			body["service_tier"] = chatOpts.ServiceTier
@@ -438,6 +472,9 @@ func (m *BedrockLanguageModel) buildCohereRequest(options *stream.CallOptions) (
 		})
 	}
 
+	if len(msgs) == 0 {
+		return nil, nil, errors.New("Bedrock Cohere requires a user message")
+	}
 	reqBody := map[string]any{
 		"chat_history": msgs[:len(msgs)-1],
 		"message":      msgs[len(msgs)-1]["message"],
@@ -461,182 +498,17 @@ func (m *BedrockLanguageModel) buildCohereRequest(options *stream.CallOptions) (
 }
 
 func (m *BedrockLanguageModel) processAnthropicStream(ctx context.Context, body io.Reader, tools []tool.Tool, events chan<- stream.Event, jsonToolInjected bool, includeRawChunks bool) {
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-
-	var textStarted bool
-	var currentToolID, currentToolName string
-	var currentToolArgs strings.Builder
-	// Mirrors the anthropic provider: when the synthetic JSON tool fires,
-	// stream its input as text and rewrite the stop reason to Stop.
-	inSyntheticJSON := false
-	syntheticJSONSeen := false
-	// Track input/output counts separately so we can emit a v3 Usage
-	// at the end with nil for unreported counts.
-	var inputTotal, outputTotal int
-	var inputReported, outputReported bool
-	var finishReason stream.FinishReason
-
-	events <- stream.Event{Type: stream.EventStartStep, Data: stream.StartStepEvent{}}
-
-	for scanner.Scan() {
-		select {
-		case <-ctx.Done():
-			events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: ctx.Err()}}
-			return
-		default:
-		}
-
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-
-		data := strings.TrimPrefix(line, "data: ")
-
-		if includeRawChunks {
-			events <- stream.Event{Type: stream.EventRawChunk, Data: stream.RawChunkEvent{RawValue: data}}
-		}
-
-		var event anthropicStreamEvent
-		if err := json.Unmarshal([]byte(data), &event); err != nil {
-			continue
-		}
-
-		switch event.Type {
-		case "content_block_start":
-			if event.ContentBlock.Type == "text" {
-				if !textStarted {
-					textStarted = true
-					events <- stream.Event{Type: stream.EventTextStart, Data: stream.TextStartEvent{}}
-				}
-			} else if event.ContentBlock.Type == "tool_use" {
-				// "json" mirrors the synthetic tool name in
-				// goai/provider/anthropic (see syntheticJSONToolName).
-				if jsonToolInjected && event.ContentBlock.Name == "json" {
-					inSyntheticJSON = true
-					syntheticJSONSeen = true
-					if !textStarted {
-						textStarted = true
-						events <- stream.Event{Type: stream.EventTextStart, Data: stream.TextStartEvent{}}
-					}
-					break
-				}
-				currentToolID = event.ContentBlock.ID
-				currentToolName = event.ContentBlock.Name
-				currentToolArgs.Reset()
-				events <- stream.Event{
-					Type: stream.EventToolInputStart,
-					Data: stream.ToolInputStartEvent{ID: currentToolID, ToolName: currentToolName},
-				}
-			}
-
-		case "content_block_delta":
-			if event.Delta.Type == "text_delta" {
-				events <- stream.Event{
-					Type: stream.EventTextDelta,
-					Data: stream.TextDeltaEvent{Text: event.Delta.Text},
-				}
-			} else if event.Delta.Type == "input_json_delta" {
-				if inSyntheticJSON {
-					events <- stream.Event{
-						Type: stream.EventTextDelta,
-						Data: stream.TextDeltaEvent{Text: event.Delta.PartialJSON},
-					}
-					break
-				}
-				currentToolArgs.WriteString(event.Delta.PartialJSON)
-				events <- stream.Event{
-					Type: stream.EventToolInputDelta,
-					Data: stream.ToolInputDeltaEvent{ID: currentToolID, Delta: event.Delta.PartialJSON},
-				}
-			}
-
-		case "content_block_stop":
-			if inSyntheticJSON {
-				inSyntheticJSON = false
-				break
-			}
-			if currentToolID != "" {
-				events <- stream.Event{
-					Type: stream.EventToolInputEnd,
-					Data: stream.ToolInputEndEvent{ID: currentToolID},
-				}
-
-				events <- stream.Event{
-					Type: stream.EventToolCall,
-					Data: stream.ToolCallEvent{
-						ToolCallID: currentToolID,
-						ToolName:   currentToolName,
-						Input:      json.RawMessage(currentToolArgs.String()),
-					},
-				}
-
-				// Note: Tool execution is handled by goai.go's executeTools function,
-				// not here in the provider. The provider just emits ToolCallEvent.
-
-				currentToolID = ""
-				currentToolName = ""
-			}
-
-		case "message_delta":
-			if event.Delta.StopReason != "" {
-				switch event.Delta.StopReason {
-				case "end_turn":
-					finishReason = stream.FinishReasonStop
-				case "max_tokens":
-					finishReason = stream.FinishReasonLength
-				case "tool_use":
-					finishReason = stream.FinishReasonToolCalls
-				default:
-					finishReason = stream.FinishReasonOther
-				}
-			}
-			if event.Usage.OutputTokens > 0 {
-				outputTotal = event.Usage.OutputTokens
-				outputReported = true
-			}
-
-		case "message_start":
-			if event.Message.Usage.InputTokens > 0 {
-				inputTotal = event.Message.Usage.InputTokens
-				inputReported = true
-			}
-		}
-	}
-
-	if textStarted {
-		events <- stream.Event{Type: stream.EventTextEnd, Data: stream.TextEndEvent{}}
-	}
-
-	if syntheticJSONSeen && finishReason == stream.FinishReasonToolCalls {
-		finishReason = stream.FinishReasonStop
-	}
-
-	var usage stream.Usage
-	if inputReported {
-		usage.InputTokens.Total = stream.IntPtr(inputTotal)
-	}
-	if outputReported {
-		usage.OutputTokens.Total = stream.IntPtr(outputTotal)
-	}
-
-	events <- stream.Event{
-		Type: stream.EventFinishStep,
-		Data: stream.FinishStepEvent{FinishReason: finishReason, Usage: usage},
-	}
-
-	events <- stream.Event{
-		Type: stream.EventFinish,
-		Data: stream.FinishEvent{FinishReason: finishReason, Usage: usage},
-	}
+	anthropic.ProcessStream(ctx, body, tools, events, jsonToolInjected, includeRawChunks)
 }
 
 func (m *BedrockLanguageModel) processGenericStream(ctx context.Context, body io.Reader, events chan<- stream.Event, includeRawChunks bool) {
-	scanner := bufio.NewScanner(body)
+	streamReader := goaiinternal.NewStreamReader(body)
+	scanner := bufio.NewScanner(streamReader)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
 	var textStarted bool
+	var completed bool
+	finishReason := stream.FinishReasonStop
 
 	events <- stream.Event{Type: stream.EventStartStep, Data: stream.StartStepEvent{}}
 
@@ -660,7 +532,26 @@ func (m *BedrockLanguageModel) processGenericStream(ctx context.Context, body io
 		// Parse based on model-specific format
 		var chunk map[string]any
 		if err := json.Unmarshal([]byte(line), &chunk); err != nil {
-			continue
+			events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+			return
+		}
+		if outputs, ok := chunk["outputs"].([]any); ok && len(outputs) > 0 {
+			if output, ok := outputs[0].(map[string]any); ok {
+				chunk = output
+			}
+		}
+		reason, _ := chunk["stop_reason"].(string)
+		if v, ok := chunk["completionReason"].(string); ok {
+			reason = v
+		}
+		if v, ok := chunk["finish_reason"].(string); ok {
+			reason = v
+		}
+		if reason != "" || chunk["is_finished"] == true {
+			completed = true
+		}
+		if reason == "length" || reason == "max_tokens" || reason == "LENGTH" {
+			finishReason = stream.FinishReasonLength
 		}
 
 		// Extract text from various model formats
@@ -681,6 +572,18 @@ func (m *BedrockLanguageModel) processGenericStream(ctx context.Context, body io
 			events <- stream.Event{Type: stream.EventTextDelta, Data: stream.TextDeltaEvent{Text: text}}
 		}
 	}
+	if err := streamReader.Err(ctx, scanner.Err()); err != nil {
+		var apiErr *goaierrors.APICallError
+		if errors.As(scanner.Err(), &apiErr) {
+			err = apiErr
+		}
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+		return
+	}
+	if !completed {
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: errors.New("incomplete Bedrock model stream")}}
+		return
+	}
 
 	if textStarted {
 		events <- stream.Event{Type: stream.EventTextEnd, Data: stream.TextEndEvent{}}
@@ -688,36 +591,13 @@ func (m *BedrockLanguageModel) processGenericStream(ctx context.Context, body io
 
 	events <- stream.Event{
 		Type: stream.EventFinishStep,
-		Data: stream.FinishStepEvent{FinishReason: stream.FinishReasonStop},
+		Data: stream.FinishStepEvent{FinishReason: finishReason},
 	}
 
 	events <- stream.Event{
 		Type: stream.EventFinish,
-		Data: stream.FinishEvent{FinishReason: stream.FinishReasonStop},
+		Data: stream.FinishEvent{FinishReason: finishReason},
 	}
-}
-
-type anthropicStreamEvent struct {
-	Type         string `json:"type"`
-	ContentBlock struct {
-		Type string `json:"type"`
-		ID   string `json:"id"`
-		Name string `json:"name"`
-	} `json:"content_block"`
-	Delta struct {
-		Type        string `json:"type"`
-		Text        string `json:"text"`
-		PartialJSON string `json:"partial_json"`
-		StopReason  string `json:"stop_reason"`
-	} `json:"delta"`
-	Message struct {
-		Usage struct {
-			InputTokens int `json:"input_tokens"`
-		} `json:"usage"`
-	} `json:"message"`
-	Usage struct {
-		OutputTokens int `json:"output_tokens"`
-	} `json:"usage"`
 }
 
 // AWS Signature Version 4 signing
@@ -732,7 +612,7 @@ func (m *BedrockLanguageModel) signRequest(req *http.Request, payload []byte) {
 	}
 
 	// Create canonical request
-	canonicalURI := req.URL.Path
+	canonicalURI := strings.ReplaceAll(url.PathEscape(req.URL.EscapedPath()), "%2F", "/")
 	canonicalQueryString := req.URL.RawQuery
 
 	signedHeaders := "content-type;host;x-amz-date"

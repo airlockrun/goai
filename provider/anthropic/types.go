@@ -222,7 +222,9 @@ type anthropicMessage struct {
 }
 
 type anthropicContentBlock struct {
-	Type string `json:"type"`
+	Type       string          `json:"type"`
+	Raw        json.RawMessage `json:"-"`
+	ServerName string          `json:"server_name,omitempty"`
 
 	// For text blocks
 	Text string `json:"text,omitempty"`
@@ -247,6 +249,14 @@ type anthropicContentBlock struct {
 
 	// Prompt caching
 	CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
+}
+
+func (b anthropicContentBlock) MarshalJSON() ([]byte, error) {
+	if len(b.Raw) > 0 {
+		return b.Raw, nil
+	}
+	type wire anthropicContentBlock
+	return json.Marshal(wire(b))
 }
 
 type anthropicCitations struct {
@@ -348,7 +358,11 @@ type outputTokensByType struct {
 }
 
 type anthropicContentBlockStart struct {
-	Type string `json:"type"`
+	Type       string          `json:"type"`
+	Input      json.RawMessage `json:"input,omitempty"`
+	ToolUseID  string          `json:"tool_use_id,omitempty"`
+	Content    json.RawMessage `json:"content,omitempty"`
+	ServerName string          `json:"server_name,omitempty"`
 
 	// For text blocks
 	Text string `json:"text,omitempty"`
@@ -619,7 +633,7 @@ func convertAssistantContent(content message.Content, msgOpts map[string]any) []
 	var blocks []blockInfo
 
 	// Add text if present
-	text := getTextFromContent(content)
+	text := content.Text
 	if text != "" {
 		blocks = append(blocks, blockInfo{
 			block: anthropicContentBlock{Type: "text", Text: text},
@@ -628,16 +642,58 @@ func convertAssistantContent(content message.Content, msgOpts map[string]any) []
 
 	// Add tool calls
 	for _, part := range content.Parts {
+		if text, ok := part.(message.TextPart); ok && text.Text != "" {
+			blocks = append(blocks, blockInfo{block: anthropicContentBlock{Type: "text", Text: text.Text}, partOpts: text.ProviderOptions})
+		}
 		if tc, ok := part.(message.ToolCallPart); ok {
+			input := tc.Input
+			var object map[string]json.RawMessage
+			if err := json.Unmarshal(input, &object); err != nil || object == nil {
+				input = json.RawMessage(`{}`)
+			}
+			wireType, serverName := "tool_use", ""
+			name := tc.Name
+			if opts, ok := tc.ProviderOptions["anthropic"].(map[string]any); ok {
+				if wireName, ok := opts["wireName"].(string); ok {
+					name = wireName
+				}
+				if tc.ProviderExecuted && opts["rawBlock"] != nil {
+					data, err := json.Marshal(opts["rawBlock"])
+					if err == nil {
+						blocks = append(blocks, blockInfo{block: anthropicContentBlock{Raw: data}, partOpts: tc.ProviderOptions})
+						continue
+					}
+				}
+			}
+			if tc.ProviderExecuted {
+				wireType = "server_tool_use"
+				if opts, ok := tc.ProviderOptions["anthropic"].(map[string]any); ok {
+					if v, ok := opts["type"].(string); ok {
+						wireType = v
+					}
+					serverName, _ = opts["serverName"].(string)
+				}
+			}
 			blocks = append(blocks, blockInfo{
 				block: anthropicContentBlock{
-					Type:  "tool_use",
-					ID:    tc.ID,
-					Name:  tc.Name,
-					Input: tc.Input,
+					Type:       wireType,
+					ServerName: serverName,
+					ID:         tc.ID,
+					Name:       name,
+					Input:      input,
 				},
 				partOpts: tc.ProviderOptions,
 			})
+		}
+		if tr, ok := part.(message.ToolResultPart); ok && tr.ProviderExecuted {
+			if opts, ok := tr.ProviderOptions["anthropic"].(map[string]any); ok {
+				if raw, ok := opts["rawBlock"]; ok {
+					data, err := json.Marshal(raw)
+					if err == nil {
+						blocks = append(blocks, blockInfo{block: anthropicContentBlock{Raw: data}})
+					}
+				}
+			}
 		}
 	}
 

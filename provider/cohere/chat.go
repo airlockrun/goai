@@ -8,9 +8,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	goaierrors "github.com/airlockrun/goai/errors"
-	"github.com/airlockrun/goai/message"
+	goaiinternal "github.com/airlockrun/goai/internal"
 	"github.com/airlockrun/goai/provider"
 	goairesponse "github.com/airlockrun/goai/response"
 	"github.com/airlockrun/goai/stream"
@@ -52,7 +53,9 @@ func (m *CohereModel) doStream(ctx context.Context, options *stream.CallOptions,
 		return
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", m.provider.opts.BaseURL+"/chat", bytes.NewReader(reqBody))
+	baseURL := strings.TrimSuffix(strings.TrimRight(m.provider.opts.BaseURL, "/"), "/v1")
+	baseURL = strings.TrimSuffix(baseURL, "/v2")
+	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/v2/chat", bytes.NewReader(reqBody))
 	if err != nil {
 		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
 		return
@@ -100,59 +103,15 @@ func (m *CohereModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 		return nil, warnings, fmt.Errorf("invalid provider options: %w", err)
 	}
 
-	// Unsupported CallOptions on Cohere (per plan inventory): seed.
-	// ai-sdk's cohere model itself doesn't flag these in getArgs, but
-	// Cohere's v1 Chat request has no seed field, so surface a warning
-	// when the caller provides one so the silent drop is visible.
-	if options.Seed != nil {
-		warnings = append(warnings, stream.UnsupportedWarning("seed", ""))
+	messages, documents, err := convertMessages(options.Messages)
+	if err != nil {
+		return nil, warnings, err
 	}
-
-	var preamble string
-	var chatHistory []cohereMessage
-	var userMessage string
-
-	for i, msg := range options.Messages {
-		switch msg.Role {
-		case message.RoleSystem:
-			preamble = getTextFromContent(msg.Content)
-		case message.RoleUser:
-			text := getTextFromContent(msg.Content)
-			// Last user message becomes the query
-			if i == len(options.Messages)-1 {
-				userMessage = text
-			} else {
-				chatHistory = append(chatHistory, cohereMessage{
-					Role:    "USER",
-					Message: text,
-				})
-			}
-		case message.RoleAssistant:
-			chatHistory = append(chatHistory, cohereMessage{
-				Role:    "CHATBOT",
-				Message: getTextFromContent(msg.Content),
-			})
-		case message.RoleTool:
-			for _, part := range msg.Content.Parts {
-				if tr, ok := part.(message.ToolResultPart); ok {
-					chatHistory = append(chatHistory, cohereMessage{
-						Role:    "TOOL",
-						Message: message.ToolOutputWire(tr.Output),
-					})
-				}
-			}
-		}
-	}
-
 	req := cohereRequest{
-		Model:       m.id,
-		Message:     userMessage,
-		ChatHistory: chatHistory,
-		Stream:      true,
-	}
-
-	if preamble != "" {
-		req.Preamble = preamble
+		Model: m.id, Messages: messages, Stream: true,
+		Documents: documents,
+		Seed:      options.Seed, StopSequences: options.StopSequences,
+		FrequencyPenalty: options.FrequencyPenalty, PresencePenalty: options.PresencePenalty,
 	}
 
 	if options.Temperature != nil {
@@ -171,14 +130,53 @@ func (m *CohereModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 	// Add tools (already ordered by core)
 	if len(options.Tools) > 0 {
 		req.Tools = convertToCohereTools(options.Tools)
+		choice, name := "", ""
+		switch value := options.ToolChoice.(type) {
+		case nil:
+		case string:
+			choice = value
+		case map[string]any:
+			choice, _ = value["type"].(string)
+			name, _ = value["toolName"].(string)
+		default:
+			return nil, warnings, fmt.Errorf("unsupported Cohere tool choice %T", value)
+		}
+		switch choice {
+		case "", "auto":
+		case "none":
+			req.ToolChoice = "NONE"
+		case "required":
+			req.ToolChoice = "REQUIRED"
+		case "tool":
+			req.ToolChoice = "REQUIRED"
+			selected := req.Tools[:0]
+			for _, t := range req.Tools {
+				if t.Function.Name == name {
+					selected = append(selected, t)
+				}
+			}
+			if len(selected) == 0 {
+				return nil, warnings, fmt.Errorf("Cohere tool %q is not available", name)
+			}
+			req.Tools = selected
+		default:
+			return nil, warnings, fmt.Errorf("unsupported Cohere tool choice %q", choice)
+		}
 	}
 
 	// Apply provider-specific options from typed struct
 
 	// thinking - reasoning configuration
 	if opts.Thinking != nil {
+		typeName := opts.Thinking.Type
+		if typeName == "" {
+			typeName = "enabled"
+		}
+		if typeName != "enabled" && typeName != "disabled" {
+			return nil, warnings, fmt.Errorf("invalid Cohere thinking type %q", typeName)
+		}
 		req.Thinking = &cohereThinking{
-			Type:        opts.Thinking.Type,
+			Type:        typeName,
 			TokenBudget: opts.Thinking.TokenBudget,
 		}
 	}
@@ -197,19 +195,15 @@ func (m *CohereModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 }
 
 func (m *CohereModel) processStream(ctx context.Context, body io.Reader, tools []tool.Tool, events chan<- stream.Event, includeRawChunks bool) {
-	// Convert tools slice to map for name lookup
-	toolsByName := make(map[string]tool.Tool, len(tools))
-	for _, t := range tools {
-		toolsByName[t.Name] = t
-	}
-
-	scanner := bufio.NewScanner(body)
+	streamReader := goaiinternal.NewStreamReader(body)
+	scanner := bufio.NewScanner(streamReader)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
 	var textStarted bool
+	var reasoningStarted bool
 	var usage stream.Usage
 	var finishReason stream.FinishReason
-	var pendingToolCalls []stream.ToolCallEvent
+	var pending *stream.ToolCallEvent
 
 	events <- stream.Event{Type: stream.EventStartStep, Data: stream.StartStepEvent{}}
 
@@ -222,9 +216,10 @@ func (m *CohereModel) processStream(ctx context.Context, body io.Reader, tools [
 		}
 
 		line := scanner.Text()
-		if line == "" {
+		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
+		line = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 
 		if includeRawChunks {
 			events <- stream.Event{Type: stream.EventRawChunk, Data: stream.RawChunkEvent{RawValue: line}}
@@ -232,65 +227,115 @@ func (m *CohereModel) processStream(ctx context.Context, body io.Reader, tools [
 
 		var event cohereStreamEvent
 		if err := json.Unmarshal([]byte(line), &event); err != nil {
-			continue
+			events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: &goaierrors.JSONParseError{Text: line, Cause: err}}}
+			return
 		}
 
-		switch event.EventType {
-		case "text-generation":
-			if event.Text != "" {
+		switch event.Type {
+		case "content-start", "content-delta", "tool-plan-delta":
+			content := event.Delta.Message.Content
+			if content.Type == "thinking" || content.Thinking != "" {
+				if !reasoningStarted {
+					reasoningStarted = true
+					events <- stream.Event{Type: stream.EventReasoningStart, Data: stream.ReasoningStartEvent{ID: "reasoning-0"}}
+				}
+				if content.Thinking != "" {
+					events <- stream.Event{Type: stream.EventReasoningDelta, Data: stream.ReasoningDeltaEvent{ID: "reasoning-0", Text: content.Thinking}}
+				}
+			}
+			text := content.Text + event.Delta.Message.ToolPlan
+			if text != "" {
 				if !textStarted {
 					textStarted = true
 					events <- stream.Event{Type: stream.EventTextStart, Data: stream.TextStartEvent{}}
 				}
-				events <- stream.Event{Type: stream.EventTextDelta, Data: stream.TextDeltaEvent{Text: event.Text}}
+				events <- stream.Event{Type: stream.EventTextDelta, Data: stream.TextDeltaEvent{Text: text}}
 			}
-
-		case "tool-calls-generation":
-			for _, tc := range event.ToolCalls {
-				inputBytes, _ := json.Marshal(tc.Parameters)
-				pendingToolCalls = append(pendingToolCalls, stream.ToolCallEvent{
-					ToolCallID: tc.Name, // Cohere uses name as ID
-					ToolName:   tc.Name,
-					Input:      inputBytes,
-				})
+		case "content-end":
+			if reasoningStarted {
+				events <- stream.Event{Type: stream.EventReasoningEnd, Data: stream.ReasoningEndEvent{ID: "reasoning-0"}}
+				reasoningStarted = false
 			}
-
-		case "stream-end":
-			finishReason = mapCohereFinishReason(event.FinishReason)
-			if event.Response != nil && event.Response.Meta != nil {
-				if event.Response.Meta.Tokens != nil {
-					usage = stream.UsageFrom(
-						event.Response.Meta.Tokens.InputTokens,
-						event.Response.Meta.Tokens.OutputTokens,
-					)
+			if textStarted {
+				events <- stream.Event{Type: stream.EventTextEnd, Data: stream.TextEndEvent{}}
+				textStarted = false
+			}
+		case "tool-call-start":
+			tc := event.Delta.Message.ToolCalls
+			if pending != nil || tc.ID == "" || tc.Function.Name == "" {
+				events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: fmt.Errorf("%w: invalid Cohere tool-call-start", goaierrors.ErrInvalidResponse)}}
+				return
+			}
+			pending = &stream.ToolCallEvent{ToolCallID: tc.ID, ToolName: tc.Function.Name, Input: json.RawMessage(tc.Function.Arguments)}
+			events <- stream.Event{Type: stream.EventToolInputStart, Data: stream.ToolInputStartEvent{ID: tc.ID, ToolName: tc.Function.Name}}
+			if tc.Function.Arguments != "" {
+				events <- stream.Event{Type: stream.EventToolInputDelta, Data: stream.ToolInputDeltaEvent{ID: tc.ID, Delta: tc.Function.Arguments}}
+			}
+		case "tool-call-delta":
+			if pending == nil {
+				events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: fmt.Errorf("%w: tool delta without start", goaierrors.ErrInvalidResponse)}}
+				return
+			}
+			args := event.Delta.Message.ToolCalls.Function.Arguments
+			pending.Input = append(pending.Input, args...)
+			events <- stream.Event{Type: stream.EventToolInputDelta, Data: stream.ToolInputDeltaEvent{ID: pending.ToolCallID, Delta: args}}
+		case "tool-call-end":
+			if pending == nil {
+				events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: fmt.Errorf("%w: tool end without start", goaierrors.ErrInvalidResponse)}}
+				return
+			}
+			if len(bytes.TrimSpace(pending.Input)) == 0 {
+				pending.Input = json.RawMessage(`{}`)
+			}
+			if !json.Valid(pending.Input) {
+				events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: fmt.Errorf("%w: invalid tool arguments", goaierrors.ErrInvalidResponse)}}
+				return
+			}
+			events <- stream.Event{Type: stream.EventToolInputEnd, Data: stream.ToolInputEndEvent{ID: pending.ToolCallID}}
+			events <- stream.Event{Type: stream.EventToolCall, Data: *pending}
+			pending = nil
+		case "message-end":
+			if event.Delta.FinishReason != "" {
+				finishReason = mapCohereFinishReason(event.Delta.FinishReason)
+			}
+			var tokens struct {
+				Tokens struct {
+					Input  int `json:"input_tokens"`
+					Output int `json:"output_tokens"`
+				} `json:"tokens"`
+				Cached int `json:"cached_tokens"`
+			}
+			if len(event.Delta.Usage) > 0 {
+				if err := json.Unmarshal(event.Delta.Usage, &tokens); err != nil {
+					events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+					return
+				}
+				usage = stream.UsageFrom(max(0, tokens.Tokens.Input), max(0, tokens.Tokens.Output))
+				cached := min(max(0, tokens.Cached), usage.InputTotal())
+				usage.InputTokens.CacheRead = stream.IntPtr(cached)
+				usage.InputTokens.NoCache = stream.IntPtr(usage.InputTotal() - cached)
+				if err := json.Unmarshal(event.Delta.Usage, &usage.Raw); err != nil {
+					events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+					return
 				}
 			}
 		}
+	}
+	if err := streamReader.Err(ctx, scanner.Err()); err != nil {
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+		return
+	}
+	if finishReason == "" || pending != nil {
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: fmt.Errorf("%w: incomplete Cohere stream", goaierrors.ErrInvalidResponse)}}
+		return
+	}
+	if reasoningStarted {
+		events <- stream.Event{Type: stream.EventReasoningEnd, Data: stream.ReasoningEndEvent{ID: "reasoning-0"}}
 	}
 
 	// End text if started
 	if textStarted {
 		events <- stream.Event{Type: stream.EventTextEnd, Data: stream.TextEndEvent{}}
-	}
-
-	// Process tool calls
-	for _, tc := range pendingToolCalls {
-		events <- stream.Event{
-			Type: stream.EventToolInputStart,
-			Data: stream.ToolInputStartEvent{ID: tc.ToolCallID, ToolName: tc.ToolName},
-		}
-		events <- stream.Event{
-			Type: stream.EventToolInputEnd,
-			Data: stream.ToolInputEndEvent{ID: tc.ToolCallID},
-		}
-		events <- stream.Event{Type: stream.EventToolCall, Data: tc}
-
-		// Note: Tool execution is handled by goai.go's executeTools function,
-		// not here in the provider. The provider just emits ToolCallEvent.
-	}
-
-	if len(pendingToolCalls) > 0 && finishReason == "" {
-		finishReason = stream.FinishReasonToolCalls
 	}
 
 	events <- stream.Event{

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	goaierrors "github.com/airlockrun/goai/errors"
+	goaiinternal "github.com/airlockrun/goai/internal"
 	"github.com/airlockrun/goai/provider"
 	goairesponse "github.com/airlockrun/goai/response"
 	"github.com/airlockrun/goai/stream"
@@ -136,8 +137,18 @@ func (m *XaiResponsesModel) buildRequest(options *stream.CallOptions) ([]byte, [
 	// CallOptions.Reasoning lowers into the same wire field (ai-sdk v4
 	// reasoning enum).
 	effort := opts.ReasoningEffort
-	if effort == "" {
-		effort = options.Reasoning
+	if effort == "" && options.Reasoning != "" && options.Reasoning != "provider-default" {
+		if modelsWithoutReasoningEffort.MatchString(m.id) {
+			warnings = append(warnings, stream.UnsupportedWarning("reasoning", "this model does not support reasoning effort"))
+		} else {
+			effort = options.Reasoning
+			if effort == "minimal" {
+				effort = "low"
+			}
+			if effort == "xhigh" && m.id != "grok-4.6" {
+				effort = "high"
+			}
+		}
 	}
 	if effort != "" {
 		req.Reasoning = &reasoningConfig{Effort: effort}
@@ -243,7 +254,8 @@ func (m *XaiResponsesModel) processStream(ctx context.Context, body io.Reader, t
 	// from stream items.)
 	_ = tools
 
-	scanner := bufio.NewScanner(body)
+	streamReader := goaiinternal.NewStreamReader(body)
+	scanner := bufio.NewScanner(streamReader)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
 	var textStarted bool
@@ -554,6 +566,10 @@ func (m *XaiResponsesModel) processStream(ctx context.Context, body io.Reader, t
 				}
 			}
 		}
+	}
+	if err := streamReader.Err(ctx, scanner.Err()); err != nil {
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+		return
 	}
 
 	// If we closed a message block but never saw output_item.done, flush it.

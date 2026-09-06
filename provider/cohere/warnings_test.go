@@ -1,6 +1,7 @@
 package cohere
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/airlockrun/goai/message"
@@ -9,11 +10,11 @@ import (
 
 func intPtr(v int) *int { return &v }
 
-func TestCohere_BuildRequest_SeedWarning(t *testing.T) {
+func TestCohere_BuildRequest_Seed(t *testing.T) {
 	p := New(Options{APIKey: "k"})
 	m := p.Model("command-r").(*CohereModel)
 
-	_, warnings, err := m.buildRequest(&stream.CallOptions{
+	body, warnings, err := m.buildRequest(&stream.CallOptions{
 		Messages: []message.Message{message.NewUserMessage("hi")},
 		Seed:     intPtr(42),
 	})
@@ -26,7 +27,14 @@ func TestCohere_BuildRequest_SeedWarning(t *testing.T) {
 			found = true
 		}
 	}
-	if !found {
-		t.Errorf("expected seed warning, got %+v", warnings)
+	if found {
+		t.Errorf("unexpected seed warning: %+v", warnings)
+	}
+	var request map[string]any
+	if err := json.Unmarshal(body, &request); err != nil {
+		t.Fatal(err)
+	}
+	if request["seed"] != float64(42) {
+		t.Fatalf("seed = %v", request["seed"])
 	}
 }

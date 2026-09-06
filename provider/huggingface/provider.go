@@ -12,9 +12,11 @@ import (
 	"strings"
 
 	goaierrors "github.com/airlockrun/goai/errors"
+	goaiinternal "github.com/airlockrun/goai/internal"
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/model"
 	"github.com/airlockrun/goai/provider"
+	"github.com/airlockrun/goai/provider/openresponses"
 	goairesponse "github.com/airlockrun/goai/response"
 	"github.com/airlockrun/goai/stream"
 	"github.com/airlockrun/goai/tool"
@@ -29,6 +31,8 @@ type Options struct {
 	APIKey  string
 	BaseURL string
 	Headers map[string]string
+	// ResponsesBaseURL overrides the language endpoint independently of inference modalities.
+	ResponsesBaseURL string
 }
 
 // Provider implements the Hugging Face provider.
@@ -38,6 +42,12 @@ type Provider struct {
 
 // New creates a new Hugging Face provider.
 func New(opts Options) *Provider {
+	if opts.ResponsesBaseURL == "" {
+		opts.ResponsesBaseURL = opts.BaseURL
+		if opts.ResponsesBaseURL == "" {
+			opts.ResponsesBaseURL = "https://router.huggingface.co/v1"
+		}
+	}
 	if opts.BaseURL == "" {
 		opts.BaseURL = defaultBaseURL
 	}
@@ -51,6 +61,16 @@ func (p *Provider) Model(modelID string) stream.Model {
 }
 
 func (p *Provider) LanguageModel(modelID string) model.LanguageModel {
+	return p.Responses(modelID)
+}
+
+// Responses returns a language model using the Hugging Face router.
+func (p *Provider) Responses(modelID string) stream.Model {
+	return openresponses.New(openresponses.Options{Name: "huggingface", BaseURL: p.opts.ResponsesBaseURL, APIKey: p.opts.APIKey, Headers: p.opts.Headers}).Responses(modelID)
+}
+
+// TextGeneration returns a prompt-based Inference API model.
+func (p *Provider) TextGeneration(modelID string) *HuggingFaceLanguageModel {
 	return &HuggingFaceLanguageModel{
 		id:       modelID,
 		provider: p,
@@ -206,7 +226,8 @@ func (m *HuggingFaceLanguageModel) doStream(ctx context.Context, options *stream
 }
 
 func (m *HuggingFaceLanguageModel) processStream(ctx context.Context, body io.Reader, tools []tool.Tool, events chan<- stream.Event, includeRawChunks bool) {
-	scanner := bufio.NewScanner(body)
+	streamReader := goaiinternal.NewStreamReader(body)
+	scanner := bufio.NewScanner(streamReader)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
 	var textStarted bool
@@ -255,6 +276,10 @@ func (m *HuggingFaceLanguageModel) processStream(ctx context.Context, body io.Re
 			}
 			events <- stream.Event{Type: stream.EventTextDelta, Data: stream.TextDeltaEvent{Text: text}}
 		}
+	}
+	if err := streamReader.Err(ctx, scanner.Err()); err != nil {
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+		return
 	}
 
 	if textStarted {

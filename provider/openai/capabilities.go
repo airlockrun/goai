@@ -1,6 +1,13 @@
 package openai
 
-import "strings"
+import (
+	"regexp"
+	"strconv"
+	"strings"
+)
+
+var oSeriesPattern = regexp.MustCompile(`^o(\d+)(?:-|$)`)
+var gptPattern = regexp.MustCompile(`^gpt-(\d+)(?:\.(\d+))?(?:-(.+))?$`)
 
 // LanguageModelCapabilities describes the capabilities of an OpenAI language model.
 // Source: ai-sdk/packages/openai/src/openai-language-model-capabilities.ts
@@ -27,35 +34,23 @@ type LanguageModelCapabilities struct {
 
 // GetLanguageModelCapabilities returns the capabilities for a given OpenAI model ID.
 func GetLanguageModelCapabilities(modelID string) LanguageModelCapabilities {
-	supportsFlexProcessing := strings.HasPrefix(modelID, "o3") ||
-		strings.HasPrefix(modelID, "o4-mini") ||
-		(strings.HasPrefix(modelID, "gpt-5") && !strings.HasPrefix(modelID, "gpt-5-chat"))
-
-	supportsPriorityProcessing := strings.HasPrefix(modelID, "gpt-4") ||
-		strings.HasPrefix(modelID, "gpt-5-mini") ||
-		(strings.HasPrefix(modelID, "gpt-5") &&
-			!strings.HasPrefix(modelID, "gpt-5-nano") &&
-			!strings.HasPrefix(modelID, "gpt-5-chat")) ||
-		strings.HasPrefix(modelID, "o3") ||
-		strings.HasPrefix(modelID, "o4-mini")
-
-	// Use allowlist approach: only known reasoning models should use 'developer' role
-	// This prevents issues with fine-tuned models, third-party models, and custom models
-	isReasoningModel := strings.HasPrefix(modelID, "o1") ||
-		strings.HasPrefix(modelID, "o3") ||
-		strings.HasPrefix(modelID, "o4-mini") ||
-		strings.HasPrefix(modelID, "codex-mini") ||
-		strings.HasPrefix(modelID, "computer-use-preview") ||
-		(strings.HasPrefix(modelID, "gpt-5") && !strings.HasPrefix(modelID, "gpt-5-chat"))
-
-	// https://platform.openai.com/docs/guides/latest-model#gpt-5-1-parameter-compatibility
-	// GPT-5.1 and later families support temperature, topP, logProbs when
-	// reasoningEffort is none.
-	supportsNonReasoningParameters := strings.HasPrefix(modelID, "gpt-5.1") ||
-		strings.HasPrefix(modelID, "gpt-5.2") ||
-		strings.HasPrefix(modelID, "gpt-5.3") ||
-		strings.HasPrefix(modelID, "gpt-5.4") ||
-		strings.HasPrefix(modelID, "gpt-5.5")
+	o := oSeriesPattern.FindStringSubmatch(modelID)
+	gpt := gptPattern.FindStringSubmatch(modelID)
+	var major, minor, oVersion int
+	var chat, nano bool
+	if o != nil {
+		oVersion, _ = strconv.Atoi(o[1])
+	}
+	if gpt != nil {
+		major, _ = strconv.Atoi(gpt[1])
+		minor, _ = strconv.Atoi(gpt[2])
+		chat = gpt[2] == "" && strings.HasPrefix(gpt[3], "chat")
+		nano = strings.HasPrefix(gpt[3], "nano")
+	}
+	supportsFlexProcessing := oVersion >= 3 || major >= 5 && !chat
+	supportsPriorityProcessing := strings.HasPrefix(modelID, "gpt-4") || oVersion >= 3 || major >= 5 && !nano && !chat
+	isReasoningModel := o != nil || major >= 5 && !chat
+	supportsNonReasoningParameters := major > 5 || major == 5 && minor >= 1
 
 	systemMessageMode := "system"
 	if isReasoningModel {

@@ -65,9 +65,7 @@ func TestGoogleEmbedding_DoEmbed(t *testing.T) {
 			receivedHeaders = r.Header
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]any{
-				"embeddings": []map[string]any{
-					{"values": dummyEmbeddings[0]},
-				},
+				"embedding": map[string]any{"values": dummyEmbeddings[0]},
 			})
 		}))
 		defer server.Close()
@@ -129,6 +127,35 @@ func TestGoogleEmbedding_MaxEmbeddingsPerCall(t *testing.T) {
 
 	if embModel.MaxEmbeddingsPerCall() != 100 {
 		t.Errorf("expected max embeddings 100, got %d", embModel.MaxEmbeddingsPerCall())
+	}
+}
+
+func TestGoogleEmbeddingSingleRouteAndOptions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models/gemini-embedding-2:embedContent" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		var request map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+		}
+		if request["taskType"] != "RETRIEVAL_QUERY" || request["outputDimensionality"] != float64(2) {
+			t.Errorf("request = %v", request)
+		}
+		_, _ = w.Write([]byte(`{"embedding":{"values":[1,2]}}`))
+	}))
+	defer server.Close()
+	dimensions := 2
+	m := New(Options{BaseURL: server.URL}).EmbeddingModel("gemini-embedding-2")
+	result, err := m.Embed(context.Background(), model.EmbedCallOptions{Values: []string{"query"}, Dimensions: &dimensions, ProviderOptions: map[string]any{"taskType": "RETRIEVAL_QUERY"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Embeddings) != 1 {
+		t.Fatalf("result = %+v", result)
+	}
+	if _, err := m.Embed(context.Background(), model.EmbedCallOptions{Values: make([]string, 101)}); err == nil {
+		t.Fatal("oversized batch must fail")
 	}
 }
 

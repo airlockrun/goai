@@ -3,16 +3,24 @@ package azure
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	goaierrors "github.com/airlockrun/goai/errors"
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/model"
 	"github.com/airlockrun/goai/stream"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 // Translated from ai-sdk/packages/azure/src/azure-openai-provider.test.ts
 
@@ -24,6 +32,145 @@ func TestAzureProvider_ID(t *testing.T) {
 
 	if provider.ID() != "azure" {
 		t.Errorf("expected provider ID azure, got %s", provider.ID())
+	}
+}
+
+func TestAzureProvider_ResponsesRouting(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		opts Options
+		want string
+	}{
+		{"resource", Options{ResourceName: "test"}, "https://test.openai.azure.com/openai/v1/responses?api-version=v1"},
+		{"versioned", Options{BaseURL: "https://test.openai.azure.com/openai/v1/"}, "https://test.openai.azure.com/openai/v1/responses"},
+		{"gateway", Options{BaseURL: "https://gateway.test/custom", APIVersion: "custom"}, "https://gateway.test/custom/responses"},
+		{"deployment", Options{ResourceName: "test", UseDeploymentBasedURLs: true, APIVersion: "preview"}, "https://test.openai.azure.com/openai/deployments/deploy/responses?api-version=preview"},
+		{"foundry", Options{BaseURL: "https://test.services.ai.azure.com/api/projects/p"}, "https://test.services.ai.azure.com/api/projects/p/v1/responses"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			original := http.DefaultClient
+			t.Cleanup(func() { http.DefaultClient = original })
+			http.DefaultClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if req.URL.String() != tt.want {
+					t.Errorf("URL=%s want %s", req.URL, tt.want)
+				}
+				if req.Header.Get("api-key") != "key" || req.Header.Get("Authorization") != "" {
+					t.Errorf("auth: %v", req.Header)
+				}
+				var body map[string]any
+				if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+					t.Error(err)
+				}
+				if body["model"] != "deploy" || body["input"] == nil || body["messages"] != nil {
+					t.Errorf("body: %v", body)
+				}
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("data: " + `{"type":"response.completed","response":{}}` + "\n\n"))}, nil
+			})}
+			tt.opts.APIKey = "key"
+			tt.opts.DeploymentName = "deploy"
+			m := New(tt.opts).Model("")
+			if m.Provider() != "azure.responses" || m.ID() != "deploy" {
+				t.Fatalf("model=%s/%s", m.Provider(), m.ID())
+			}
+			events, err := m.Stream(context.Background(), &stream.CallOptions{Messages: []message.Message{message.NewUserMessage("hi")}, Headers: map[string]string{"Authorization": "untrusted"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for event := range events {
+				if event.Type == stream.EventError {
+					t.Fatal(event.Data)
+				}
+			}
+		})
+	}
+}
+
+func TestAzureProvider_ResponsesTokenRefresh(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer token" || r.Header.Get("api-key") != "" {
+			t.Errorf("headers: %v", r.Header)
+		}
+		w.Write([]byte("data: " + `{"type":"response.completed","response":{}}` + "\n\n"))
+	}))
+	defer server.Close()
+	m := New(Options{BaseURL: server.URL, TokenProvider: func() (string, error) { calls++; return "token", nil }}).Model("deploy")
+	for i := 0; i < 2; i++ {
+		events, err := m.Stream(context.Background(), &stream.CallOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for event := range events {
+			if event.Type == stream.EventError {
+				t.Fatal(event.Data)
+			}
+		}
+	}
+	if calls != 2 {
+		t.Fatalf("token calls=%d", calls)
+	}
+}
+
+func TestAzureModel_SetupErrorClassification(t *testing.T) {
+	transportErr := errors.New("connection refused")
+	tests := []struct {
+		name          string
+		roundTrip     roundTripFunc
+		wantStatus    int
+		wantRetryable bool
+		wantCause     error
+	}{
+		{
+			name: "transport error",
+			roundTrip: func(*http.Request) (*http.Response, error) {
+				return nil, transportErr
+			},
+			wantRetryable: true,
+			wantCause:     transportErr,
+		},
+		{
+			name: "bad request",
+			roundTrip: func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusBadRequest,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader("invalid request")),
+					Request:    req,
+				}, nil
+			},
+			wantStatus: http.StatusBadRequest,
+		},
+	}
+
+	originalClient := http.DefaultClient
+	t.Cleanup(func() { http.DefaultClient = originalClient })
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			http.DefaultClient = &http.Client{Transport: tt.roundTrip}
+			model := New(Options{BaseURL: "http://azure.test", APIKey: "key"}).Model("gpt-4")
+			events, err := model.Stream(context.Background(), &stream.CallOptions{
+				Messages: []message.Message{message.NewUserMessage("hello")},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var eventErr error
+			for event := range events {
+				if event.Type == stream.EventError {
+					eventErr = event.Data.(stream.ErrorEvent).Error
+				}
+			}
+			var apiErr *goaierrors.APICallError
+			if !errors.As(eventErr, &apiErr) {
+				t.Fatalf("error = %v, want APICallError", eventErr)
+			}
+			if apiErr.StatusCode != tt.wantStatus || apiErr.IsRetryable != tt.wantRetryable {
+				t.Errorf("status/retryable = %d/%v, want %d/%v", apiErr.StatusCode, apiErr.IsRetryable, tt.wantStatus, tt.wantRetryable)
+			}
+			if tt.wantCause != nil && !errors.Is(apiErr, tt.wantCause) {
+				t.Errorf("error = %v, want cause %v", apiErr, tt.wantCause)
+			}
+		})
 	}
 }
 
@@ -59,7 +206,7 @@ func TestAzureModel_StreamText(t *testing.T) {
 			BaseURL: server.URL,
 			APIKey:  "test-api-key",
 		})
-		model := provider.Model("gpt-4")
+		model := provider.Chat("gpt-4")
 
 		events, err := model.Stream(context.Background(), &stream.CallOptions{
 			Messages: []message.Message{
@@ -107,7 +254,7 @@ func TestAzureModel_StreamText(t *testing.T) {
 			BaseURL: server.URL,
 			APIKey:  "test-api-key",
 		})
-		model := provider.Model("gpt-4")
+		model := provider.Chat("gpt-4")
 
 		events, err := model.Stream(context.Background(), &stream.CallOptions{
 			Messages: []message.Message{
@@ -577,7 +724,7 @@ func TestAzureModel_APIVersion(t *testing.T) {
 			BaseURL: server.URL,
 			APIKey:  "test-api-key",
 		})
-		model := provider.Model("gpt-4")
+		model := provider.Chat("gpt-4")
 
 		events, _ := model.Stream(context.Background(), &stream.CallOptions{
 			Messages: []message.Message{message.NewUserMessage("Hi")},
@@ -606,7 +753,7 @@ func TestAzureModel_APIVersion(t *testing.T) {
 			APIKey:     "test-api-key",
 			APIVersion: "2025-04-01-preview",
 		})
-		model := provider.Model("gpt-4")
+		model := provider.Chat("gpt-4")
 
 		events, _ := model.Stream(context.Background(), &stream.CallOptions{
 			Messages: []message.Message{message.NewUserMessage("Hi")},
@@ -638,7 +785,7 @@ func TestAzureModel_ProviderOptions(t *testing.T) {
 			BaseURL: server.URL,
 			APIKey:  "test-api-key",
 		})
-		model := provider.Model("gpt-4")
+		model := provider.Chat("gpt-4")
 
 		events, _ := model.Stream(context.Background(), &stream.CallOptions{
 			Messages: []message.Message{message.NewUserMessage("Hi")},
@@ -669,7 +816,7 @@ func TestAzureModel_ProviderOptions(t *testing.T) {
 			BaseURL: server.URL,
 			APIKey:  "test-api-key",
 		})
-		model := provider.Model("gpt-4")
+		model := provider.Chat("gpt-4")
 
 		events, _ := model.Stream(context.Background(), &stream.CallOptions{
 			Messages: []message.Message{message.NewUserMessage("Hi")},
@@ -700,7 +847,7 @@ func TestAzureModel_ProviderOptions(t *testing.T) {
 			BaseURL: server.URL,
 			APIKey:  "test-api-key",
 		})
-		model := provider.Model("gpt-4")
+		model := provider.Chat("gpt-4")
 
 		events, _ := model.Stream(context.Background(), &stream.CallOptions{
 			Messages: []message.Message{message.NewUserMessage("Hi")},
@@ -731,7 +878,7 @@ func TestAzureModel_ProviderOptions(t *testing.T) {
 			BaseURL: server.URL,
 			APIKey:  "test-api-key",
 		})
-		model := provider.Model("gpt-4")
+		model := provider.Chat("gpt-4")
 
 		events, _ := model.Stream(context.Background(), &stream.CallOptions{
 			Messages: []message.Message{message.NewUserMessage("Hi")},
@@ -762,7 +909,7 @@ func TestAzureModel_ProviderOptions(t *testing.T) {
 			BaseURL: server.URL,
 			APIKey:  "test-api-key",
 		})
-		model := provider.Model("gpt-4")
+		model := provider.Chat("gpt-4")
 
 		events, _ := model.Stream(context.Background(), &stream.CallOptions{
 			Messages: []message.Message{message.NewUserMessage("Hi")},
@@ -798,7 +945,7 @@ func TestAzureModel_ResponseFormat(t *testing.T) {
 			BaseURL:      server.URL,
 			APIVersion:   "2024-02-01",
 		})
-		m := p.Model("gpt-4o")
+		m := p.Chat("gpt-4o")
 		if callOpts.Messages == nil {
 			callOpts.Messages = []message.Message{message.NewUserMessage("hi")}
 		}

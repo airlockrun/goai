@@ -43,13 +43,21 @@ func New(opts Options) *Provider {
 	}
 }
 
-func (p *Provider) ID() string                                                 { return "togetherai" }
-func (p *Provider) Model(modelID string) stream.Model                          { return p.compat.Model(modelID) }
-func (p *Provider) LanguageModel(modelID string) model.LanguageModel           { return p.Model(modelID) }
-func (p *Provider) ImageModel(modelID string) model.ImageModel                 { return nil }
-func (p *Provider) EmbeddingModel(modelID string) model.EmbeddingModel         { return nil }
+func (p *Provider) ID() string { return "togetherai" }
+func (p *Provider) Model(modelID string) stream.Model {
+	return openaicompat.New(openaicompat.Options{ProviderID: p.ID(), BaseURL: p.compat.BaseURL(), APIKey: p.opts.APIKey, Headers: p.opts.Headers, SupportsStructuredOutputs: modelID == "deepseek-ai/DeepSeek-V4-Flash-0731"}).Model(modelID)
+}
+func (p *Provider) LanguageModel(modelID string) model.LanguageModel { return p.Model(modelID) }
+func (p *Provider) ImageModel(modelID string) model.ImageModel {
+	return &TogetherImageModel{id: modelID, provider: p}
+}
+func (p *Provider) EmbeddingModel(modelID string) model.EmbeddingModel {
+	return p.compat.EmbeddingModel(modelID)
+}
 func (p *Provider) SpeechModel(modelID string) model.SpeechModel               { return nil }
 func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel { return nil }
-func (p *Provider) RerankingModel(modelID string) model.RerankingModel         { return nil }
+func (p *Provider) RerankingModel(modelID string) model.RerankingModel {
+	return &TogetherRerankingModel{id: modelID, provider: p}
+}
 
 var _ provider.Provider = (*Provider)(nil)

@@ -35,6 +35,11 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 	if input.MaxRetries < 0 {
 		return nil, fmt.Errorf("maxRetries must be >= 0")
 	}
+	toolCallExecutionMode, err := resolveToolCallExecutionMode(input.ToolCallExecutionMode)
+	if err != nil {
+		return nil, err
+	}
+	input.ToolCallExecutionMode = toolCallExecutionMode
 
 	// Set default MaxSteps
 	maxSteps := input.MaxSteps
@@ -124,15 +129,21 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 
 			// Collect results for this step
 			var (
-				stepTextBuilder  strings.Builder
-				stepReasoning    []ReasoningContentPart
-				stepToolCalls    []stream.ToolCall
-				stepSources      []stream.SourceEvent
-				stepFinishReason stream.FinishReason
-				stepUsage        stream.Usage
+				stepTextBuilder     strings.Builder
+				stepReasoning       []ReasoningContentPart
+				stepToolCalls       []stream.ToolCall
+				providerToolResults []stream.ToolResultEvent
+				stepSources         []stream.SourceEvent
+				stepFinishReason    stream.FinishReason
+				stepUsage           stream.Usage
+				replayEvents        []stream.Event
 			)
 
 			for event := range events {
+				switch event.Data.(type) {
+				case stream.TextDeltaEvent, stream.ReasoningDeltaEvent, stream.ReasoningEndEvent, stream.ToolCallEvent, stream.ToolResultEvent, stream.ToolErrorEvent:
+					replayEvents = append(replayEvents, event)
+				}
 				// Forward event to consumer
 				fullStream <- event
 
@@ -159,7 +170,7 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 					}
 				case stream.ToolCallEvent:
 					refined := e.Input
-					if input.RefineToolInput != nil {
+					if input.RefineToolInput != nil && !e.ProviderExecuted {
 						r, refineErr := input.RefineToolInput(e.ToolName, e.Input)
 						if refineErr != nil {
 							err := fmt.Errorf("refineToolInput(%s): %w", e.ToolName, refineErr)
@@ -175,25 +186,32 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 						refined = r
 					}
 					stepToolCalls = append(stepToolCalls, stream.ToolCall{
-						ID:    e.ToolCallID,
-						Name:  e.ToolName,
-						Input: refined,
+						ProviderExecuted: e.ProviderExecuted,
+						ProviderMetadata: e.ProviderMetadata,
+						ID:               e.ToolCallID,
+						Name:             e.ToolName,
+						Input:            refined,
 					})
+				case stream.ToolResultEvent:
+					providerToolResults = append(providerToolResults, e)
+				case stream.ToolErrorEvent:
+					providerToolResults = append(providerToolResults, stream.ToolResultEvent{ToolCallID: e.ToolCallID, ToolName: e.ToolName, Input: e.Input, Output: e.Output, ProviderExecuted: e.ProviderExecuted, ProviderMetadata: e.ProviderMetadata})
 				case stream.SourceEvent:
 					stepSources = append(stepSources, e)
 				case stream.FinishEvent:
 					stepFinishReason = e.FinishReason
-					stepUsage = e.Usage
+					stepUsage = e.Usage.Normalized()
 				case stream.FinishStepEvent:
 					if stepFinishReason == "" {
 						stepFinishReason = e.FinishReason
 					}
-					stepUsage = e.Usage
+					stepUsage = e.Usage.Normalized()
 				case stream.ErrorEvent:
 					mu.Lock()
 					stepText := stepTextBuilder.String()
 					textBuilder.WriteString(stepText)
 					allToolCalls = append(allToolCalls, stepToolCalls...)
+					allToolResults = append(allToolResults, providerToolResults...)
 					allSources = append(allSources, stepSources...)
 					totalUsage.Add(stepUsage)
 					finalStepText = stepText
@@ -228,7 +246,7 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 					executor = tool.NewLocalExecutor(input.Tools, input.ActiveTools)
 				}
 				var toolExecErr error
-				stepToolResults, toolExecErr = executeTools(ctx, executor, stepToolCalls)
+				stepToolResults, toolExecErr = executeTools(ctx, executor, stepToolCalls, input.ToolCallExecutionMode)
 				if toolExecErr != nil {
 					// Emit partial results first (tools completed before the error)
 					for _, tr := range stepToolResults {
@@ -238,6 +256,7 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 					stepText := stepTextBuilder.String()
 					textBuilder.WriteString(stepText)
 					allToolCalls = append(allToolCalls, stepToolCalls...)
+					allToolResults = append(allToolResults, providerToolResults...)
 					allToolResults = append(allToolResults, stepToolResults...)
 					allSources = append(allSources, stepSources...)
 					totalUsage.Add(stepUsage)
@@ -258,6 +277,10 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 				}
 			}
 
+			stepToolResults = append(providerToolResults, stepToolResults...)
+			for _, tr := range providerToolResults {
+				content = append(content, ToolResultContentPart{ToolResultEvent: tr})
+			}
 			// Build step result
 			stepResult := StepResult{
 				Content:      content,
@@ -266,7 +289,7 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 			}
 
 			// Build messages for this step
-			stepMessages := buildStepMessages(stepText, stepReasoning, stepToolCalls, stepToolResults)
+			stepMessages := buildStepMessages(replayEvents, stepToolCalls, stepToolResults)
 			stepResult.Response.Messages = stepMessages
 
 			// Update accumulated state
@@ -304,7 +327,7 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 			}
 
 			// If no tool calls or no tools, we're done
-			if len(stepToolCalls) == 0 || len(input.Tools) == 0 {
+			if !hasLocalToolCalls(stepToolCalls) || len(input.Tools) == 0 {
 				break
 			}
 
@@ -445,8 +468,8 @@ func streamWithSetupRetries(ctx context.Context, model stream.Model, options *st
 
 // inspectStreamSetup adapts providers that begin the HTTP request in their
 // stream goroutine. A retryable API error before any content is still a setup
-// failure; once any non-start event is observed, the stream is committed and
-// subsequent failures are never replayed.
+// failure; once any event other than request/step lifecycle framing is observed,
+// the stream is committed and subsequent failures are never replayed.
 func inspectStreamSetup(ctx context.Context, events <-chan stream.Event) (<-chan stream.Event, error) {
 	if events == nil {
 		return nil, errors.New("model returned nil event stream")
@@ -456,36 +479,69 @@ func inspectStreamSetup(ctx context.Context, events <-chan stream.Event) (<-chan
 		select {
 		case event, ok := <-events:
 			if !ok {
-				return prependEvents(prefix, nil), nil
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				return nil, fmt.Errorf("%w: model stream closed without content or finish", goaierrors.ErrInvalidResponse)
 			}
 			prefix = append(prefix, event)
 			switch event.Type {
-			case stream.EventStart:
+			case stream.EventStart, stream.EventStartStep, stream.EventRawChunk:
 				continue
 			case stream.EventError:
 				if eventErr, ok := event.Data.(stream.ErrorEvent); ok {
 					go drainEvents(ctx, events)
+					if eventErr.Error == nil {
+						return nil, fmt.Errorf("%w: model emitted an empty error", goaierrors.ErrInvalidResponse)
+					}
 					return nil, eventErr.Error
 				}
 			}
-			return prependEvents(prefix, events), nil
+			return prependEvents(ctx, prefix, events), nil
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
 	}
 }
 
-func prependEvents(prefix []stream.Event, events <-chan stream.Event) <-chan stream.Event {
+func prependEvents(ctx context.Context, prefix []stream.Event, events <-chan stream.Event) <-chan stream.Event {
 	out := make(chan stream.Event, len(prefix))
 	go func() {
 		defer close(out)
-		for _, event := range prefix {
+		hasOutput := false
+		forward := func(event stream.Event) {
+			switch e := event.Data.(type) {
+			case stream.TextDeltaEvent:
+				hasOutput = hasOutput || e.Text != ""
+			case stream.ReasoningDeltaEvent:
+				hasOutput = hasOutput || e.Text != ""
+			case stream.ReasoningEndEvent:
+				// Encrypted reasoning can be carried entirely in provider metadata.
+				hasOutput = hasOutput || len(e.ProviderMetadata) > 0
+			case stream.ToolCallEvent, stream.ToolResultEvent, stream.ToolErrorEvent, stream.ToolOutputDeniedEvent, stream.SourceEvent, stream.FinishEvent, stream.FinishStepEvent:
+				hasOutput = true
+			case stream.ErrorEvent:
+				hasOutput = true
+				if e.Error == nil {
+					event.Data = stream.ErrorEvent{Error: fmt.Errorf("%w: model emitted an empty error", goaierrors.ErrInvalidResponse)}
+				}
+			}
 			out <- event
+		}
+		for _, event := range prefix {
+			forward(event)
 		}
 		if events != nil {
 			for event := range events {
-				out <- event
+				forward(event)
 			}
+		}
+		if !hasOutput {
+			err := ctx.Err()
+			if err == nil {
+				err = fmt.Errorf("%w: model stream closed without content or finish", goaierrors.ErrInvalidResponse)
+			}
+			out <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
 		}
 	}()
 	return out
@@ -592,6 +648,11 @@ func GenerateText(ctx context.Context, input stream.Input) (*GenerateTextResult,
 	if input.MaxRetries < 0 {
 		return nil, fmt.Errorf("maxRetries must be >= 0")
 	}
+	toolCallExecutionMode, err := resolveToolCallExecutionMode(input.ToolCallExecutionMode)
+	if err != nil {
+		return nil, err
+	}
+	input.ToolCallExecutionMode = toolCallExecutionMode
 
 	// Set default MaxSteps
 	maxSteps := input.MaxSteps
@@ -635,16 +696,22 @@ func GenerateText(ctx context.Context, input stream.Input) (*GenerateTextResult,
 
 		// Collect results for this step
 		var (
-			textBuilder   strings.Builder
-			reasoning     []ReasoningContentPart
-			stepToolCalls []stream.ToolCall
-			stepSources   []stream.SourceEvent
-			finishReason  stream.FinishReason
-			stepUsage     stream.Usage
-			lastError     error
+			textBuilder         strings.Builder
+			reasoning           []ReasoningContentPart
+			stepToolCalls       []stream.ToolCall
+			providerToolResults []stream.ToolResultEvent
+			stepSources         []stream.SourceEvent
+			finishReason        stream.FinishReason
+			stepUsage           stream.Usage
+			lastError           error
+			replayEvents        []stream.Event
 		)
 
 		for event := range events {
+			switch event.Data.(type) {
+			case stream.TextDeltaEvent, stream.ReasoningDeltaEvent, stream.ReasoningEndEvent, stream.ToolCallEvent, stream.ToolResultEvent, stream.ToolErrorEvent:
+				replayEvents = append(replayEvents, event)
+			}
 			switch e := event.Data.(type) {
 			case stream.TextDeltaEvent:
 				textBuilder.WriteString(e.Text)
@@ -668,7 +735,7 @@ func GenerateText(ctx context.Context, input stream.Input) (*GenerateTextResult,
 				}
 			case stream.ToolCallEvent:
 				refined := e.Input
-				if input.RefineToolInput != nil {
+				if input.RefineToolInput != nil && !e.ProviderExecuted {
 					r, err := input.RefineToolInput(e.ToolName, e.Input)
 					if err != nil {
 						lastError = fmt.Errorf("refineToolInput(%s): %w", e.ToolName, err)
@@ -677,20 +744,26 @@ func GenerateText(ctx context.Context, input stream.Input) (*GenerateTextResult,
 					refined = r
 				}
 				stepToolCalls = append(stepToolCalls, stream.ToolCall{
-					ID:    e.ToolCallID,
-					Name:  e.ToolName,
-					Input: refined,
+					ProviderExecuted: e.ProviderExecuted,
+					ProviderMetadata: e.ProviderMetadata,
+					ID:               e.ToolCallID,
+					Name:             e.ToolName,
+					Input:            refined,
 				})
+			case stream.ToolResultEvent:
+				providerToolResults = append(providerToolResults, e)
+			case stream.ToolErrorEvent:
+				providerToolResults = append(providerToolResults, stream.ToolResultEvent{ToolCallID: e.ToolCallID, ToolName: e.ToolName, Input: e.Input, Output: e.Output, ProviderExecuted: e.ProviderExecuted, ProviderMetadata: e.ProviderMetadata})
 			case stream.SourceEvent:
 				stepSources = append(stepSources, e)
 			case stream.FinishEvent:
 				finishReason = e.FinishReason
-				stepUsage = e.Usage
+				stepUsage = e.Usage.Normalized()
 			case stream.FinishStepEvent:
 				if finishReason == "" {
 					finishReason = e.FinishReason
 				}
-				stepUsage = e.Usage
+				stepUsage = e.Usage.Normalized()
 			case stream.ErrorEvent:
 				lastError = e.Error
 			}
@@ -734,7 +807,7 @@ func GenerateText(ctx context.Context, input stream.Input) (*GenerateTextResult,
 				executor = tool.NewLocalExecutor(input.Tools, input.ActiveTools)
 			}
 			var toolExecErr error
-			stepToolResults, toolExecErr = executeTools(ctx, executor, stepToolCalls)
+			stepToolResults, toolExecErr = executeTools(ctx, executor, stepToolCalls, input.ToolCallExecutionMode)
 			if toolExecErr != nil {
 				return nil, toolExecErr
 			}
@@ -745,6 +818,10 @@ func GenerateText(ctx context.Context, input stream.Input) (*GenerateTextResult,
 			}
 		}
 
+		stepToolResults = append(providerToolResults, stepToolResults...)
+		for _, tr := range providerToolResults {
+			content = append(content, ToolResultContentPart{ToolResultEvent: tr})
+		}
 		// Build step result
 		stepResult := StepResult{
 			Content:      content,
@@ -756,7 +833,7 @@ func GenerateText(ctx context.Context, input stream.Input) (*GenerateTextResult,
 		totalUsage.Add(stepUsage)
 
 		// Build messages for this step
-		stepMessages := buildStepMessages(text, reasoning, stepToolCalls, stepToolResults)
+		stepMessages := buildStepMessages(replayEvents, stepToolCalls, stepToolResults)
 		stepResult.Response.Messages = stepMessages
 
 		// Append step messages to all messages
@@ -781,7 +858,7 @@ func GenerateText(ctx context.Context, input stream.Input) (*GenerateTextResult,
 		}
 
 		// If no tool calls or no tools, we're done
-		if len(stepToolCalls) == 0 || len(input.Tools) == 0 {
+		if !hasLocalToolCalls(stepToolCalls) || len(input.Tools) == 0 {
 			break
 		}
 
@@ -872,55 +949,55 @@ func buildCallOptions(input *stream.Input) *stream.CallOptions {
 	return opts
 }
 
-// executeTools executes all tool calls using the provided executor and returns the results.
-func executeTools(ctx context.Context, executor tool.Executor, toolCalls []stream.ToolCall) ([]stream.ToolResultEvent, error) {
+func resolveToolCallExecutionMode(mode stream.ToolCallExecutionMode) (stream.ToolCallExecutionMode, error) {
+	switch mode {
+	case "", stream.ToolCallExecutionSync:
+		return stream.ToolCallExecutionSync, nil
+	case stream.ToolCallExecutionAsync:
+		return stream.ToolCallExecutionAsync, nil
+	default:
+		return "", fmt.Errorf("toolCallExecutionMode must be %q or %q", stream.ToolCallExecutionSync, stream.ToolCallExecutionAsync)
+	}
+}
+
+func hasLocalToolCalls(calls []stream.ToolCall) bool {
+	for _, call := range calls {
+		if !call.ProviderExecuted {
+			return true
+		}
+	}
+	return false
+}
+
+// executeTools executes local tool calls using the provided executor and returns
+// results in model call order.
+func executeTools(ctx context.Context, executor tool.Executor, toolCalls []stream.ToolCall, mode stream.ToolCallExecutionMode) ([]stream.ToolResultEvent, error) {
+	localCalls := make([]stream.ToolCall, 0, len(toolCalls))
+	for _, tc := range toolCalls {
+		if !tc.ProviderExecuted {
+			localCalls = append(localCalls, tc)
+		}
+	}
+	toolCalls = localCalls
+	if mode == stream.ToolCallExecutionAsync {
+		return executeToolsAsync(ctx, executor, toolCalls)
+	}
+	return executeToolsSync(ctx, executor, toolCalls)
+}
+
+func executeToolsSync(ctx context.Context, executor tool.Executor, toolCalls []stream.ToolCall) ([]stream.ToolResultEvent, error) {
 	results := make([]stream.ToolResultEvent, 0, len(toolCalls))
 
 	for i, tc := range toolCalls {
-		// Execute via the executor
-		resp, err := executor.Execute(ctx, tool.Request{
-			ToolCallID: tc.ID,
-			ToolName:   tc.Name,
-			Input:      tc.Input,
-		})
-		var result stream.ToolResultEvent
-
+		result, err := executeTool(ctx, executor, tc)
 		if err != nil {
-			// Fatal errors and context errors propagate up to stop the run
-			if ctx.Err() != nil {
-				return results, ctx.Err()
-			}
-			var fatal tool.FatalToolError
-			if errors.As(err, &fatal) && fatal.FatalToolError() {
-				return results, err
-			}
-
-			// Normal executor errors: classify (denied vs error) and feed
-			// the discriminated outcome back to the model.
-			result = stream.ToolResultEvent{
-				ToolCallID: tc.ID,
-				ToolName:   tc.Name,
-				Input:      tc.Input,
-				Output:     tool.OutputForError(err),
-			}
-		} else {
-			// Skip if tool has no execute function (matches ai-sdk behavior where
-			// tools without execute return undefined, which is filtered out)
-			if resp.NoExecute {
-				continue
-			}
-
-			result = stream.ToolResultEvent{
-				ToolCallID: tc.ID,
-				ToolName:   tc.Name,
-				Input:      tc.Input,
-				Output:     outputFromResponse(resp),
-				Title:      resp.Title,
-				Metadata:   resp.Metadata,
-			}
+			return results, err
+		}
+		if result == nil {
+			continue
 		}
 
-		results = append(results, result)
+		results = append(results, *result)
 		if message.ToolOutcome(result.Output) == "denied" {
 			for _, skipped := range toolCalls[i+1:] {
 				results = append(results, stream.ToolResultEvent{
@@ -935,6 +1012,82 @@ func executeTools(ctx context.Context, executor tool.Executor, toolCalls []strea
 	}
 
 	return results, nil
+}
+
+type toolExecutionResult struct {
+	result *stream.ToolResultEvent
+	err    error
+}
+
+func executeToolsAsync(ctx context.Context, executor tool.Executor, toolCalls []stream.ToolCall) ([]stream.ToolResultEvent, error) {
+	settled := make([]toolExecutionResult, len(toolCalls))
+	var wg sync.WaitGroup
+	for i, tc := range toolCalls {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			result, err := executeTool(ctx, executor, tc)
+			settled[i] = toolExecutionResult{result: result, err: err}
+		}()
+	}
+	wg.Wait()
+
+	results := make([]stream.ToolResultEvent, 0, len(toolCalls))
+	var executionErr error
+	for _, outcome := range settled {
+		if outcome.result != nil {
+			results = append(results, *outcome.result)
+		}
+		if executionErr == nil && outcome.err != nil && !errors.Is(outcome.err, context.Canceled) && !errors.Is(outcome.err, context.DeadlineExceeded) {
+			executionErr = outcome.err
+		}
+	}
+	if executionErr != nil {
+		return results, executionErr
+	}
+	if ctx.Err() != nil {
+		return results, ctx.Err()
+	}
+	for _, outcome := range settled {
+		if outcome.err != nil {
+			return results, outcome.err
+		}
+	}
+	return results, nil
+}
+
+func executeTool(ctx context.Context, executor tool.Executor, tc stream.ToolCall) (*stream.ToolResultEvent, error) {
+	resp, err := executor.Execute(ctx, tool.Request{
+		ToolCallID: tc.ID,
+		ToolName:   tc.Name,
+		Input:      tc.Input,
+	})
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		var fatal tool.FatalToolError
+		if errors.As(err, &fatal) && fatal.FatalToolError() {
+			return nil, err
+		}
+		return &stream.ToolResultEvent{
+			ToolCallID: tc.ID,
+			ToolName:   tc.Name,
+			Input:      tc.Input,
+			Output:     tool.OutputForError(err),
+		}, nil
+	}
+	if resp.NoExecute {
+		return nil, nil
+	}
+	return &stream.ToolResultEvent{
+		ToolCallID: tc.ID,
+		ToolName:   tc.Name,
+		Input:      tc.Input,
+		Output:     outputFromResponse(resp),
+		Title:      resp.Title,
+		Metadata:   resp.Metadata,
+	}, nil
 }
 
 // outputFromResponse maps a tool.Response to the discriminated
@@ -969,25 +1122,52 @@ func toolOutcomeEvent(tr stream.ToolResultEvent) stream.Event {
 }
 
 // buildStepMessages builds the messages for a step result.
-func buildStepMessages(text string, reasoning []ReasoningContentPart, toolCalls []stream.ToolCall, toolResults []stream.ToolResultEvent) []message.Message {
+func buildStepMessages(events []stream.Event, toolCalls []stream.ToolCall, toolResults []stream.ToolResultEvent) []message.Message {
 	var msgs []message.Message
-
-	// Add assistant response
-	hasParts := len(toolCalls) > 0 || len(reasoning) > 0
-	if hasParts {
-		parts := make([]message.Part, 0, len(toolCalls)+len(reasoning)+1)
-		if text != "" {
-			parts = append(parts, message.TextPart{Text: text})
+	var parts []message.Part
+	reasoningIndexes := make(map[string]int)
+	callIndex, resultIndex := 0, 0
+	var text strings.Builder
+	flushText := func() {
+		if text.Len() > 0 {
+			parts = append(parts, message.TextPart{Text: text.String()})
+			text.Reset()
 		}
-		// Add reasoning parts
-		for _, r := range reasoning {
-			parts = append(parts, message.ReasoningPart{
-				Text:            r.Text,
-				ProviderOptions: r.ProviderOptions,
-			})
+	}
+	// Preserve the provider's transcript order, including server-tool rounds.
+	for _, event := range events {
+		if e, ok := event.Data.(stream.TextDeltaEvent); ok {
+			text.WriteString(e.Text)
+			continue
 		}
-		// Add tool calls
-		for _, tc := range toolCalls {
+		flushText()
+		switch e := event.Data.(type) {
+		case stream.ReasoningDeltaEvent:
+			i, ok := reasoningIndexes[e.ID]
+			if !ok {
+				i = len(parts)
+				reasoningIndexes[e.ID] = i
+				parts = append(parts, message.ReasoningPart{})
+			}
+			p := parts[i].(message.ReasoningPart)
+			p.Text += e.Text
+			parts[i] = p
+		case stream.ReasoningEndEvent:
+			i, ok := reasoningIndexes[e.ID]
+			if !ok {
+				if e.ProviderMetadata == nil {
+					continue
+				}
+				i = len(parts)
+				reasoningIndexes[e.ID] = i
+				parts = append(parts, message.ReasoningPart{})
+			}
+			p := parts[i].(message.ReasoningPart)
+			p.ProviderOptions = e.ProviderMetadata
+			parts[i] = p
+		case stream.ToolCallEvent:
+			tc := toolCalls[callIndex]
+			callIndex++
 			input := tc.Input
 			// Mirror ai-sdk #14281: if the model emitted invalid JSON
 			// for a tool-call input, substitute an empty object so the
@@ -1004,14 +1184,29 @@ func buildStepMessages(text string, reasoning []ReasoningContentPart, toolCalls 
 				input = json.RawMessage("{}")
 			}
 			parts = append(parts, message.ToolCallPart{
-				ID:    tc.ID,
-				Name:  tc.Name,
-				Input: input,
+				ProviderExecuted: tc.ProviderExecuted,
+				ProviderOptions:  tc.ProviderMetadata,
+				ID:               tc.ID,
+				Name:             tc.Name,
+				Input:            input,
 			})
+		case stream.ToolResultEvent, stream.ToolErrorEvent:
+			tr := toolResults[resultIndex]
+			resultIndex++
+			if tr.ProviderExecuted {
+				parts = append(parts, message.ToolResultPart{ToolCallID: tr.ToolCallID, ToolName: tr.ToolName, Output: tr.Output, ProviderExecuted: true, ProviderOptions: tr.ProviderMetadata})
+			}
 		}
+	}
+	flushText()
+	if len(parts) == 1 {
+		if text, ok := parts[0].(message.TextPart); ok {
+			msgs = append(msgs, message.NewAssistantMessage(text.Text))
+		} else {
+			msgs = append(msgs, message.NewAssistantMessageWithParts(parts...))
+		}
+	} else if len(parts) > 0 {
 		msgs = append(msgs, message.NewAssistantMessageWithParts(parts...))
-	} else if text != "" {
-		msgs = append(msgs, message.NewAssistantMessage(text))
 	}
 
 	// Add tool results as tool messages — the discriminated Output (text /
@@ -1019,7 +1214,9 @@ func buildStepMessages(text string, reasoning []ReasoningContentPart, toolCalls 
 	// content output keeps its file/image items inside the tool-result part
 	// rather than being flattened into separate message parts.
 	for _, tr := range toolResults {
-		msgs = append(msgs, message.NewToolMessage(tr.ToolCallID, tr.ToolName, tr.Output))
+		if !tr.ProviderExecuted {
+			msgs = append(msgs, message.NewToolMessage(tr.ToolCallID, tr.ToolName, tr.Output))
+		}
 	}
 
 	return msgs

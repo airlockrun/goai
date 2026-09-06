@@ -1,16 +1,17 @@
 package anthropic
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
 	goaierrors "github.com/airlockrun/goai/errors"
+	goaiinternal "github.com/airlockrun/goai/internal"
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/provider"
 	"github.com/airlockrun/goai/stream"
@@ -60,6 +61,15 @@ func (m *AnthropicModel) doStream(ctx context.Context, options *stream.CallOptio
 	if err != nil {
 		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
 		return
+	}
+	if jsonToolInjected {
+		var body struct {
+			OutputConfig struct {
+				Format json.RawMessage `json:"format"`
+			} `json:"output_config"`
+		}
+		_ = json.Unmarshal(reqBody, &body)
+		jsonToolInjected = len(body.OutputConfig.Format) == 0
 	}
 
 	url := m.provider.opts.BaseURL + "/messages"
@@ -176,7 +186,9 @@ func BuildRequestBody(cfg Config, modelID string, options *stream.CallOptions) (
 	//   structuredOutputMode=outputFormat).
 	// - No schema: emit a warning and inject a system-prompt JSON
 	//   instruction.
-	useOutputFormat := useNativeStructuredOutput && opts.StructuredOutputMode == "outputFormat" &&
+	modelLimit, _, _ := modelSupport(modelID)
+	modelStructured := modelLimit == 128000 || strings.Contains(modelID, "claude-sonnet-4-5") || strings.Contains(modelID, "claude-opus-4-5") || strings.Contains(modelID, "claude-haiku-4-5") || strings.Contains(modelID, "claude-opus-4-1")
+	useOutputFormat := useNativeStructuredOutput && (opts.StructuredOutputMode == "outputFormat" || ((opts.StructuredOutputMode == "" || opts.StructuredOutputMode == "auto") && modelStructured)) &&
 		options.ResponseFormat != nil && options.ResponseFormat.Type == "json" &&
 		len(options.ResponseFormat.Schema) > 0
 
@@ -269,6 +281,14 @@ func BuildRequestBody(cfg Config, modelID string, options *stream.CallOptions) (
 			// anthropic assistant message.
 			var content []anthropicContentBlock
 			for _, msg := range block.Messages {
+				for _, part := range msg.Content.Parts {
+					if tr, ok := part.(message.ToolResultPart); ok && tr.ProviderExecuted {
+						metadata, _ := tr.ProviderOptions["anthropic"].(map[string]any)
+						if metadata["rawBlock"] == nil {
+							return nil, nil, warnings, fmt.Errorf("Anthropic provider tool result %q is missing replay metadata", tr.ToolCallID)
+						}
+					}
+				}
 				content = append(content, convertAssistantContent(msg.Content, msg.ProviderOptions)...)
 			}
 			messages = append(messages, anthropicMessage{
@@ -311,10 +331,35 @@ func BuildRequestBody(cfg Config, modelID string, options *stream.CallOptions) (
 	if options.TopK != nil {
 		req.TopK = options.TopK
 	}
+	limit, knownModel, rejectsSampling := modelSupport(modelID)
 	if options.MaxOutputTokens != nil {
 		req.MaxTokens = *options.MaxOutputTokens
 	} else {
-		req.MaxTokens = 4096 // Default
+		req.MaxTokens = limit
+		if !knownModel {
+			warnings = append(warnings, stream.UnsupportedWarning("maxOutputTokens", fmt.Sprintf("Unknown model %q; defaulting to %d tokens. Set maxOutputTokens explicitly to override.", modelID, limit)))
+		}
+	}
+	if knownModel && req.MaxTokens > limit {
+		req.MaxTokens = limit
+		warnings = append(warnings, stream.UnsupportedWarning("maxOutputTokens", "Limited to the model output limit."))
+	}
+	if rejectsSampling || (opts.Thinking != nil && opts.Thinking.Type != "disabled") {
+		if req.Temperature != nil {
+			warnings = append(warnings, stream.UnsupportedWarning("temperature", "Not supported by this model or thinking mode."))
+			req.Temperature = nil
+		}
+		if req.TopP != nil {
+			warnings = append(warnings, stream.UnsupportedWarning("topP", "Not supported by this model or thinking mode."))
+			req.TopP = nil
+		}
+		if req.TopK != nil {
+			warnings = append(warnings, stream.UnsupportedWarning("topK", "Not supported by this model or thinking mode."))
+			req.TopK = nil
+		}
+	} else if strings.Contains(modelID, "claude-") && req.Temperature != nil && req.TopP != nil {
+		req.TopP = nil
+		warnings = append(warnings, stream.UnsupportedWarning("topP", "Cannot combine temperature and topP."))
 	}
 	if len(options.StopSequences) > 0 {
 		req.StopSequences = options.StopSequences
@@ -356,6 +401,20 @@ func BuildRequestBody(cfg Config, modelID string, options *stream.CallOptions) (
 			Type:         opts.Thinking.Type,
 			BudgetTokens: opts.Thinking.BudgetTokens,
 			Display:      opts.Thinking.Display,
+		}
+		if opts.Thinking.Type == "enabled" {
+			if req.Thinking.BudgetTokens <= 0 {
+				req.Thinking.BudgetTokens = 1024
+				warnings = append(warnings, stream.UnsupportedWarning("thinking.budgetTokens", "Thinking requires a budget; using 1024 tokens."))
+			}
+			if knownModel && req.MaxTokens > limit-req.Thinking.BudgetTokens {
+				req.MaxTokens = limit
+			} else {
+				req.MaxTokens += req.Thinking.BudgetTokens
+			}
+			if req.Thinking.BudgetTokens >= req.MaxTokens {
+				return nil, nil, warnings, errors.New("Anthropic thinking budget must be less than max_tokens")
+			}
 		}
 	}
 
@@ -710,20 +769,35 @@ func parseContextKeep(raw any) *anthropicContextKeep {
 }
 
 func (m *AnthropicModel) processStream(ctx context.Context, body io.Reader, tools []tool.Tool, events chan<- stream.Event, jsonToolInjected bool, includeRawChunks bool) {
-	// Convert tools slice to map for name lookup
-	toolsByName := make(map[string]tool.Tool, len(tools))
-	for _, t := range tools {
-		toolsByName[t.Name] = t
-	}
+	ProcessStream(ctx, body, tools, events, jsonToolInjected, includeRawChunks)
+}
 
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+// ProcessStream translates Messages SSE for direct and hosted Anthropic transports.
+func ProcessStream(ctx context.Context, body io.Reader, tools []tool.Tool, events chan<- stream.Event, jsonToolInjected bool, includeRawChunks bool) {
+	toolNames := make(map[string]string)
+	for _, t := range tools {
+		if t.IsProviderTool() {
+			if wire, _, ok := ConvertProviderTool(t); ok {
+				raw, err := json.Marshal(wire)
+				if err == nil {
+					var named struct {
+						Name string `json:"name"`
+					}
+					if json.Unmarshal(raw, &named) == nil {
+						toolNames[named.Name] = t.Name
+					}
+				}
+			}
+		}
+	}
+	streamReader := goaiinternal.NewStreamReader(body)
+	scanner := goaiinternal.NewSSEReader(streamReader)
 
 	var textStarted bool
 	var currentToolCalls = make(map[int]*toolCallAccumulator)
 	// Indexes where the synthetic "json" tool's input JSON is being streamed
 	// as text. Tracked per-index so mixed real-tool + synthetic streams work.
-	syntheticJSONIndexes := make(map[int]bool)
+	syntheticJSONIndexes := make(map[int]*toolCallAccumulator)
 	syntheticJSONSeen := false
 	// V3 usage breakdown: collect as individual counts and construct
 	// stream.Usage at emit time. All fields are pointers so "unreported"
@@ -735,10 +809,16 @@ func (m *AnthropicModel) processStream(ctx context.Context, body io.Reader, tool
 	var rawUsage map[string]any
 	var finishReason stream.FinishReason
 	var contextMgmtMetadata any
+	var messageStarted, messageStopped bool
+	activeBlocks := make(map[int]bool)
+	providerCalls := make(map[string]*toolCallAccumulator)
+	fail := func(detail string) {
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{Message: detail, IsRetryableSet: true})}}
+	}
 
 	events <- stream.Event{Type: stream.EventStartStep, Data: stream.StartStepEvent{}}
 
-	for scanner.Scan() {
+	for chunk := scanner.Next(); chunk != nil; chunk = scanner.Next() {
 		select {
 		case <-ctx.Done():
 			events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: ctx.Err()}}
@@ -746,12 +826,7 @@ func (m *AnthropicModel) processStream(ctx context.Context, body io.Reader, tool
 		default:
 		}
 
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-
-		data := strings.TrimPrefix(line, "data: ")
+		data := chunk.Data
 
 		if includeRawChunks {
 			events <- stream.Event{Type: stream.EventRawChunk, Data: stream.RawChunkEvent{RawValue: data}}
@@ -759,11 +834,29 @@ func (m *AnthropicModel) processStream(ctx context.Context, body io.Reader, tool
 
 		var event anthropicStreamEvent
 		if err := json.Unmarshal([]byte(data), &event); err != nil {
-			continue
+			fail("Malformed Anthropic stream JSON: " + err.Error())
+			return
+		}
+		if event.Type == "" {
+			fail("Anthropic stream event missing type")
+			return
+		}
+		if messageStopped && event.Type != "ping" {
+			fail("Overlapping Anthropic message generations")
+			return
 		}
 
 		switch event.Type {
 		case "message_start":
+			if messageStarted || len(activeBlocks) > 0 {
+				fail("Overlapping Anthropic message generations")
+				return
+			}
+			if event.Message == nil {
+				fail("Anthropic message_start is missing message")
+				return
+			}
+			messageStarted = true
 			if event.Message != nil && event.Message.Usage != nil {
 				u := event.Message.Usage
 				inputTotal = u.InputTokens
@@ -773,7 +866,26 @@ func (m *AnthropicModel) processStream(ctx context.Context, body io.Reader, tool
 			}
 
 		case "content_block_start":
+			if event.ContentBlock == nil || event.ContentBlock.Type == "" || activeBlocks[event.Index] {
+				fail("Malformed or overlapping Anthropic content block")
+				return
+			}
+			activeBlocks[event.Index] = true
 			if event.ContentBlock != nil {
+				if strings.HasSuffix(event.ContentBlock.Type, "tool_result") {
+					c := providerCalls[event.ContentBlock.ToolUseID]
+					if c == nil {
+						fail("Anthropic provider tool result without matching call")
+						return
+					}
+					var envelope struct {
+						Block json.RawMessage `json:"content_block"`
+					}
+					_ = json.Unmarshal([]byte(data), &envelope)
+					events <- stream.Event{Type: stream.EventToolResult, Data: stream.ToolResultEvent{ToolCallID: c.id, ToolName: c.name, Input: json.RawMessage(c.arguments), ProviderExecuted: true, Output: message.JSONOutput{Value: event.ContentBlock.Content}, ProviderMetadata: map[string]any{"anthropic": map[string]any{"rawBlock": envelope.Block}}}}
+					delete(providerCalls, c.id)
+					break
+				}
 				switch event.ContentBlock.Type {
 				case "text", "compaction":
 					// "compaction" is the block type paired with the
@@ -785,12 +897,15 @@ func (m *AnthropicModel) processStream(ctx context.Context, body io.Reader, tool
 						textStarted = true
 						events <- stream.Event{Type: stream.EventTextStart, Data: stream.TextStartEvent{}}
 					}
-				case "tool_use":
+					if event.ContentBlock.Text != "" {
+						events <- stream.Event{Type: stream.EventTextDelta, Data: stream.TextDeltaEvent{Text: event.ContentBlock.Text}}
+					}
+				case "tool_use", "server_tool_use", "mcp_tool_use":
 					// Synthetic JSON tool: surface its input as text so the core's
 					// Output.ParseComplete path sees structured JSON as the assistant's
 					// message text.
 					if jsonToolInjected && event.ContentBlock.Name == syntheticJSONToolName {
-						syntheticJSONIndexes[event.Index] = true
+						syntheticJSONIndexes[event.Index] = &toolCallAccumulator{initialInput: event.ContentBlock.Input}
 						syntheticJSONSeen = true
 						if !textStarted {
 							textStarted = true
@@ -803,7 +918,20 @@ func (m *AnthropicModel) processStream(ctx context.Context, body io.Reader, tool
 						id:    event.ContentBlock.ID,
 						name:  event.ContentBlock.Name,
 					}
+					acc.wireName = acc.name
+					if name := toolNames[acc.name]; name != "" {
+						acc.name = name
+					}
+					var envelope struct {
+						Block json.RawMessage `json:"content_block"`
+					}
+					_ = json.Unmarshal([]byte(data), &envelope)
+					acc.rawBlock = envelope.Block
 					currentToolCalls[event.Index] = acc
+					acc.initialInput = event.ContentBlock.Input
+					acc.providerExecuted = event.ContentBlock.Type != "tool_use"
+					acc.wireType = event.ContentBlock.Type
+					acc.serverName = event.ContentBlock.ServerName
 					events <- stream.Event{
 						Type: stream.EventToolInputStart,
 						Data: stream.ToolInputStartEvent{ID: acc.id, ToolName: acc.name},
@@ -812,6 +940,10 @@ func (m *AnthropicModel) processStream(ctx context.Context, body io.Reader, tool
 			}
 
 		case "content_block_delta":
+			if event.Delta == nil || event.Delta.Type == "" || !activeBlocks[event.Index] {
+				fail("Anthropic delta without content block")
+				return
+			}
 			if event.Delta != nil {
 				switch event.Delta.Type {
 				case "text_delta":
@@ -827,7 +959,8 @@ func (m *AnthropicModel) processStream(ctx context.Context, body io.Reader, tool
 						}
 					}
 				case "input_json_delta":
-					if syntheticJSONIndexes[event.Index] {
+					if acc := syntheticJSONIndexes[event.Index]; acc != nil {
+						acc.arguments += event.Delta.PartialJSON
 						events <- stream.Event{Type: stream.EventTextDelta, Data: stream.TextDeltaEvent{Text: event.Delta.PartialJSON}}
 						break
 					}
@@ -837,16 +970,55 @@ func (m *AnthropicModel) processStream(ctx context.Context, body io.Reader, tool
 							Type: stream.EventToolInputDelta,
 							Data: stream.ToolInputDeltaEvent{ID: acc.id, Delta: event.Delta.PartialJSON},
 						}
+					} else {
+						fail("Anthropic tool delta without tool block")
+						return
 					}
 				}
 			}
 
 		case "content_block_stop":
-			if syntheticJSONIndexes[event.Index] {
+			if !activeBlocks[event.Index] {
+				fail("Anthropic stop without content block")
+				return
+			}
+			delete(activeBlocks, event.Index)
+			if acc := syntheticJSONIndexes[event.Index]; acc != nil {
+				if acc.arguments == "" {
+					acc.arguments = string(acc.initialInput)
+					if acc.arguments == "" {
+						acc.arguments = "{}"
+					}
+					events <- stream.Event{Type: stream.EventTextDelta, Data: stream.TextDeltaEvent{Text: acc.arguments}}
+				}
+				var object map[string]any
+				if err := json.Unmarshal([]byte(acc.arguments), &object); err != nil || object == nil {
+					fail("Anthropic JSON output must be a valid object")
+					return
+				}
 				delete(syntheticJSONIndexes, event.Index)
 				break
 			}
 			if acc, ok := currentToolCalls[event.Index]; ok {
+				if acc.arguments == "" {
+					acc.arguments = string(acc.initialInput)
+					if acc.arguments == "" {
+						acc.arguments = "{}"
+					}
+				}
+				var object map[string]json.RawMessage
+				if err := json.Unmarshal([]byte(acc.arguments), &object); err != nil || object == nil {
+					fail("Anthropic tool input must be a valid JSON object")
+					return
+				}
+				var rawBlock map[string]json.RawMessage
+				_ = json.Unmarshal(acc.rawBlock, &rawBlock)
+				rawBlock["input"] = json.RawMessage(acc.arguments)
+				replay, err := json.Marshal(rawBlock)
+				if err != nil {
+					fail("Cannot encode Anthropic tool replay: " + err.Error())
+					return
+				}
 				events <- stream.Event{
 					Type: stream.EventToolInputEnd,
 					Data: stream.ToolInputEndEvent{ID: acc.id},
@@ -855,9 +1027,11 @@ func (m *AnthropicModel) processStream(ctx context.Context, body io.Reader, tool
 				events <- stream.Event{
 					Type: stream.EventToolCall,
 					Data: stream.ToolCallEvent{
-						ToolCallID: acc.id,
-						ToolName:   acc.name,
-						Input:      json.RawMessage(acc.arguments),
+						ProviderExecuted: acc.providerExecuted,
+						ProviderMetadata: map[string]any{"anthropic": map[string]any{"type": acc.wireType, "serverName": acc.serverName, "wireName": acc.wireName, "rawBlock": json.RawMessage(replay)}},
+						ToolCallID:       acc.id,
+						ToolName:         acc.name,
+						Input:            json.RawMessage(acc.arguments),
 					},
 				}
 
@@ -865,9 +1039,16 @@ func (m *AnthropicModel) processStream(ctx context.Context, body io.Reader, tool
 				// not here in the provider. The provider just emits ToolCallEvent.
 
 				delete(currentToolCalls, event.Index)
+				if acc.providerExecuted {
+					providerCalls[acc.id] = acc
+				}
 			}
 
 		case "message_delta":
+			if event.Delta == nil {
+				fail("Anthropic message_delta is missing delta")
+				return
+			}
 			if event.Delta != nil {
 				finishReason = mapAnthropicStopReason(event.Delta.StopReason)
 				if event.Delta.ContextManagement != nil {
@@ -900,11 +1081,29 @@ func (m *AnthropicModel) processStream(ctx context.Context, body io.Reader, tool
 			}
 
 		case "message_stop":
-			// Stream ended
+			messageStopped = true
+		case "error":
+			var envelope struct {
+				Error struct {
+					Type    string `json:"type"`
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			_ = json.Unmarshal([]byte(data), &envelope)
+			events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{Message: envelope.Error.Type + ": " + envelope.Error.Message, ResponseBody: data, IsRetryable: envelope.Error.Type == "overloaded_error" || envelope.Error.Type == "api_error" || envelope.Error.Type == "rate_limit_error", IsRetryableSet: true})}}
+			return
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: fmt.Errorf("Anthropic stream read: %w", err)}}
+	if err := streamReader.Err(ctx, scanner.Err()); err != nil {
+		var apiErr *goaierrors.APICallError
+		if errors.As(scanner.Err(), &apiErr) {
+			err = apiErr
+		}
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+		return
+	}
+	if !messageStarted || !messageStopped || len(activeBlocks) > 0 || len(currentToolCalls) > 0 || len(syntheticJSONIndexes) > 0 {
+		fail("Incomplete Anthropic stream")
 		return
 	}
 
@@ -1012,10 +1211,16 @@ func mapAppliedContextEdits(raw *anthropicContextAppliedEdits) any {
 }
 
 type toolCallAccumulator struct {
-	index     int
-	id        string
-	name      string
-	arguments string
+	index            int
+	id               string
+	name             string
+	arguments        string
+	initialInput     json.RawMessage
+	providerExecuted bool
+	wireType         string
+	serverName       string
+	wireName         string
+	rawBlock         json.RawMessage
 }
 
 func mapAnthropicStopReason(reason string) stream.FinishReason {

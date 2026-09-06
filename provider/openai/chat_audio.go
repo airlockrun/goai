@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"strings"
 
+	goaierrors "github.com/airlockrun/goai/errors"
+	goaiinternal "github.com/airlockrun/goai/internal"
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/model"
 	"github.com/airlockrun/goai/stream"
@@ -56,35 +58,43 @@ func (p *Provider) streamChatAudio(ctx context.Context, req chatRequest, headers
 
 	resp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
+		return nil, goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{Message: "OpenAI chat audio request failed", URL: httpReq.URL.String(), RequestBodyValues: json.RawMessage(body), Cause: err, IsRetryable: ctx.Err() == nil, IsRetryableSet: true})
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("OpenAI API error (status %d): %s", resp.StatusCode, string(raw))
+		return nil, HandleErrorResponse(resp, httpReq.URL.String(), json.RawMessage(body))
 	}
 
-	scanner := bufio.NewScanner(resp.Body)
+	streamReader := goaiinternal.NewStreamReader(resp.Body)
+	scanner := bufio.NewScanner(streamReader)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB: audio base64 lines are large
 
 	var dataB64, transcript, text strings.Builder
+	var terminal bool
 	for scanner.Scan() {
 		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
+		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
-		data := strings.TrimPrefix(line, "data: ")
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if data == "[DONE]" {
+			terminal = true
 			break
 		}
 		var chunk chatCompletionChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			continue
+			return nil, &goaierrors.JSONParseError{Text: data, Cause: err}
 		}
 		if chunk.Error != nil {
-			return nil, fmt.Errorf("OpenAI API error: %s", chunk.Error.Message)
+			return nil, streamAPIError("openai.chat", fmt.Sprint(chunk.Error.Code), chunk.Error.Message, data)
+		}
+		if chunk.Choices == nil && chunk.Usage == nil {
+			return nil, invalidStreamError("expected chat choices or usage", data)
 		}
 		for _, ch := range chunk.Choices {
+			if ch.FinishReason != "" {
+				terminal = true
+			}
 			if ch.Delta.Content != "" {
 				text.WriteString(ch.Delta.Content)
 			}
@@ -94,8 +104,11 @@ func (p *Provider) streamChatAudio(ctx context.Context, req chatRequest, headers
 			}
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("failed to read stream: %w", err)
+	if err := streamReader.Err(ctx, scanner.Err()); err != nil {
+		return nil, err
+	}
+	if !terminal {
+		return nil, incompleteStreamError()
 	}
 
 	res := &chatAudioResult{transcript: transcript.String(), text: text.String()}

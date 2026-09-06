@@ -38,12 +38,12 @@ func TestCohereModel_StreamText(t *testing.T) {
 			w.Header().Set("Content-Type", "application/stream+json")
 			w.WriteHeader(http.StatusOK)
 
-			// Cohere uses newline-delimited JSON (NDJSON), not SSE
+			// Cohere v2 streams server-sent events.
 			chunks := []string{
-				`{"event_type":"text-generation","text":"Hello"}`,
-				`{"event_type":"text-generation","text":", "}`,
-				`{"event_type":"text-generation","text":"World!"}`,
-				`{"event_type":"stream-end","finish_reason":"COMPLETE","response":{"text":"Hello, World!","meta":{"tokens":{"input_tokens":5,"output_tokens":3}}}}`,
+				`data: {"type":"content-delta","delta":{"message":{"content":{"text":"Hello"}}}}`,
+				`data: {"type":"content-delta","delta":{"message":{"content":{"text":", "}}}}`,
+				`data: {"type":"content-delta","delta":{"message":{"content":{"text":"World!"}}}}`,
+				`data: {"type":"message-end","delta":{"finish_reason":"COMPLETE","usage":{"tokens":{"input_tokens":5,"output_tokens":3}}}}`,
 			}
 
 			for _, chunk := range chunks {
@@ -88,10 +88,10 @@ func TestCohereModel_StreamText(t *testing.T) {
 			w.Header().Set("Content-Type", "application/stream+json")
 			w.WriteHeader(http.StatusOK)
 
-			// Cohere uses newline-delimited JSON (NDJSON), not SSE
+			// Cohere v2 streams server-sent events.
 			chunks := []string{
-				`{"event_type":"text-generation","text":"Hi"}`,
-				`{"event_type":"stream-end","finish_reason":"COMPLETE","response":{"text":"Hi","meta":{"tokens":{"input_tokens":10,"output_tokens":5}}}}`,
+				`data: {"type":"content-delta","delta":{"message":{"content":{"text":"Hi"}}}}`,
+				`data: {"type":"message-end","delta":{"finish_reason":"COMPLETE","usage":{"tokens":{"input_tokens":10,"output_tokens":5}}}}`,
 			}
 
 			for _, chunk := range chunks {
@@ -141,10 +141,10 @@ func TestCohereModel_Headers(t *testing.T) {
 			w.Header().Set("Content-Type", "application/stream+json")
 			w.WriteHeader(http.StatusOK)
 
-			// Cohere uses newline-delimited JSON (NDJSON), not SSE
+			// Cohere v2 streams server-sent events.
 			chunks := []string{
-				`{"event_type":"text-generation","text":"Hi"}`,
-				`{"event_type":"stream-end","finish_reason":"COMPLETE","response":{"text":"Hi","meta":{"tokens":{"input_tokens":5,"output_tokens":1}}}}`,
+				`data: {"type":"content-delta","delta":{"message":{"content":{"text":"Hi"}}}}`,
+				`data: {"type":"message-end","delta":{"finish_reason":"COMPLETE","usage":{"tokens":{"input_tokens":5,"output_tokens":1}}}}`,
 			}
 
 			for _, chunk := range chunks {
@@ -430,8 +430,8 @@ func TestCohereModel_ThinkingConfig(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 
 			chunks := []string{
-				`{"event_type":"text-generation","text":"Hi"}`,
-				`{"event_type":"stream-end","finish_reason":"COMPLETE","response":{"text":"Hi","meta":{"tokens":{"input_tokens":5,"output_tokens":1}}}}`,
+				`data: {"type":"content-delta","delta":{"message":{"content":{"text":"Hi"}}}}`,
+				`data: {"type":"message-end","delta":{"finish_reason":"COMPLETE","usage":{"tokens":{"input_tokens":5,"output_tokens":1}}}}`,
 			}
 
 			for _, chunk := range chunks {
@@ -487,8 +487,8 @@ func TestCohereModel_ThinkingConfig(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 
 			chunks := []string{
-				`{"event_type":"text-generation","text":"Hi"}`,
-				`{"event_type":"stream-end","finish_reason":"COMPLETE","response":{"text":"Hi","meta":{"tokens":{"input_tokens":5,"output_tokens":1}}}}`,
+				`data: {"type":"content-delta","delta":{"message":{"content":{"text":"Hi"}}}}`,
+				`data: {"type":"message-end","delta":{"finish_reason":"COMPLETE","usage":{"tokens":{"input_tokens":5,"output_tokens":1}}}}`,
 			}
 
 			for _, chunk := range chunks {
@@ -539,7 +539,7 @@ func TestCohereModel_ResponseFormat(t *testing.T) {
 			_ = json.Unmarshal(raw, &body)
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"event_type":"stream-end","finish_reason":"COMPLETE","response":{"meta":{"tokens":{"input_tokens":1,"output_tokens":1}}}}` + "\n"))
+			w.Write([]byte(`data: {"type":"message-end","delta":{"finish_reason":"COMPLETE","usage":{"tokens":{"input_tokens":1,"output_tokens":1}}}}` + "\n\n"))
 		}))
 		defer server.Close()
 		prov := createTestProvider(server.URL)

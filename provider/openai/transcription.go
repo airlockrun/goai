@@ -8,8 +8,12 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/airlockrun/goai/model"
+	"github.com/airlockrun/goai/provider"
+	"github.com/airlockrun/goai/stream"
 )
 
 // OpenAITranscriptionModel implements the TranscriptionModel interface for OpenAI.
@@ -30,6 +34,47 @@ func (m *OpenAITranscriptionModel) Provider() string {
 
 // Transcribe transcribes audio to text.
 func (m *OpenAITranscriptionModel) Transcribe(ctx context.Context, opts model.TranscribeCallOptions) (*model.TranscriptionResult, error) {
+	result, err := m.TranscribeDetailed(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	if len(result.DiarizedSegments) > 0 {
+		result.Warnings = append(result.Warnings, stream.UnsupportedWarning("speaker", "use TranscribeDetailed to access speaker labels and string segment IDs"))
+	}
+	return &result.TranscriptionResult, nil
+}
+
+// DiarizedSegment preserves the provider's segment identity and speaker label.
+type DiarizedSegment struct {
+	ID      string  `json:"id"`
+	Speaker string  `json:"speaker"`
+	Text    string  `json:"text"`
+	Start   float64 `json:"start"`
+	End     float64 `json:"end"`
+}
+
+// DetailedTranscriptionResult includes diarization data not represented by model.TranscriptionResult.
+type DetailedTranscriptionResult struct {
+	model.TranscriptionResult
+	DiarizedSegments []DiarizedSegment
+}
+
+// TranscriptionOptions controls the audio transcription endpoint.
+type TranscriptionOptions struct {
+	ResponseFormat         string   `json:"responseFormat,omitempty"`
+	ChunkingStrategy       any      `json:"chunkingStrategy,omitempty"`
+	KnownSpeakerNames      []string `json:"knownSpeakerNames,omitempty"`
+	KnownSpeakerReferences []string `json:"knownSpeakerReferences,omitempty"`
+	Temperature            *float64 `json:"temperature,omitempty"`
+	TimestampGranularities []string `json:"timestampGranularities,omitempty"`
+}
+
+// TranscribeDetailed transcribes audio and preserves diarized speaker segments.
+func (m *OpenAITranscriptionModel) TranscribeDetailed(ctx context.Context, opts model.TranscribeCallOptions) (*DetailedTranscriptionResult, error) {
+	providerOpts, err := provider.ParseProviderOptions[TranscriptionOptions](opts.ProviderOptions)
+	if err != nil {
+		return nil, err
+	}
 	// Read audio data if provided as reader
 	var audioData []byte
 	if opts.Audio != nil {
@@ -102,18 +147,58 @@ func (m *OpenAITranscriptionModel) Transcribe(ctx context.Context, opts model.Tr
 	// gpt-4o-mini-transcribe only accept `json` or `text` — match ai-sdk's
 	// exclusion list. timestamp_granularities is only valid with verbose_json.
 	responseFormat := "verbose_json"
-	if m.id == "gpt-4o-transcribe" || m.id == "gpt-4o-mini-transcribe" {
+	if strings.HasPrefix(m.id, "gpt-4o-transcribe") || strings.HasPrefix(m.id, "gpt-4o-mini-transcribe") {
 		responseFormat = "json"
+	}
+	if strings.HasPrefix(m.id, "gpt-4o-transcribe-diarize") {
+		responseFormat = "diarized_json"
+		if providerOpts.ChunkingStrategy == nil {
+			providerOpts.ChunkingStrategy = "auto"
+		}
+	}
+	if providerOpts.ResponseFormat != "" {
+		responseFormat = providerOpts.ResponseFormat
+	}
+	if responseFormat != "json" && responseFormat != "verbose_json" && responseFormat != "diarized_json" {
+		return nil, fmt.Errorf("unsupported transcription response format: %s", responseFormat)
+	}
+	if providerOpts.ChunkingStrategy != nil {
+		value, ok := providerOpts.ChunkingStrategy.(string)
+		if !ok {
+			encoded, err := json.Marshal(providerOpts.ChunkingStrategy)
+			if err != nil {
+				return nil, err
+			}
+			value = string(encoded)
+		}
+		if err := writer.WriteField("chunking_strategy", value); err != nil {
+			return nil, err
+		}
+	}
+	for key, values := range map[string][]string{"known_speaker_names[]": providerOpts.KnownSpeakerNames, "known_speaker_references[]": providerOpts.KnownSpeakerReferences} {
+		for _, value := range values {
+			if err := writer.WriteField(key, value); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if providerOpts.Temperature != nil {
+		if err := writer.WriteField("temperature", strconv.FormatFloat(*providerOpts.Temperature, 'f', -1, 64)); err != nil {
+			return nil, err
+		}
 	}
 	if err := writer.WriteField("response_format", responseFormat); err != nil {
 		return nil, fmt.Errorf("failed to write response_format field: %w", err)
 	}
 	if responseFormat == "verbose_json" {
-		if err := writer.WriteField("timestamp_granularities[]", "word"); err != nil {
-			return nil, fmt.Errorf("failed to write timestamp_granularities field: %w", err)
+		granularities := providerOpts.TimestampGranularities
+		if granularities == nil {
+			granularities = []string{"word", "segment"}
 		}
-		if err := writer.WriteField("timestamp_granularities[]", "segment"); err != nil {
-			return nil, fmt.Errorf("failed to write timestamp_granularities field: %w", err)
+		for _, value := range granularities {
+			if err := writer.WriteField("timestamp_granularities[]", value); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -168,7 +253,20 @@ func (m *OpenAITranscriptionModel) Transcribe(ctx context.Context, opts model.Tr
 
 	// Convert to model result
 	segments := make([]model.TranscriptionSegment, len(transResp.Segments))
+	var diarized []DiarizedSegment
 	for i, seg := range transResp.Segments {
+		id := i
+		var numericID int
+		if json.Unmarshal(seg.ID, &numericID) == nil {
+			id = numericID
+		}
+		if seg.Speaker != "" || responseFormat == "diarized_json" {
+			var stringID string
+			if json.Unmarshal(seg.ID, &stringID) != nil {
+				stringID = string(seg.ID)
+			}
+			diarized = append(diarized, DiarizedSegment{ID: stringID, Speaker: seg.Speaker, Text: seg.Text, Start: seg.Start, End: seg.End})
+		}
 		words := make([]model.TranscriptionWord, len(seg.Words))
 		for j, w := range seg.Words {
 			words[j] = model.TranscriptionWord{
@@ -178,11 +276,18 @@ func (m *OpenAITranscriptionModel) Transcribe(ctx context.Context, opts model.Tr
 			}
 		}
 		segments[i] = model.TranscriptionSegment{
-			ID:    seg.ID,
+			ID:    id,
 			Text:  seg.Text,
 			Start: seg.Start,
 			End:   seg.End,
 			Words: words,
+		}
+	}
+	if transResp.Duration == 0 {
+		for _, segment := range segments {
+			if segment.End > transResp.Duration {
+				transResp.Duration = segment.End
+			}
 		}
 	}
 
@@ -191,7 +296,7 @@ func (m *OpenAITranscriptionModel) Transcribe(ctx context.Context, opts model.Tr
 		duration = &transResp.Duration
 	}
 
-	return &model.TranscriptionResult{
+	return &DetailedTranscriptionResult{DiarizedSegments: diarized, TranscriptionResult: model.TranscriptionResult{
 		Text:     transResp.Text,
 		Segments: segments,
 		Language: transResp.Language,
@@ -202,7 +307,7 @@ func (m *OpenAITranscriptionModel) Transcribe(ctx context.Context, opts model.Tr
 		Response: model.TranscriptionResponse{
 			Model: m.id,
 		},
-	}, nil
+	}}, nil
 }
 
 // Response types
@@ -217,11 +322,12 @@ type transcriptionResponse struct {
 }
 
 type transcriptionSegment struct {
-	ID    int                 `json:"id"`
-	Start float64             `json:"start"`
-	End   float64             `json:"end"`
-	Text  string              `json:"text"`
-	Words []transcriptionWord `json:"words,omitempty"`
+	ID      json.RawMessage     `json:"id"`
+	Speaker string              `json:"speaker,omitempty"`
+	Start   float64             `json:"start"`
+	End     float64             `json:"end"`
+	Text    string              `json:"text"`
+	Words   []transcriptionWord `json:"words,omitempty"`
 }
 
 type transcriptionWord struct {

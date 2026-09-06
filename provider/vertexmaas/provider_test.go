@@ -3,12 +3,14 @@ package vertexmaas
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	goaierrors "github.com/airlockrun/goai/errors"
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/stream"
 )
@@ -22,6 +24,40 @@ func TestProvider_ID(t *testing.T) {
 	p := New(Options{Project: "test-project", AccessToken: "token"})
 	if got := p.ID(); got != "vertex.maas" {
 		t.Errorf("ID() = %q, want %q", got, "vertex.maas")
+	}
+}
+
+func TestProviderStreamErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name, data string
+		api        bool
+	}{{"invalid", `data: {`, false}, {"incomplete", `data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}`, false}, {"API error", `data: {"error":{"message":"unavailable","type":"server_error","code":"server_error"}}`, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(tc.data + "\n\n")) }))
+			defer server.Close()
+			events, err := New(Options{BaseURL: server.URL}).Model("future/model").Stream(context.Background(), &stream.CallOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var gotErr error
+			for event := range events {
+				if value, ok := event.Data.(stream.ErrorEvent); ok {
+					gotErr = value.Error
+				}
+				if event.Type == stream.EventFinish {
+					t.Fatal("failed stream must not finish successfully")
+				}
+			}
+			if gotErr == nil {
+				t.Fatal("expected typed error")
+			}
+			if tc.api {
+				var api *goaierrors.APIError
+				if !errors.As(gotErr, &api) {
+					t.Fatalf("error = %T %v", gotErr, gotErr)
+				}
+			}
+		})
 	}
 }
 

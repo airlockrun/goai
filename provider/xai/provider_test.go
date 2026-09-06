@@ -49,7 +49,7 @@ func TestXaiModel_StreamText(t *testing.T) {
 			APIKey:  "test-api-key",
 			BaseURL: server.URL,
 		})
-		model := provider.Model("grok-beta")
+		model := provider.Chat("grok-beta")
 
 		events, err := model.Stream(context.Background(), &stream.CallOptions{
 			Messages: []message.Message{
@@ -97,7 +97,7 @@ func TestXaiModel_StreamText(t *testing.T) {
 			APIKey:  "test-api-key",
 			BaseURL: server.URL,
 		})
-		model := provider.Model("grok-beta")
+		model := provider.Chat("grok-beta")
 
 		events, err := model.Stream(context.Background(), &stream.CallOptions{
 			Messages: []message.Message{
@@ -156,7 +156,7 @@ func TestXaiModel_Headers(t *testing.T) {
 				"Custom-Provider-Header": "provider-header-value",
 			},
 		})
-		model := provider.Model("grok-beta")
+		model := provider.Chat("grok-beta")
 
 		events, err := model.Stream(context.Background(), &stream.CallOptions{
 			Messages: []message.Message{
@@ -211,7 +211,7 @@ func TestXaiModel_ToolCalls(t *testing.T) {
 			APIKey:  "test-api-key",
 			BaseURL: server.URL,
 		})
-		model := provider.Model("grok-beta")
+		model := provider.Chat("grok-beta")
 
 		events, err := model.Stream(context.Background(), &stream.CallOptions{
 			Messages: []message.Message{
@@ -267,7 +267,7 @@ func TestXaiModel_RequestBody(t *testing.T) {
 			APIKey:  "test-api-key",
 			BaseURL: server.URL,
 		})
-		model := provider.Model("grok-beta")
+		model := provider.Chat("grok-beta")
 
 		events, err := model.Stream(context.Background(), &stream.CallOptions{
 			Messages: []message.Message{
@@ -326,7 +326,7 @@ func TestXaiModel_FinishReason(t *testing.T) {
 				APIKey:  "test-api-key",
 				BaseURL: server.URL,
 			})
-			model := provider.Model("grok-beta")
+			model := provider.Chat("grok-beta")
 
 			events, _ := model.Stream(context.Background(), &stream.CallOptions{
 				Messages: []message.Message{message.NewUserMessage("Hi")},
@@ -361,7 +361,7 @@ func TestXaiModel_ErrorResponse(t *testing.T) {
 			APIKey:  "invalid-key",
 			BaseURL: server.URL,
 		})
-		model := provider.Model("grok-beta")
+		model := provider.Chat("grok-beta")
 
 		events, err := model.Stream(context.Background(), &stream.CallOptions{
 			Messages: []message.Message{

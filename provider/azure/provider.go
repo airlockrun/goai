@@ -9,12 +9,17 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 
+	goaierrors "github.com/airlockrun/goai/errors"
+	goaiinternal "github.com/airlockrun/goai/internal"
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/model"
 	"github.com/airlockrun/goai/provider"
+	"github.com/airlockrun/goai/provider/openai"
+	goairesponse "github.com/airlockrun/goai/response"
 	"github.com/airlockrun/goai/stream"
 	"github.com/airlockrun/goai/tool"
 )
@@ -24,9 +29,11 @@ type Options struct {
 	APIKey         string
 	ResourceName   string // Azure resource name
 	DeploymentName string // Optional default deployment
-	APIVersion     string // API version, defaults to 2024-02-15-preview
+	APIVersion     string // Defaults to v1 for Responses and 2024-02-15-preview for deployment APIs.
 	BaseURL        string // Optional: override base URL (for testing)
 	Headers        map[string]string
+	// UseDeploymentBasedURLs routes Responses through a deployment endpoint.
+	UseDeploymentBasedURLs bool
 
 	// TokenProvider returns a Microsoft Entra ID (formerly Azure Active
 	// Directory) bearer token, invoked on every request. When set, requests
@@ -38,7 +45,8 @@ type Options struct {
 
 // Provider implements the Azure OpenAI provider.
 type Provider struct {
-	opts Options
+	opts                Options
+	responsesAPIVersion string
 }
 
 // New creates a new Azure OpenAI provider.
@@ -46,10 +54,14 @@ func New(opts Options) *Provider {
 	if opts.APIKey != "" && opts.TokenProvider != nil {
 		panic("azure: provide only one of APIKey or TokenProvider, not both")
 	}
+	responsesVersion := opts.APIVersion
+	if responsesVersion == "" {
+		responsesVersion = "v1"
+	}
 	if opts.APIVersion == "" {
 		opts.APIVersion = "2024-02-15-preview"
 	}
-	return &Provider{opts: opts}
+	return &Provider{opts: opts, responsesAPIVersion: responsesVersion}
 }
 
 // setAuth applies the provider's authentication header to req: a Microsoft
@@ -75,6 +87,47 @@ func (p *Provider) Model(modelID string) stream.Model {
 }
 
 func (p *Provider) LanguageModel(modelID string) model.LanguageModel {
+	return p.Responses(modelID)
+}
+
+// Responses returns a model using Azure's Responses API.
+func (p *Provider) Responses(modelID string) *openai.ResponsesModel {
+	if modelID == "" {
+		modelID = p.opts.DeploymentName
+	}
+	base := strings.TrimRight(p.opts.BaseURL, "/")
+	if base == "" {
+		base = fmt.Sprintf("https://%s.openai.azure.com/openai", p.opts.ResourceName)
+	}
+	u, err := url.Parse(base)
+	if err != nil {
+		panic("azure: invalid BaseURL: " + err.Error())
+	}
+	azureHost := strings.HasSuffix(u.Hostname(), ".openai.azure.com") || strings.HasSuffix(u.Hostname(), ".services.ai.azure.com") || strings.HasSuffix(u.Hostname(), ".cognitiveservices.azure.com")
+	versioned := strings.HasSuffix(strings.ToLower(u.Path), "/openai/v1")
+	if p.opts.UseDeploymentBasedURLs {
+		u.Path += "/deployments/" + modelID
+	} else if azureHost && !versioned {
+		u.Path += "/v1"
+	}
+	u.Path += "/responses"
+	if p.opts.UseDeploymentBasedURLs || azureHost && !versioned && !strings.HasPrefix(u.Path, "/api/projects/") {
+		q := u.Query()
+		q.Set("api-version", p.responsesAPIVersion)
+		u.RawQuery = q.Encode()
+	}
+	return openai.NewResponsesModel(modelID, openai.ResponsesConfig{
+		Provider: "azure.responses", URL: u.String(), Headers: p.opts.Headers,
+		ConfigureRequest: func(req *http.Request) error {
+			req.Header.Del("Authorization")
+			req.Header.Del("api-key")
+			return p.setAuth(req)
+		},
+	})
+}
+
+// Chat returns a deployment-based Chat Completions model.
+func (p *Provider) Chat(modelID string) *AzureLanguageModel {
 	deploymentName := modelID
 	if p.opts.DeploymentName != "" && modelID == "" {
 		deploymentName = p.opts.DeploymentName
@@ -270,17 +323,20 @@ func (m *AzureLanguageModel) doStream(ctx context.Context, options *stream.CallO
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{
+			Message: "Azure API request failed", URL: req.URL.String(), RequestBodyValues: json.RawMessage(reqBytes),
+			Cause: err, IsRetryable: ctx.Err() == nil, IsRetryableSet: true,
+		})}}
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		events <- stream.Event{
-			Type: stream.EventError,
-			Data: stream.ErrorEvent{Error: fmt.Errorf("Azure API error (status %d): %s", resp.StatusCode, string(body))},
-		}
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{
+			Message: "Azure API error: " + string(body), URL: req.URL.String(), RequestBodyValues: json.RawMessage(reqBytes),
+			StatusCode: resp.StatusCode, ResponseHeaders: goairesponse.ExtractResponseHeaders(resp), ResponseBody: string(body),
+		})}}
 		return
 	}
 
@@ -355,7 +411,8 @@ func convertMessage(msg message.Message) map[string]any {
 }
 
 func (m *AzureLanguageModel) processStream(ctx context.Context, body io.Reader, tools []tool.Tool, events chan<- stream.Event) {
-	scanner := bufio.NewScanner(body)
+	streamReader := goaiinternal.NewStreamReader(body)
+	scanner := bufio.NewScanner(streamReader)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
 	var textStarted bool
@@ -474,6 +531,10 @@ func (m *AzureLanguageModel) processStream(ctx context.Context, body io.Reader, 
 				}
 			}
 		}
+	}
+	if err := streamReader.Err(ctx, scanner.Err()); err != nil {
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+		return
 	}
 
 	// End text if started

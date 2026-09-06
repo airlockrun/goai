@@ -13,23 +13,6 @@ const (
 	defaultBaseURL = "https://api.x.ai/v1"
 )
 
-// responsesModelCatalog lists the xAI model IDs that speak the
-// Responses API (/v1/responses). Mirrors ai-sdk's XaiResponsesModelId
-// union. Model() routes these IDs to the Responses implementation; all
-// other IDs fall through to the Chat Completions / openaicompat path.
-var responsesModelCatalog = map[string]bool{
-	"grok-4.20-non-reasoning": true,
-	"grok-4.20-reasoning":     true,
-	"grok-4.3":                true,
-	"grok-latest":             true,
-}
-
-// isResponsesModel reports whether the given model ID should be routed
-// to the Responses API rather than Chat Completions.
-func isResponsesModel(id string) bool {
-	return responsesModelCatalog[id]
-}
-
 // Options contains configuration for the xAI provider.
 type Options struct {
 	APIKey  string
@@ -144,21 +127,16 @@ func xaiRequestModifier(providerOptions map[string]any) (map[string]any, []strea
 
 func (p *Provider) ID() string { return "xai" }
 
-// Model returns a language model for the given ID. The curated
-// Responses-API lineup is routed to /v1/responses; all other IDs flow
-// through the Chat Completions / openaicompat path.
+// Model returns a language model using the Responses API.
 func (p *Provider) Model(modelID string) stream.Model {
-	if isResponsesModel(modelID) {
-		return p.Responses(modelID)
-	}
-	return p.Chat(modelID)
+	return p.Responses(modelID)
 }
 
 // LanguageModel returns a language model interface for the given ID.
 func (p *Provider) LanguageModel(modelID string) model.LanguageModel { return p.Model(modelID) }
 
 // Chat returns an openaicompat-backed Chat Completions model. Always
-// available; Model() picks this path for non-Responses IDs.
+// available for callers selecting the Chat Completions API explicitly.
 func (p *Provider) Chat(modelID string) stream.Model { return p.compat.Model(modelID) }
 
 // Responses returns an XaiResponsesModel wired to /v1/responses.
@@ -177,9 +155,13 @@ func (p *Provider) Responses(modelID string) stream.Model {
 func (p *Provider) ImageModel(modelID string) model.ImageModel {
 	return &XaiImageModel{id: modelID, provider: p}
 }
-func (p *Provider) EmbeddingModel(modelID string) model.EmbeddingModel         { return nil }
-func (p *Provider) SpeechModel(modelID string) model.SpeechModel               { return nil }
-func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel { return nil }
-func (p *Provider) RerankingModel(modelID string) model.RerankingModel         { return nil }
+func (p *Provider) EmbeddingModel(modelID string) model.EmbeddingModel { return nil }
+func (p *Provider) SpeechModel(modelID string) model.SpeechModel {
+	return &XaiSpeechModel{id: modelID, provider: p}
+}
+func (p *Provider) TranscriptionModel(modelID string) model.TranscriptionModel {
+	return &XaiTranscriptionModel{id: modelID, provider: p}
+}
+func (p *Provider) RerankingModel(modelID string) model.RerankingModel { return nil }
 
 var _ provider.Provider = (*Provider)(nil)

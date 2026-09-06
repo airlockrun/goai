@@ -46,14 +46,52 @@ func (m *GoogleEmbeddingModel) Dimensions() int {
 
 // Embed generates embeddings for the provided texts.
 func (m *GoogleEmbeddingModel) Embed(ctx context.Context, opts model.EmbedCallOptions) (*model.EmbedResult, error) {
+	if len(opts.Values) == 0 || len(opts.Values) > m.MaxEmbeddingsPerCall() {
+		return nil, fmt.Errorf("embedding value count must be between 1 and %d", m.MaxEmbeddingsPerCall())
+	}
 	// Build request - batch embed
+	var content [][]geminiPart
+	if value, ok := opts.ProviderOptions["content"]; ok {
+		data, err := json.Marshal(value)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(data, &content); err != nil {
+			return nil, err
+		}
+		if len(content) != len(opts.Values) {
+			return nil, fmt.Errorf("multimodal content count must match values")
+		}
+	}
 	requests := make([]embedContentRequest, len(opts.Values))
 	for i, text := range opts.Values {
 		requests[i] = embedContentRequest{
-			Model: fmt.Sprintf("models/%s", m.id),
+			OutputDimensionality: opts.Dimensions,
+			Model:                modelPath(m.id),
 			Content: geminiContent{
 				Parts: []geminiPart{{Text: text}},
 			},
+		}
+		if value, ok := opts.ProviderOptions["taskType"].(string); ok {
+			requests[i].TaskType = value
+		}
+		if content != nil {
+			if text == "" {
+				requests[i].Content.Parts = nil
+			}
+			requests[i].Content.Parts = append(requests[i].Content.Parts, content[i]...)
+		}
+		if len(opts.Values) > 1 {
+			requests[i].Content.Role = "user"
+		}
+		if value, ok := opts.ProviderOptions["outputDimensionality"]; ok {
+			data, err := json.Marshal(value)
+			if err != nil {
+				return nil, err
+			}
+			if err := json.Unmarshal(data, &requests[i].OutputDimensionality); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -61,14 +99,20 @@ func (m *GoogleEmbeddingModel) Embed(ctx context.Context, opts model.EmbedCallOp
 		Requests: requests,
 	}
 
-	reqBody, err := json.Marshal(req)
+	var payload any = req
+	action := "batchEmbedContents"
+	if len(requests) == 1 {
+		payload = requests[0]
+		action = "embedContent"
+	}
+	reqBody, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
 	// Create HTTP request
-	url := fmt.Sprintf("%s/models/%s:batchEmbedContents?key=%s",
-		m.provider.opts.BaseURL, m.id, m.provider.opts.APIKey)
+	url := fmt.Sprintf("%s/%s:%s?key=%s",
+		m.provider.opts.BaseURL, modelPath(m.id), action, m.provider.opts.APIKey)
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBody))
 	if err != nil {
@@ -76,6 +120,9 @@ func (m *GoogleEmbeddingModel) Embed(ctx context.Context, opts model.EmbedCallOp
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
+	for k, v := range m.provider.opts.Headers {
+		httpReq.Header.Set(k, v)
+	}
 	for k, v := range opts.Headers {
 		httpReq.Header.Set(k, v)
 	}
@@ -101,6 +148,23 @@ func (m *GoogleEmbeddingModel) Embed(ctx context.Context, opts model.EmbedCallOp
 	if err := json.Unmarshal(body, &embResp); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
+	if len(requests) == 1 {
+		var single struct {
+			Embedding contentEmbedding `json:"embedding"`
+		}
+		if err := json.Unmarshal(body, &single); err != nil {
+			return nil, err
+		}
+		embResp.Embeddings = []contentEmbedding{single.Embedding}
+	}
+	if len(embResp.Embeddings) != len(requests) {
+		return nil, fmt.Errorf("embedding response count does not match input")
+	}
+	for _, embedding := range embResp.Embeddings {
+		if len(embedding.Values) == 0 {
+			return nil, fmt.Errorf("empty embedding response")
+		}
+	}
 
 	// Convert to model result
 	embeddings := make([]model.Embedding, len(embResp.Embeddings))
@@ -122,8 +186,10 @@ func (m *GoogleEmbeddingModel) Embed(ctx context.Context, opts model.EmbedCallOp
 // Request/response types
 
 type embedContentRequest struct {
-	Model   string        `json:"model"`
-	Content geminiContent `json:"content"`
+	OutputDimensionality *int          `json:"outputDimensionality,omitempty"`
+	TaskType             string        `json:"taskType,omitempty"`
+	Model                string        `json:"model"`
+	Content              geminiContent `json:"content"`
 }
 
 type batchEmbedRequest struct {
