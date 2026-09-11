@@ -60,11 +60,19 @@ func New(opts Options) *Provider {
 				}
 				return nil
 			},
-			ModelCallWarner: func(id string, options *stream.CallOptions) []stream.Warning {
-				if !supportsReasoningEffort(id) && options.Reasoning != "" && options.Reasoning != "provider-default" {
-					return []stream.Warning{stream.UnsupportedWarning("reasoning", "this model does not support reasoning configuration")}
+			ReasoningMapper: func(id string, options *stream.CallOptions) (map[string]any, []stream.Warning) {
+				if effort, _ := options.ProviderOptions["reasoningEffort"].(string); effort != "" {
+					return nil, nil
 				}
-				return nil
+				values := map[string]string{"none": "none", "minimal": "high", "low": "high", "medium": "high", "high": "high", "xhigh": "high"}
+				if !supportsReasoningEffort(id) {
+					values = nil
+				}
+				effort, warnings := provider.MapReasoning(options.Reasoning, values)
+				if effort == "" {
+					return nil, warnings
+				}
+				return map[string]any{"reasoning_effort": effort}, warnings
 			},
 		}),
 	}

@@ -198,9 +198,16 @@ func (m *ResponsesModel) buildRequest(options *stream.CallOptions) ([]byte, []st
 	// Provider-specific opts.ReasoningEffort wins; otherwise the top-level
 	// CallOptions.Reasoning lowers into the same wire field (mirrors
 	// ai-sdk v4's reasoning enum).
-	effort := opts.ReasoningEffort
-	if effort == "" {
-		effort = options.Reasoning
+	effort, reasoningWarnings := provider.OpenAIReasoning(options.Reasoning, opts.ReasoningEffort)
+	if m.config != nil && m.config.Generic && opts.ReasoningEffort == "" && effort == "minimal" {
+		effort, reasoningWarnings = provider.MapReasoning(effort, map[string]string{"minimal": "low"})
+	}
+	warnings = append(warnings, reasoningWarnings...)
+	// Deployment and compatible endpoints can use IDs that do not identify
+	// the underlying model. Only infer unsupported effort for native OpenAI.
+	if effort != "" && m.Provider() == "openai.responses" && !caps.IsReasoningModel && !opts.ForceReasoning && (m.config == nil || !m.config.Generic) {
+		warnings = append(warnings, stream.UnsupportedWarning("reasoning", "not supported by this model"))
+		effort = ""
 	}
 	if effort != "" {
 		req.Reasoning = &reasoningConfig{Effort: effort}

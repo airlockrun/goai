@@ -16,6 +16,59 @@ import (
 	"github.com/airlockrun/goai/tool"
 )
 
+func TestAnthropicReasoningRequest(t *testing.T) {
+	for _, tc := range []struct {
+		id, reasoning, thinking, effort string
+		budget                          int
+		explicit                        map[string]any
+	}{
+		{"anthropic.claude-sonnet-4-6", "high", "adaptive", "high", 0, nil},
+		{"anthropic.claude-opus-4-7", "xhigh", "adaptive", "max", 0, nil},
+		{"anthropic.claude-sonnet-4-5", "medium", "enabled", "", 19200, nil},
+		{"anthropic.claude-sonnet-4-6", "none", "disabled", "", 0, map[string]any{"type": "enabled", "budgetTokens": 3000, "maxReasoningEffort": "high"}},
+		{"anthropic.claude-sonnet-4-6", "high", "disabled", "", 0, map[string]any{"type": "disabled"}},
+		{"anthropic.claude-sonnet-4-6", "high", "enabled", "low", 3000, map[string]any{"type": "enabled", "budgetTokens": 3000, "maxReasoningEffort": "low"}},
+		{"anthropic.claude-sonnet-4-5", "high", "enabled", "", 3000, map[string]any{"budgetTokens": 3000}},
+		{"anthropic.claude-sonnet-4-6", "provider-default", "", "", 0, nil},
+	} {
+		t.Run(tc.id+"/"+tc.reasoning+"/"+tc.thinking, func(t *testing.T) {
+			m := New(Options{}).Model(tc.id).(*BedrockLanguageModel)
+			opts := &stream.CallOptions{Reasoning: tc.reasoning, ProviderOptions: map[string]any{"reasoningConfig": tc.explicit}}
+			before, err := json.Marshal(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, _, err := m.buildAnthropicRequest(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var body struct {
+				Thinking struct {
+					Type   string `json:"type"`
+					Budget int    `json:"budget_tokens"`
+					Effort string `json:"max_reasoning_effort"`
+				} `json:"thinking"`
+				Output struct {
+					Effort string `json:"effort"`
+				} `json:"output_config"`
+			}
+			if err := json.Unmarshal(raw, &body); err != nil {
+				t.Fatal(err)
+			}
+			if body.Thinking.Type != tc.thinking || body.Thinking.Budget != tc.budget || body.Output.Effort != tc.effort || body.Thinking.Effort != "" {
+				t.Fatalf("body = %s", raw)
+			}
+			after, err := json.Marshal(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(before) != string(after) {
+				t.Fatal("options mutated")
+			}
+		})
+	}
+}
+
 type failingStreamReader struct {
 	data string
 	err  error
@@ -533,8 +586,8 @@ func TestBedrockProviderOptions_ReasoningConfig(t *testing.T) {
 	if thinking["budget_tokens"] != float64(1024) {
 		t.Errorf("expected budget_tokens 1024, got %v", thinking["budget_tokens"])
 	}
-	if thinking["max_reasoning_effort"] != "high" {
-		t.Errorf("expected max_reasoning_effort 'high', got %v", thinking["max_reasoning_effort"])
+	if reqBody["output_config"].(map[string]any)["effort"] != "high" {
+		t.Errorf("expected output_config.effort 'high', got %v", reqBody["output_config"])
 	}
 }
 

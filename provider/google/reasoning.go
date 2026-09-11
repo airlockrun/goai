@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/airlockrun/goai/stream"
 )
 
 var olderGemini = regexp.MustCompile(`^gemini-[12]([.-]|$)|^gemini-pro(-vision)?$|^gemini-robotics-er-1\.5([.-]|$)`)
@@ -74,4 +76,26 @@ func ThinkingConfiguration(modelID, effort string, explicit any) (map[string]any
 		return nil, nil
 	}
 	return config, nil
+}
+
+// ThinkingConfigurationWarnings reports lossy level mappings unless an explicit
+// thinking level or budget overrides the shared setting.
+func ThinkingConfigurationWarnings(effort string, explicit any, config map[string]any) []stream.Warning {
+	if effort == "" || effort == "provider-default" {
+		return nil
+	}
+	if explicit != nil {
+		data, err := json.Marshal(explicit)
+		if err != nil {
+			return nil // ThinkingConfiguration reports encoding errors.
+		}
+		var values map[string]any
+		if json.Unmarshal(data, &values) == nil && (values["thinkingLevel"] != nil || values["thinkingBudget"] != nil) {
+			return nil
+		}
+	}
+	if level, ok := config["thinkingLevel"].(string); ok && level != effort {
+		return []stream.Warning{stream.CompatibilityWarning("reasoning", fmt.Sprintf("reasoning %q is mapped to thinking level %q; Gemini 3 thinking cannot be fully disabled", effort, level))}
+	}
+	return nil
 }

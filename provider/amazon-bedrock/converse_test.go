@@ -15,6 +15,40 @@ import (
 	"github.com/airlockrun/goai/stream"
 )
 
+func TestConverseReasoningRequest(t *testing.T) {
+	for _, tc := range []struct{ id, reasoning, path, want, warning string }{
+		{"openai.gpt-oss-120b-1:0", "medium", "reasoning_effort", "medium", ""},
+		{"global.openai.gpt-5.4", "high", "reasoning.effort", "high", ""},
+		{"amazon.nova-2-lite-v1:0", "xhigh", "reasoningConfig.maxReasoningEffort", "max", "compatibility"},
+		{"amazon.nova-2-lite-v1:0", "none", "reasoningConfig.maxReasoningEffort", "", "unsupported"},
+		{"amazon.nova-2-lite-v1:0", "invalid", "reasoningConfig.maxReasoningEffort", "", "unsupported"},
+		{"amazon.nova-2-lite-v1:0", "provider-default", "reasoningConfig.maxReasoningEffort", "", ""},
+	} {
+		t.Run(tc.id+"/"+tc.reasoning, func(t *testing.T) {
+			m := New(Options{}).Model(tc.id).(*BedrockLanguageModel)
+			raw, warnings, err := m.buildConverseRequest(&stream.CallOptions{Reasoning: tc.reasoning})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var body map[string]any
+			if err := json.Unmarshal(raw, &body); err != nil {
+				t.Fatal(err)
+			}
+			var got any = body["additionalModelRequestFields"]
+			for _, key := range strings.Split(tc.path, ".") {
+				object, _ := got.(map[string]any)
+				got = object[key]
+			}
+			if tc.want == "" && got != nil || tc.want != "" && got != tc.want {
+				t.Fatalf("body=%s", raw)
+			}
+			if tc.warning == "" && len(warnings) != 0 || tc.warning != "" && (len(warnings) != 1 || string(warnings[0].Type) != tc.warning) {
+				t.Fatalf("warnings=%v", warnings)
+			}
+		})
+	}
+}
+
 func TestBedrockRoutingBinaryStream(t *testing.T) {
 	original := http.DefaultClient
 	t.Cleanup(func() { http.DefaultClient = original })

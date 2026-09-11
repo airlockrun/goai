@@ -38,7 +38,17 @@ func New(opts Options) *Provider {
 			Headers:                   opts.Headers,
 			SupportsStructuredOutputs: true,
 			RequestModifier:           cerebrasRequestModifier,
-			MessageConverter:          convertMessages,
+			ReasoningMapper: func(_ string, options *stream.CallOptions) (map[string]any, []stream.Warning) {
+				if effort, _ := options.ProviderOptions["reasoningEffort"].(string); effort != "" {
+					return nil, nil
+				}
+				effort, warnings := provider.MapReasoning(options.Reasoning, map[string]string{"none": "none", "minimal": "low", "low": "low", "medium": "medium", "high": "high", "xhigh": "high"})
+				if effort == "" {
+					return nil, warnings
+				}
+				return map[string]any{"reasoning_effort": effort}, warnings
+			},
+			MessageConverter: convertMessages,
 			TransformRequest: func(_ string, body map[string]any) error {
 				if value, ok := body["max_tokens"]; ok {
 					body["max_completion_tokens"] = value

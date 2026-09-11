@@ -198,6 +198,7 @@ func (m *VertexLanguageModel) doStream(ctx context.Context, options *stream.Call
 		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
 		return
 	}
+	warnings = append(warnings, google.ThinkingConfigurationWarnings(options.Reasoning, options.ProviderOptions["thinkingConfig"], thinking)...)
 	for _, key := range []string{"safetySettings", "cachedContent", "labels"} {
 		if value, ok := options.ProviderOptions[key]; ok {
 			reqBody[key] = value

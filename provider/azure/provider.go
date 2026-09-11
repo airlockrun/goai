@@ -247,8 +247,9 @@ func (m *AzureLanguageModel) doStream(ctx context.Context, options *stream.CallO
 		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: fmt.Errorf("invalid provider options: %w", err)}}
 		return
 	}
-	if chatOpts.ReasoningEffort != "" {
-		reqBody["reasoning_effort"] = chatOpts.ReasoningEffort
+	effort, reasoningWarnings := provider.OpenAIReasoning(options.Reasoning, chatOpts.ReasoningEffort)
+	if effort != "" {
+		reqBody["reasoning_effort"] = effort
 	}
 	if chatOpts.ReasoningSummary != "" {
 		reqBody["reasoning_summary"] = chatOpts.ReasoningSummary
@@ -319,7 +320,7 @@ func (m *AzureLanguageModel) doStream(ctx context.Context, options *stream.CallO
 		req.Header.Set(k, v)
 	}
 
-	events <- stream.Event{Type: stream.EventStart, Data: stream.StartEvent{}}
+	events <- stream.Event{Type: stream.EventStart, Data: stream.StartEvent{Warnings: reasoningWarnings}}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

@@ -52,6 +52,67 @@ Step usage preserves the provider's `Usage.Raw`. Normalized token counts are
 nonnegative; aggregate usage sums reported counts, keeps entirely unreported
 counts nil, and omits `Raw` because raw provider payloads cannot be summed.
 
+## Reasoning Effort
+
+Use the shared `Reasoning` field with either `StreamText` or `GenerateText`:
+
+```go
+result, err := goai.GenerateText(ctx, stream.Input{
+	Model:     yourModel,
+	Messages:  yourMessages,
+	Reasoning: stream.ReasoningEffortHigh,
+})
+```
+
+The values are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
+An empty string (or `provider-default`) leaves reasoning at the provider default.
+The same field is available on `stream.CallOptions` for direct model calls.
+
+| Provider | Shared Effort Mapping |
+| --- | --- |
+| OpenAI Chat / Responses | `reasoning_effort` / `reasoning.effort`; native non-reasoning model IDs omit effort with a warning. |
+| Azure Chat / Responses | OpenAI wire fields; deployment aliases do not identify model capabilities, so select a reasoning-capable deployment. |
+| OpenAI-compatible endpoints | `reasoning_effort`; the endpoint and selected model must support the requested value. |
+| Open Responses | `reasoning.effort`; `minimal` maps to `low`. |
+| Anthropic / Vertex Anthropic | Adaptive Claude models use `thinking.type=adaptive` and `output_config.effort`; `minimal` maps to `low`, and `xhigh` maps to `max` on Claude 4.6 or `xhigh` on newer adaptive models. Budget-based models use 2/10/30/60/90 percent of their output limit, with a 1024-token minimum. `none` disables thinking. |
+| Bedrock Anthropic | Claude thinking/budget mapping; adaptive `xhigh` maps to `max`. Effort is in `output_config.effort`, not inside `thinking`. |
+| Bedrock Converse | `reasoningConfig.maxReasoningEffort` for Nova and other models, flat `reasoning_effort` for GPT-OSS, nested `reasoning.effort` for other OpenAI models. `minimal` maps to `low`, `xhigh` to `max`. `none` is unsupported. |
+| Google / Vertex Gemini | Gemini 3 uses thinking levels (`xhigh` maps to `high`); `none` selects the minimum level, not fully disabled thinking. Budget-based Gemini uses a capped token budget; `none` sends zero. |
+| xAI Chat / Responses | `minimal` maps to `low`; `xhigh` maps to `high` except on `grok-4.6`. Grok 4.20 reasoning/non-reasoning variants do not support shared effort. |
+| DeepSeek | Enables thinking; `minimal` maps to `low`, `medium` to `high`, and `xhigh` to `max`. `none` disables thinking and removes effort. |
+| Groq | `minimal` maps to `low`, `xhigh` to `high`. `none` is supported only for `qwen/qwen3.6-27b`. |
+| Mistral | Supported adjustable-reasoning models use `high` for every enabled level and `none` to disable. Other models omit effort with a warning. |
+| Cerebras / Fireworks | `minimal` maps to `low`, `xhigh` to `high`; other shared values pass through. |
+| Cohere | Thinking budgets use 2/10/30/60/90 percent of 32768 tokens, with a 1024-token minimum. `none` disables thinking. |
+
+Explicit provider options take precedence according to the provider's contract.
+For example, language-model options use flat keys:
+
+```go
+input := stream.Input{
+	Model:     yourOpenAIModel,
+	Messages:  yourMessages,
+	Reasoning: stream.ReasoningEffortHigh,
+	ProviderOptions: map[string]any{
+		"reasoningEffort": "low", // Explicit override wins.
+	},
+}
+```
+
+Anthropic's explicit `effort` overrides shared reasoning without implicitly
+enabling thinking; its explicit `thinking` configuration overrides derived
+thinking. DeepSeek and Cohere also honor explicit thinking configuration.
+Disabled thinking suppresses effort for Anthropic and DeepSeek. Bedrock merges
+explicit `reasoningConfig` fields over derived values, but shared `none` takes
+precedence for Anthropic models and clears both effort and budget.
+
+Inspect `stream.StartEvent.Warnings` for unsupported settings and lossy effort
+mappings. Unsupported shared values are omitted with warnings (Google/Vertex
+reject invalid effort strings). Provider-specific options remain an escape hatch
+for model-specific settings; a shared effort is not a guarantee that every model
+offered by a provider supports reasoning. Bedrock's Titan, Llama, Mistral, and
+Cohere InvokeModel paths do not translate shared effort and report it unsupported.
+
 ## Files
 
 Files are an optional provider capability (`provider.FilesProvider`). OpenAI,

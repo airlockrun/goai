@@ -332,6 +332,14 @@ func BuildRequestBody(cfg Config, modelID string, options *stream.CallOptions) (
 		req.TopK = options.TopK
 	}
 	limit, knownModel, rejectsSampling := modelSupport(modelID)
+	if opts.Effort == "" && options.Reasoning != "" && options.Reasoning != "provider-default" {
+		thinking, effort, reasoningWarnings := ReasoningConfiguration(modelID, options.Reasoning)
+		opts.Effort = effort
+		warnings = append(warnings, reasoningWarnings...)
+		if opts.Thinking == nil {
+			opts.Thinking = thinking
+		}
+	}
 	if options.MaxOutputTokens != nil {
 		req.MaxTokens = *options.MaxOutputTokens
 	} else {
@@ -398,11 +406,11 @@ func BuildRequestBody(cfg Config, modelID string, options *stream.CallOptions) (
 	// thinking - extended thinking configuration
 	if opts.Thinking != nil {
 		req.Thinking = &anthropicThinking{
-			Type:         opts.Thinking.Type,
-			BudgetTokens: opts.Thinking.BudgetTokens,
-			Display:      opts.Thinking.Display,
+			Type:    opts.Thinking.Type,
+			Display: opts.Thinking.Display,
 		}
 		if opts.Thinking.Type == "enabled" {
+			req.Thinking.BudgetTokens = opts.Thinking.BudgetTokens
 			if req.Thinking.BudgetTokens <= 0 {
 				req.Thinking.BudgetTokens = 1024
 				warnings = append(warnings, stream.UnsupportedWarning("thinking.budgetTokens", "Thinking requires a budget; using 1024 tokens."))
@@ -542,20 +550,9 @@ func BuildRequestBody(cfg Config, modelID string, options *stream.CallOptions) (
 		}
 	}
 
-	// effort → output_config.effort. ai-sdk parity:
-	// anthropic-language-model.ts:407-411 — effort is suppressed when
-	// thinking.type is explicitly "disabled" (the model can't apply effort
-	// when reasoning is off), but otherwise rides alongside any other
-	// output_config payload. Merge into req.OutputConfig so the
-	// structured-output path above doesn't get clobbered.
-	//
-	// Resolution: provider-specific opts.Effort wins when set; otherwise
-	// the top-level CallOptions.Reasoning lowers into the same wire field
-	// (mirrors ai-sdk v4's reasoning enum).
+	// Effort shares output_config with structured output and is suppressed
+	// when thinking is explicitly disabled.
 	effort := opts.Effort
-	if effort == "" {
-		effort = options.Reasoning
-	}
 	if effort != "" && (opts.Thinking == nil || opts.Thinking.Type != "disabled") {
 		if req.OutputConfig == nil {
 			req.OutputConfig = &anthropicOutputConfig{}
