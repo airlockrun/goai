@@ -7,9 +7,8 @@ import (
 	"github.com/airlockrun/goai/stream"
 )
 
-// CallOptions.Reasoning is the uniform v4 effort enum. It lowers into
-// output_config.effort the same way provider-specific MessagesOptions.Effort
-// does, but provider-specific Effort wins when both are set.
+// Adaptive Claude models map shared effort to output_config.effort and
+// enable thinking. Explicit provider effort takes precedence.
 
 func TestReasoning_LowersToOutputConfigEffort(t *testing.T) {
 	body := runBuildRequestBody(t, &stream.CallOptions{

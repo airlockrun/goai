@@ -71,6 +71,10 @@ type Options struct {
 	// Providers can use this to apply their typed options to the request.
 	RequestModifier RequestModifier
 
+	// ReasoningMapper translates shared reasoning before explicit provider options.
+	// Nil uses OpenAI-compatible effort values.
+	ReasoningMapper func(string, *stream.CallOptions) (map[string]any, []stream.Warning)
+
 	// CallWarner runs against the full CallOptions and collects warnings
 	// for unsupported CallOption fields (e.g. topK, frequencyPenalty).
 	// Matches the per-provider inventory in ai-sdk's language models.
@@ -319,8 +323,16 @@ func (m *CompatModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 		Messages:       convertedMessages,
 		ResponseFormat: respFormat,
 	}
-	if options.Reasoning != "" && options.Reasoning != "provider-default" {
-		req.ReasoningEffort = options.Reasoning
+	reasoningFields := map[string]any{}
+	if m.provider.opts.ReasoningMapper != nil {
+		var reasoningWarnings []stream.Warning
+		reasoningFields, reasoningWarnings = m.provider.opts.ReasoningMapper(m.id, options)
+		warnings = append(warnings, reasoningWarnings...)
+	} else {
+		explicit, _ := options.ProviderOptions["reasoningEffort"].(string)
+		var reasoningWarnings []stream.Warning
+		req.ReasoningEffort, reasoningWarnings = provider.OpenAIReasoning(options.Reasoning, explicit)
+		warnings = append(warnings, reasoningWarnings...)
 	}
 	if m.provider.opts.SupportsPenalties {
 		req.FrequencyPenalty = options.FrequencyPenalty
@@ -359,8 +371,20 @@ func (m *CompatModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 	}
 
 	// Apply provider-specific request modifications
-	if m.provider.opts.RequestModifier != nil {
-		extraFields, extraWarnings, err := m.provider.opts.RequestModifier(options.ProviderOptions)
+	if m.provider.opts.RequestModifier != nil || len(reasoningFields) > 0 {
+		extraFields := reasoningFields
+		if extraFields == nil {
+			extraFields = map[string]any{}
+		}
+		var extraWarnings []stream.Warning
+		var err error
+		if m.provider.opts.RequestModifier != nil {
+			var explicit map[string]any
+			explicit, extraWarnings, err = m.provider.opts.RequestModifier(options.ProviderOptions)
+			for key, value := range explicit {
+				extraFields[key] = value
+			}
+		}
 		if err != nil {
 			return nil, warnings, fmt.Errorf("request modifier error: %w", err)
 		}

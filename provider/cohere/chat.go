@@ -179,6 +179,14 @@ func (m *CohereModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 			Type:        typeName,
 			TokenBudget: opts.Thinking.TokenBudget,
 		}
+	} else if options.Reasoning == "none" {
+		req.Thinking = &cohereThinking{Type: "disabled"}
+	} else {
+		budget, reasoningWarnings := provider.ReasoningBudget(options.Reasoning, 32768)
+		warnings = append(warnings, reasoningWarnings...)
+		if budget > 0 {
+			req.Thinking = &cohereThinking{Type: "enabled", TokenBudget: budget}
+		}
 	}
 
 	// ResponseFormat. Cohere always uses type "json_object"; the schema

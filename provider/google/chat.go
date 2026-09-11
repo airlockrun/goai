@@ -301,6 +301,7 @@ func (m *GoogleModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 	if err != nil {
 		return nil, warnings, err
 	}
+	warnings = append(warnings, ThinkingConfigurationWarnings(options.Reasoning, options.ProviderOptions["thinkingConfig"], thinking)...)
 	if thinking != nil {
 		if req.GenerationConfig == nil {
 			req.GenerationConfig = &geminiGenerationConfig{}

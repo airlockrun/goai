@@ -97,8 +97,49 @@ func (m *BedrockLanguageModel) buildConverseRequest(options *stream.CallOptions)
 	if len(config) > 0 {
 		body["inferenceConfig"] = config
 	}
-	if len(opts.AdditionalModelRequestFields) > 0 {
-		body["additionalModelRequestFields"] = opts.AdditionalModelRequestFields
+	fields := make(map[string]any, len(opts.AdditionalModelRequestFields)+1)
+	for key, value := range opts.AdditionalModelRequestFields {
+		fields[key] = value
+	}
+	var warnings []stream.Warning
+	rc := ReasoningConfig{}
+	if options.Reasoning != "none" {
+		rc.MaxReasoningEffort, warnings = provider.MapReasoning(options.Reasoning, map[string]string{"minimal": "low", "low": "low", "medium": "medium", "high": "high", "xhigh": "max"})
+	} else {
+		warnings = append(warnings, stream.UnsupportedWarning("reasoning", "disabling reasoning is not supported by this Bedrock model"))
+	}
+	if opts.ReasoningConfig != nil {
+		rc.Type = opts.ReasoningConfig.Type
+		rc.BudgetTokens = opts.ReasoningConfig.BudgetTokens
+		if opts.ReasoningConfig.MaxReasoningEffort != "" {
+			rc.MaxReasoningEffort = opts.ReasoningConfig.MaxReasoningEffort
+			warnings = nil
+		}
+	}
+	if rc.Type == "disabled" {
+		rc.MaxReasoningEffort = ""
+		rc.BudgetTokens = 0
+	}
+	if rc.MaxReasoningEffort != "" {
+		id := bedrockModelName(m.id)
+		switch {
+		case strings.HasPrefix(id, "openai.gpt-oss"):
+			fields["reasoning_effort"] = rc.MaxReasoningEffort
+		case strings.HasPrefix(id, "openai."):
+			reasoning := map[string]any{}
+			if explicit, ok := fields["reasoning"].(map[string]any); ok {
+				for key, value := range explicit {
+					reasoning[key] = value
+				}
+			}
+			reasoning["effort"] = rc.MaxReasoningEffort
+			fields["reasoning"] = reasoning
+		default:
+			fields["reasoningConfig"] = rc
+		}
+	}
+	if len(fields) > 0 {
+		body["additionalModelRequestFields"] = fields
 	}
 	if len(options.Tools) > 0 {
 		var tools []any
@@ -155,7 +196,7 @@ func (m *BedrockLanguageModel) buildConverseRequest(options *stream.CallOptions)
 		}
 	}
 	raw, err := json.Marshal(body)
-	return raw, nil, err
+	return raw, warnings, err
 }
 
 func (m *BedrockLanguageModel) processConverseStream(ctx context.Context, body io.Reader, events chan<- stream.Event, raw bool) {

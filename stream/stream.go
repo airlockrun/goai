@@ -188,10 +188,10 @@ type Input struct {
 	// events. Off by default. Mirrors ai-sdk v4 includeRawChunks.
 	IncludeRawChunks bool
 
-	// Reasoning is the uniform reasoning-effort enum (one of "", "none",
-	// "minimal", "low", "medium", "high", "xhigh"). Empty means
-	// "provider default". Provider-specific effort options take precedence
-	// when both are set. Mirrors ai-sdk v4 reasoning.
+	// Reasoning selects shared effort: none, minimal, low, medium, high, or
+	// xhigh. Empty and provider-default leave provider defaults untouched.
+	// Providers translate effort to supported levels or thinking budgets;
+	// explicit options follow provider-specific precedence (see README).
 	Reasoning ReasoningEffort
 
 	// Output is the optional output strategy for parsing the model's response.
@@ -324,11 +324,9 @@ type CallOptions struct {
 	// events. Off by default. Mirrors ai-sdk v4 includeRawChunks.
 	IncludeRawChunks bool `json:"includeRawChunks,omitempty"`
 
-	// Reasoning is the uniform reasoning-effort enum. Empty string means
-	// "use the provider's default" — providers that have an effort-style
-	// knob will lower it to their wire-specific field. Provider-specific
-	// effort options (e.g. anthropic.MessagesOptions.Effort) take
-	// precedence when both are set. Mirrors ai-sdk v4 reasoning.
+	// Reasoning selects shared effort, translated to provider-specific levels
+	// or thinking budgets. Empty and provider-default preserve defaults.
+	// Explicit options follow provider-specific precedence (see README).
 	Reasoning ReasoningEffort `json:"reasoning,omitempty"`
 
 	// ProviderOptions are provider-specific options.
@@ -339,9 +337,8 @@ type CallOptions struct {
 // Mirrors ai-sdk v4 LanguageModelV4CallOptions.reasoning.
 type ReasoningEffort = string
 
-// Reasoning effort values. Empty string means "use the provider's default"
-// (equivalent to ai-sdk's "provider-default" sentinel; goai uses the empty
-// string instead since Go has no first-class union types).
+// Reasoning effort values. Empty string and provider-default both mean
+// "use the provider's default".
 const (
 	ReasoningEffortNone    ReasoningEffort = "none"
 	ReasoningEffortMinimal ReasoningEffort = "minimal"

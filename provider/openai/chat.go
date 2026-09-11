@@ -148,14 +148,14 @@ func (m *ChatModel) buildRequest(options *stream.CallOptions) ([]byte, []stream.
 	// otherwise CallOptions.Reasoning lowers into the same wire field
 	// (mirrors ai-sdk v4 reasoning enum). Gated to reasoning-capable
 	// models (o-series, gpt-5*) — non-reasoning models reject the field.
-	effort := opts.ReasoningEffort
-	if effort == "" {
-		effort = options.Reasoning
-	}
+	effort, reasoningWarnings := provider.OpenAIReasoning(options.Reasoning, opts.ReasoningEffort)
+	warnings = append(warnings, reasoningWarnings...)
 	caps := GetLanguageModelCapabilities(m.id)
 	isReasoning := caps.IsReasoningModel || opts.ForceReasoning
 	if effort != "" && isReasoning {
 		req.ReasoningEffort = effort
+	} else if effort != "" {
+		warnings = append(warnings, stream.UnsupportedWarning("reasoning", "not supported by this model"))
 	}
 	mode := opts.SystemMessageMode
 	if mode == "" {

@@ -208,6 +208,10 @@ func (m *BedrockLanguageModel) doStream(ctx context.Context, options *stream.Cal
 
 	endpoint := "invoke-with-response-stream"
 	converse := !isAnthropicFamily && !strings.HasPrefix(id, "amazon.titan") && !strings.HasPrefix(id, "meta.llama") && !strings.HasPrefix(id, "mistral.") && !strings.HasPrefix(id, "cohere.")
+	if !converse && !isAnthropicFamily {
+		_, reasoningWarnings := provider.MapReasoning(options.Reasoning, nil)
+		warnings = append(warnings, reasoningWarnings...)
+	}
 	if converse {
 		endpoint = "converse-stream"
 	}
@@ -274,26 +278,50 @@ func (m *BedrockLanguageModel) buildAnthropicRequest(options *stream.CallOptions
 	}
 
 	cfg := bedrockAnthropicConfig(m.id)
+	call := *options
+	call.ProviderOptions = make(map[string]any, len(options.ProviderOptions)+1)
+	for key, value := range options.ProviderOptions {
+		call.ProviderOptions[key] = value
+	}
+	thinking, effort, reasoningWarnings := anthropic.ReasoningConfiguration(m.id, options.Reasoning)
+	call.Reasoning = ""
+	if thinking != nil && thinking.Type == "adaptive" {
+		thinking.Display = ""
+		if options.Reasoning == "xhigh" {
+			effort, reasoningWarnings = provider.MapReasoning(options.Reasoning, map[string]string{"xhigh": "max"})
+		}
+	}
+	if chatOpts.ReasoningConfig != nil {
+		rc := chatOpts.ReasoningConfig
+		if thinking == nil {
+			thinking = &anthropic.ThinkingConfig{}
+		}
+		if rc.Type != "" {
+			thinking.Type = rc.Type
+		}
+		if rc.BudgetTokens > 0 {
+			thinking.BudgetTokens = rc.BudgetTokens
+		}
+		if rc.MaxReasoningEffort != "" {
+			effort = rc.MaxReasoningEffort
+		}
+	}
+	if options.Reasoning == "none" {
+		thinking = &anthropic.ThinkingConfig{Type: "disabled"}
+	}
+	if thinking != nil && thinking.Type == "disabled" {
+		thinking.BudgetTokens = 0
+		effort = ""
+	}
+	if thinking != nil && thinking.Type != "" {
+		call.ProviderOptions["thinking"] = thinking
+	}
+	if effort != "" {
+		call.ProviderOptions["effort"] = effort
+	}
 	baseTransform := cfg.TransformRequestBody
 	cfg.TransformRequestBody = func(body map[string]any, betas []string) map[string]any {
 		body = baseTransform(body, betas)
-		if chatOpts.ReasoningConfig != nil {
-			reasoning := map[string]any{
-				"type": chatOpts.ReasoningConfig.Type,
-			}
-			if chatOpts.ReasoningConfig.BudgetTokens > 0 {
-				reasoning["budget_tokens"] = chatOpts.ReasoningConfig.BudgetTokens
-			}
-			if chatOpts.ReasoningConfig.MaxReasoningEffort != "" {
-				reasoning["max_reasoning_effort"] = chatOpts.ReasoningConfig.MaxReasoningEffort
-			}
-			body["thinking"] = reasoning
-			if chatOpts.ReasoningConfig.Type == "enabled" || chatOpts.ReasoningConfig.Type == "adaptive" {
-				delete(body, "temperature")
-				delete(body, "top_p")
-				delete(body, "top_k")
-			}
-		}
 		if chatOpts.ServiceTier != "" {
 			body["service_tier"] = chatOpts.ServiceTier
 		}
@@ -310,8 +338,8 @@ func (m *BedrockLanguageModel) buildAnthropicRequest(options *stream.CallOptions
 		return body
 	}
 
-	body, _, warnings, err := anthropic.BuildRequestBody(cfg, m.id, options)
-	return body, warnings, err
+	body, _, warnings, err := anthropic.BuildRequestBody(cfg, m.id, &call)
+	return body, append(reasoningWarnings, warnings...), err
 }
 
 func (m *BedrockLanguageModel) buildTitanRequest(options *stream.CallOptions) ([]byte, []stream.Warning, error) {

@@ -136,20 +136,8 @@ func (m *XaiResponsesModel) buildRequest(options *stream.CallOptions) ([]byte, [
 	// request). Provider-specific opts.ReasoningEffort wins; otherwise
 	// CallOptions.Reasoning lowers into the same wire field (ai-sdk v4
 	// reasoning enum).
-	effort := opts.ReasoningEffort
-	if effort == "" && options.Reasoning != "" && options.Reasoning != "provider-default" {
-		if modelsWithoutReasoningEffort.MatchString(m.id) {
-			warnings = append(warnings, stream.UnsupportedWarning("reasoning", "this model does not support reasoning effort"))
-		} else {
-			effort = options.Reasoning
-			if effort == "minimal" {
-				effort = "low"
-			}
-			if effort == "xhigh" && m.id != "grok-4.6" {
-				effort = "high"
-			}
-		}
-	}
+	effort, reasoningWarnings := reasoningEffort(m.id, options.Reasoning, opts.ReasoningEffort)
+	warnings = append(warnings, reasoningWarnings...)
 	if effort != "" {
 		req.Reasoning = &reasoningConfig{Effort: effort}
 	}

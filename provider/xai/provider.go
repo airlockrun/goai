@@ -36,11 +36,19 @@ func New(opts Options) *Provider {
 	}
 	return &Provider{
 		compat: openaicompat.New(openaicompat.Options{
-			ProviderID:            "xai",
-			BaseURL:               baseURL,
-			APIKey:                opts.APIKey,
-			Headers:               opts.Headers,
-			RequestModifier:       xaiRequestModifier,
+			ProviderID:      "xai",
+			BaseURL:         baseURL,
+			APIKey:          opts.APIKey,
+			Headers:         opts.Headers,
+			RequestModifier: xaiRequestModifier,
+			ReasoningMapper: func(id string, options *stream.CallOptions) (map[string]any, []stream.Warning) {
+				explicit, _ := options.ProviderOptions["reasoningEffort"].(string)
+				effort, warnings := reasoningEffort(id, options.Reasoning, explicit)
+				if effort == "" {
+					return nil, warnings
+				}
+				return map[string]any{"reasoning_effort": effort}, warnings
+			},
 			CallWarner:            xaiChatCallWarner,
 			ToolSchemaTransformer: sanitizeToolSchema,
 		}),

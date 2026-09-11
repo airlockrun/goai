@@ -48,11 +48,25 @@ func New(opts Options) *Provider {
 	}
 	return &Provider{
 		compat: openaicompat.New(openaicompat.Options{
-			ProviderID:                "groq",
-			BaseURL:                   baseURL,
-			APIKey:                    opts.APIKey,
-			Headers:                   opts.Headers,
-			RequestModifier:           groqRequestModifier,
+			ProviderID:      "groq",
+			BaseURL:         baseURL,
+			APIKey:          opts.APIKey,
+			Headers:         opts.Headers,
+			RequestModifier: groqRequestModifier,
+			ReasoningMapper: func(id string, options *stream.CallOptions) (map[string]any, []stream.Warning) {
+				if effort, _ := options.ProviderOptions["reasoningEffort"].(string); effort != "" {
+					return nil, nil
+				}
+				values := map[string]string{"minimal": "low", "low": "low", "medium": "medium", "high": "high", "xhigh": "high"}
+				if id == "qwen/qwen3.6-27b" {
+					values["none"] = "none"
+				}
+				effort, warnings := provider.MapReasoning(options.Reasoning, values)
+				if effort == "" {
+					return nil, warnings
+				}
+				return map[string]any{"reasoning_effort": effort}, warnings
+			},
 			CallWarner:                groqCallWarner,
 			SupportsStructuredOutputs: true,
 		}),

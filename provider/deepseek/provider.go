@@ -41,7 +41,28 @@ func New(opts Options) *Provider {
 			APIKey:          opts.APIKey,
 			Headers:         opts.Headers,
 			RequestModifier: deepseekRequestModifier,
-			CallWarner:      deepseekCallWarner,
+			ReasoningMapper: func(_ string, options *stream.CallOptions) (map[string]any, []stream.Warning) {
+				fields := map[string]any{}
+				if options.Reasoning == "" || options.Reasoning == "provider-default" {
+					return fields, nil
+				}
+				values := map[string]string{"none": "none", "minimal": "low", "low": "low", "medium": "high", "high": "high", "xhigh": "max"}
+				effort, warnings := provider.MapReasoning(options.Reasoning, values)
+				if effort == "" {
+					return fields, warnings
+				}
+				typeName := "enabled"
+				if effort == "none" {
+					typeName = "disabled"
+				} else if explicit, _ := options.ProviderOptions["reasoningEffort"].(string); explicit == "" {
+					fields["reasoning_effort"] = effort
+				} else {
+					warnings = nil
+				}
+				fields["thinking"] = map[string]any{"type": typeName}
+				return fields, warnings
+			},
+			CallWarner: deepseekCallWarner,
 			ModelCallWarner: func(id string, options *stream.CallOptions) []stream.Warning {
 				opts, err := provider.ParseProviderOptions[ChatOptions](options.ProviderOptions)
 				if err != nil {
@@ -63,26 +84,8 @@ func New(opts Options) *Provider {
 			MessageConverter: convertMessages,
 			TransformRequest: func(id string, body map[string]any) error {
 				thinking, _ := body["thinking"].(map[string]any)
-				if effort, ok := body["reasoning_effort"].(string); ok {
-					if thinking == nil {
-						typeName := "enabled"
-						if effort == "none" {
-							typeName = "disabled"
-						}
-						thinking = map[string]any{"type": typeName}
-						body["thinking"] = thinking
-					}
-					switch effort {
-					case "minimal":
-						body["reasoning_effort"] = "low"
-					case "medium":
-						body["reasoning_effort"] = "high"
-					case "xhigh":
-						body["reasoning_effort"] = "max"
-					}
-					if thinking["type"] == "disabled" || effort == "none" {
-						delete(body, "reasoning_effort")
-					}
+				if thinking["type"] == "disabled" {
+					delete(body, "reasoning_effort")
 				}
 				if thinking["type"] != "disabled" && (thinking != nil || id == "deepseek-reasoner" || strings.Contains(id, "deepseek-v4")) {
 					delete(body, "temperature")

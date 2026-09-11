@@ -15,7 +15,7 @@ func TestStableReasoningPolicy(t *testing.T) {
 		id, effort, want string
 		warning          bool
 	}{
-		{"grok-4.5", "xhigh", "high", false}, {"grok-4.6", "xhigh", "xhigh", false}, {"grok-4.20-reasoning", "high", "", true}, {"grok-4.20-0309-non-reasoning", "none", "", true}, {"grok-4.20-multi-agent", "minimal", "low", false}, {"grok-4.6", "provider-default", "", false},
+		{"grok-4.5", "xhigh", "high", true}, {"grok-4.6", "xhigh", "xhigh", false}, {"grok-4.20-reasoning", "high", "", true}, {"grok-4.20-0309-non-reasoning", "none", "", true}, {"grok-4.20-multi-agent", "minimal", "low", true}, {"grok-4.6", "provider-default", "", false},
 	} {
 		t.Run(tc.id+tc.effort, func(t *testing.T) {
 			m := New(Options{}).Responses(tc.id).(*XaiResponsesModel)
