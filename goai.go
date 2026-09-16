@@ -108,6 +108,10 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 		for {
 			// Build CallOptions from Input (this is what providers receive)
 			callOptions := buildCallOptions(&currentInput)
+			advertisedTools := make(tool.Set, len(callOptions.Tools))
+			for _, advertised := range callOptions.Tools {
+				advertisedTools[advertised.Name] = advertised
+			}
 
 			if input.OnStepStart != nil {
 				input.OnStepStart(stream.StepStartData{StepNumber: stepNumber, Messages: currentInput.Messages})
@@ -140,6 +144,56 @@ func StreamText(ctx context.Context, input stream.Input) (*stream.Result, error)
 			)
 
 			for event := range events {
+				if e, ok := event.Data.(stream.ToolCallEvent); ok && !e.ProviderExecuted {
+					var repair tool.RepairToolCallFunc
+					validatedInput := e.Input
+					if input.RepairToolCall != nil {
+						repair = func(failed tool.RepairToolCallContext) (*tool.RawToolCall, error) {
+							repaired, repairErr := input.RepairToolCall(stream.FailedToolCall{
+								ToolCallID: failed.ToolCall.ToolCallID,
+								ToolName:   failed.ToolCall.ToolName,
+								Input:      json.RawMessage(failed.ToolCall.Input),
+								Error:      failed.Error,
+							})
+							if repairErr != nil || repaired == nil {
+								return nil, repairErr
+							}
+							validatedInput = repaired.Input
+							return &tool.RawToolCall{
+								Type:             "tool-call",
+								ToolCallID:       failed.ToolCall.ToolCallID,
+								ToolName:         repaired.ToolName,
+								Input:            string(repaired.Input),
+								ProviderMetadata: failed.ToolCall.ProviderMetadata,
+							}, nil
+						}
+					}
+					parsed := tool.ParseToolCall(tool.ParseToolCallOptions{
+						ToolCall: tool.RawToolCall{
+							Type:             "tool-call",
+							ToolCallID:       e.ToolCallID,
+							ToolName:         e.ToolName,
+							Input:            string(e.Input),
+							ProviderMetadata: e.ProviderMetadata,
+						},
+						Tools:          advertisedTools,
+						RepairToolCall: repair,
+						System:         input.Instructions,
+						Messages:       currentInput.Messages,
+					})
+					if parsed.Invalid {
+						go drainEvents(ctx, events)
+						emitError(parsed.Error)
+						return
+					}
+					if len(validatedInput) == 0 {
+						validatedInput = json.RawMessage(`{}`)
+					}
+					e.ToolName = parsed.ToolName
+					e.Input = validatedInput
+					e.ProviderMetadata = parsed.ProviderMetadata
+					event.Data = e
+				}
 				switch event.Data.(type) {
 				case stream.TextDeltaEvent, stream.ReasoningDeltaEvent, stream.ReasoningEndEvent, stream.ToolCallEvent, stream.ToolResultEvent, stream.ToolErrorEvent:
 					replayEvents = append(replayEvents, event)

@@ -223,6 +223,101 @@ func TestGenerateText_BasicUsage(t *testing.T) {
 	})
 }
 
+func TestStreamText_ValidatesProviderToolCalls(t *testing.T) {
+	runJS := tool.Tool{Name: "run_js", InputSchema: json.RawMessage(`{"type":"object"}`)}
+	tests := []struct {
+		name  string
+		tools tool.Set
+		call  stream.ToolCallEvent
+		want  error
+	}{
+		{name: "namespace", tools: tool.Set{"run_js": runJS}, call: stream.ToolCallEvent{ToolCallID: "call_1", ToolName: "tools", Input: json.RawMessage(`{"get_organization":"value"}`)}, want: goaierrors.ErrNoSuchTool},
+		{name: "JavaScript tool binding", tools: tool.Set{"run_js": runJS}, call: stream.ToolCallEvent{ToolCallID: "call_1", ToolName: "tools.get_organization", Input: json.RawMessage(`{"identifier":"value"}`)}, want: goaierrors.ErrNoSuchTool},
+		{name: "JavaScript connector binding", tools: tool.Set{"run_js": runJS}, call: stream.ToolCallEvent{ToolCallID: "call_1", ToolName: "conn.checko.request", Input: json.RawMessage(`{"path":"/"}`)}, want: goaierrors.ErrNoSuchTool},
+		{name: "malformed arguments", tools: tool.Set{"run_js": runJS}, call: stream.ToolCallEvent{ToolCallID: "call_1", ToolName: "run_js", Input: json.RawMessage(`{"code":`)}, want: goaierrors.ErrInvalidToolInput},
+		{name: "no advertised tools", call: stream.ToolCallEvent{ToolCallID: "call_1", ToolName: "run_js", Input: json.RawMessage(`{}`)}, want: goaierrors.ErrNoSuchTool},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{StreamResponse: []stream.Event{
+				{Type: stream.EventToolCall, Data: tt.call},
+				{Type: stream.EventFinish, Data: stream.FinishEvent{FinishReason: stream.FinishReasonToolCalls}},
+			}})
+			executor := &recordingToolExecutor{}
+			var reported []error
+			result, err := StreamText(t.Context(), stream.Input{
+				Model: model, Tools: tt.tools, Executor: executor,
+				OnError: func(err error) { reported = append(reported, err) },
+			})
+			if err != nil {
+				t.Fatalf("StreamText() error = %v", err)
+			}
+			var errorEvents, toolEvents int
+			var eventErr error
+			for event := range result.FullStream {
+				switch event.Type {
+				case stream.EventError:
+					errorEvents++
+					eventErr = event.Data.(stream.ErrorEvent).Error
+				case stream.EventToolCall, stream.EventToolResult:
+					toolEvents++
+				}
+			}
+			_, err = result.Text()
+			if !errors.Is(err, tt.want) || len(reported) != 1 || !errors.Is(reported[0], tt.want) {
+				t.Fatalf("terminal error = %v, reported = %v, want %v", err, reported, tt.want)
+			}
+			if errorEvents != 1 || !errors.Is(eventErr, tt.want) || toolEvents != 0 || len(executor.calls) != 0 {
+				t.Fatalf("error events = %d (%v), tool events = %d, executor calls = %v", errorEvents, eventErr, toolEvents, executor.calls)
+			}
+		})
+	}
+}
+
+func TestStreamText_ValidAndRepairedToolCalls(t *testing.T) {
+	runJS := tool.Tool{Name: "run_js", InputSchema: json.RawMessage(`{"type":"object"}`)}
+	tests := []struct {
+		name   string
+		call   stream.ToolCallEvent
+		repair func(stream.FailedToolCall) (*stream.RepairedToolCall, error)
+	}{
+		{name: "valid", call: stream.ToolCallEvent{ToolCallID: "call_1", ToolName: "run_js", Input: json.RawMessage(`{"code":"return 1"}`)}},
+		{name: "repaired", call: stream.ToolCallEvent{ToolCallID: "call_1", ToolName: "tools.get_organization", Input: json.RawMessage(`{"identifier":"value"}`)}, repair: func(failed stream.FailedToolCall) (*stream.RepairedToolCall, error) {
+			if failed.ToolName != "tools.get_organization" || !errors.Is(failed.Error, goaierrors.ErrNoSuchTool) {
+				t.Fatalf("failed call = %+v", failed)
+			}
+			return &stream.RepairedToolCall{ToolName: "run_js", Input: json.RawMessage(`{"code":"return await tools.get_organization({identifier:\"value\"})"}`)}, nil
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{StreamResponse: []stream.Event{
+				{Type: stream.EventToolCall, Data: tt.call},
+				{Type: stream.EventFinish, Data: stream.FinishEvent{FinishReason: stream.FinishReasonToolCalls}},
+			}})
+			executor := &recordingToolExecutor{}
+			result, err := StreamText(t.Context(), stream.Input{
+				Model: model, Tools: tool.Set{"run_js": runJS}, Executor: executor, RepairToolCall: tt.repair,
+			})
+			if err != nil {
+				t.Fatalf("StreamText() error = %v", err)
+			}
+			var calls []stream.ToolCallEvent
+			for event := range result.FullStream {
+				if call, ok := event.Data.(stream.ToolCallEvent); ok {
+					calls = append(calls, call)
+				}
+			}
+			if _, err := result.Text(); err != nil {
+				t.Fatal(err)
+			}
+			if len(calls) != 1 || calls[0].ToolName != "run_js" || len(executor.calls) != 1 || executor.calls[0] != "run_js" {
+				t.Fatalf("events = %+v, executor calls = %v", calls, executor.calls)
+			}
+		})
+	}
+}
+
 func TestStreamText_BasicUsage(t *testing.T) {
 	t.Run("should stream text chunks", func(t *testing.T) {
 		model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
@@ -310,6 +405,9 @@ func TestStreamText_BasicUsage(t *testing.T) {
 			Model: model,
 			Messages: []message.Message{
 				message.NewUserMessage("What's the weather in London?"),
+			},
+			Tools: tool.Set{
+				"get_weather": {Name: "get_weather", InputSchema: json.RawMessage(`{"type":"object"}`)},
 			},
 		})
 		if err != nil {
