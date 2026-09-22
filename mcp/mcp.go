@@ -1,11 +1,11 @@
-// Package mcp provides Model Context Protocol (MCP) client functionality.
-// MCP enables connecting to external servers that provide tools and resources
-// for AI models.
+// Package mcp adapts the official MCP Go SDK to GoAI tools.
 package mcp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -14,592 +14,286 @@ import (
 	"github.com/airlockrun/goai/tool"
 )
 
-// Client manages connections to MCP servers.
-type Client struct {
-	servers map[string]*ServerConnection
-	mu      sync.RWMutex
-}
-
-// NewClient creates a new MCP client.
-func NewClient() *Client {
-	return &Client{
-		servers: make(map[string]*ServerConnection),
-	}
-}
-
-// ServerConfig contains configuration for an MCP server.
 type ServerConfig struct {
-	// Name is a unique identifier for this server.
-	Name string
-
-	// ClientName is the name advertised to the server in the initialize
-	// handshake's clientInfo.name. Defaults to "goai" when empty. Mirrors
-	// ai-sdk #14966 (clientName, replacing the older `name` field on the
-	// JS createMCPClient config — which was unrelated to the per-server
-	// identifier).
-	ClientName string
-
-	// Transport specifies how to connect to the server.
-	// Options: "stdio", "sse", "http"
-	Transport string
-
-	// Command is the command to run for stdio transport.
-	Command string
-
-	// Args are arguments for the command.
-	Args []string
-
-	// Env are environment variables for the command.
-	Env map[string]string
-
-	// URL is the server URL for sse/http transport.
-	URL string
-
-	// Headers are HTTP headers for sse/http transport.
-	Headers map[string]string
-
-	// AuthProvider is the optional OAuth integration. nil = no OAuth.
+	Name         string
+	ClientName   string
+	Transport    string
+	Command      string
+	Args         []string
+	Env          map[string]string
+	URL          string
+	Headers      map[string]string
 	AuthProvider OAuthClientProvider
-
-	// HTTPClient carries HTTP and SSE transport traffic. nil uses the package
-	// default client.
-	HTTPClient *http.Client
+	HTTPClient   *http.Client
 }
 
-// ServerConnection represents a connection to an MCP server.
+type Resource struct{ URI, Name, Description, MimeType string }
+type ResourceContent struct{ URI, MimeType, Text, Blob string }
+
+type Client struct {
+	mu      sync.RWMutex
+	servers map[string]*ServerConnection
+}
 type ServerConnection struct {
-	config       ServerConfig
-	transport    Transport
-	tools        map[string]tool.Tool
-	resources    map[string]Resource
-	instructions string // populated from initialize.result.instructions
-	mu           sync.RWMutex
-	connected    bool
+	mu        sync.Mutex
+	config    ServerConfig
+	session   *Session
+	tools     tool.Set
+	resources map[string]Resource
 }
 
-// Transport is the interface for MCP transports.
-type Transport interface {
-	// Connect establishes the connection.
-	Connect(ctx context.Context) error
+func NewClient() *Client { return &Client{servers: map[string]*ServerConnection{}} }
 
-	// Close closes the connection.
-	Close() error
-
-	// Send sends a request and returns the response.
-	Send(ctx context.Context, method string, params any) (json.RawMessage, error)
-
-	// OnNotification registers a handler for server notifications.
-	OnNotification(handler func(method string, params json.RawMessage))
-
-	// SetProtocolVersion pins the version sent in the
-	// MCP-Protocol-Version header on subsequent requests. The MCP HTTP
-	// spec requires the client to use the version negotiated in
-	// initialize for everything that follows; the initial value is
-	// LatestProtocolVersion. No-op for transports that don't carry HTTP
-	// headers (stdio).
-	SetProtocolVersion(version string)
-}
-
-// Resource represents an MCP resource.
-type Resource struct {
-	// URI is the unique identifier for the resource.
-	URI string
-
-	// Name is the human-readable name.
-	Name string
-
-	// Description describes the resource.
-	Description string
-
-	// MimeType is the content type.
-	MimeType string
-}
-
-// ResourceContent contains the content of a resource.
-type ResourceContent struct {
-	// URI is the resource URI.
-	URI string
-
-	// MimeType is the content type.
-	MimeType string
-
-	// Text is the text content (for text resources).
-	Text string
-
-	// Blob is the binary content (for binary resources, base64 encoded).
-	Blob string
-}
-
-// Connect connects to an MCP server.
 func (c *Client) Connect(ctx context.Context, config ServerConfig) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	// Check if already connected
-	if _, exists := c.servers[config.Name]; exists {
+	if _, ok := c.servers[config.Name]; ok {
 		return fmt.Errorf("server %q already connected", config.Name)
 	}
-
-	// Create transport based on config
-	var transport Transport
-	switch config.Transport {
-	case "stdio":
-		transport = NewStdioTransport(config.Command, config.Args, config.Env)
-	case "sse":
-		t := NewSSETransport(config.URL, config.Headers, config.AuthProvider)
-		if config.HTTPClient != nil {
-			t.client = config.HTTPClient
-		}
-		transport = t
-	case "http":
-		t := NewHTTPTransport(config.URL, config.Headers, config.AuthProvider)
-		if config.HTTPClient != nil {
-			t.client = config.HTTPClient
-		}
-		transport = t
-	default:
-		return fmt.Errorf("unknown transport: %s", config.Transport)
+	s, err := connect(ctx, config, true)
+	if err != nil {
+		return err
 	}
-
-	// Connect
-	if err := transport.Connect(ctx); err != nil {
-		return fmt.Errorf("failed to connect: %w", err)
+	conn := &ServerConnection{config: config, session: s, tools: tool.Set{}, resources: map[string]Resource{}}
+	if err := conn.refresh(ctx); err != nil {
+		s.Close()
+		return err
 	}
-
-	conn := &ServerConnection{
-		config:    config,
-		transport: transport,
-		tools:     make(map[string]tool.Tool),
-		resources: make(map[string]Resource),
-		connected: true,
-	}
-	transport.OnNotification(conn.handleNotification)
-
-	// Initialize the connection
-	if err := conn.initialize(ctx); err != nil {
-		transport.Close()
-		return fmt.Errorf("failed to initialize: %w", err)
-	}
-
 	c.servers[config.Name] = conn
 	return nil
 }
 
-// Disconnect disconnects from an MCP server.
-func (c *Client) Disconnect(name string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	conn, exists := c.servers[name]
-	if !exists {
-		return fmt.Errorf("server %q not connected", name)
+func (conn *ServerConnection) refresh(ctx context.Context) error {
+	s := conn.session
+	conn.session.changed.Store(false)
+	defer func() {
+		if conn.tools == nil {
+			conn.session.changed.Store(true)
+		}
+	}()
+	conn.tools = nil
+	tools := tool.Set{}
+	resourceMap := map[string]Resource{}
+	definitions, err := s.ListTools(ctx)
+	if err != nil {
+		return err
 	}
-
-	conn.mu.Lock()
-	conn.connected = false
-	conn.mu.Unlock()
-
-	if err := conn.transport.Close(); err != nil {
-		return fmt.Errorf("failed to close connection: %w", err)
+	for _, definition := range definitions {
+		input, err := json.Marshal(definition.InputSchema)
+		if err != nil {
+			return err
+		}
+		var output json.RawMessage
+		if definition.OutputSchema != nil {
+			output, err = json.Marshal(definition.OutputSchema)
+			if err != nil {
+				return err
+			}
+		}
+		name := conn.config.Name + "_" + definition.Name
+		tools[name] = tool.Tool{Name: name, Description: definition.Description, InputSchema: input, OutputSchema: output, Execute: conn.createToolExecutor(definition.Name)}
 	}
-
-	delete(c.servers, name)
+	resources, err := s.ListResources(ctx)
+	if err != nil {
+		return err
+	}
+	for _, r := range resources {
+		resourceMap[r.URI] = Resource{r.URI, r.Name, r.Description, r.MIMEType}
+	}
+	conn.tools, conn.resources = tools, resourceMap
 	return nil
 }
 
-// DisconnectAll disconnects from all MCP servers.
+func (c *Client) Disconnect(name string) error {
+	c.mu.Lock()
+	conn, ok := c.servers[name]
+	delete(c.servers, name)
+	c.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("server %q not connected", name)
+	}
+	return conn.session.Close()
+}
 func (c *Client) DisconnectAll() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	var lastErr error
-	for name, conn := range c.servers {
+	servers := c.servers
+	c.servers = map[string]*ServerConnection{}
+	c.mu.Unlock()
+	var err error
+	for _, conn := range servers {
+		err = errors.Join(err, conn.session.Close())
+	}
+	return err
+}
+func (c *Client) GetTools(ctx context.Context) (tool.Set, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := tool.Set{}
+	for _, conn := range c.servers {
 		conn.mu.Lock()
-		conn.connected = false
-		conn.mu.Unlock()
-
-		if err := conn.transport.Close(); err != nil {
-			lastErr = err
+		if conn.session.changed.Load() {
+			if err := conn.refresh(ctx); err != nil {
+				conn.mu.Unlock()
+				return nil, err
+			}
 		}
-		delete(c.servers, name)
-	}
-	return lastErr
-}
-
-// GetTools returns all tools from all connected servers.
-func (c *Client) GetTools() tool.Set {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	tools := make(tool.Set)
-	for _, conn := range c.servers {
-		conn.mu.RLock()
 		for name, t := range conn.tools {
-			tools[name] = t
+			if _, exists := out[name]; exists {
+				conn.mu.Unlock()
+				return nil, fmt.Errorf("MCP tool name collision: %q", name)
+			}
+			out[name] = t
 		}
-		conn.mu.RUnlock()
+		conn.mu.Unlock()
 	}
-	return tools
+	return out, nil
 }
-
-// GetResources returns all resources from all connected servers.
-func (c *Client) GetResources() []Resource {
+func (c *Client) GetResources(ctx context.Context) ([]Resource, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-
-	var resources []Resource
+	var out []Resource
 	for _, conn := range c.servers {
-		conn.mu.RLock()
-		for _, r := range conn.resources {
-			resources = append(resources, r)
+		conn.mu.Lock()
+		if conn.session.changed.Load() {
+			if err := conn.refresh(ctx); err != nil {
+				conn.mu.Unlock()
+				return nil, err
+			}
 		}
-		conn.mu.RUnlock()
+		for _, r := range conn.resources {
+			out = append(out, r)
+		}
+		conn.mu.Unlock()
 	}
-	return resources
+	return out, nil
 }
-
-// GetServerInstructions returns the instructions string the named server
-// emitted during the initialize handshake (empty when absent or unknown).
-// Servers use this to describe how to use the server and its tools — a
-// good candidate to splice into the LLM system prompt. Mirrors ai-sdk
-// #14764.
 func (c *Client) GetServerInstructions(name string) string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	conn, ok := c.servers[name]
-	if !ok {
-		return ""
+	if conn := c.servers[name]; conn != nil {
+		return conn.session.Instructions()
 	}
-	conn.mu.RLock()
-	defer conn.mu.RUnlock()
-	return conn.instructions
+	return ""
 }
-
-// ReadResource reads the content of a resource.
 func (c *Client) ReadResource(ctx context.Context, uri string) (*ResourceContent, error) {
 	c.mu.RLock()
-
-	// Find the server that owns this resource
-	var conn *ServerConnection
-	for _, s := range c.servers {
-		s.mu.RLock()
-		if _, exists := s.resources[uri]; exists {
-			conn = s
-			s.mu.RUnlock()
-			break
-		}
-		s.mu.RUnlock()
-	}
-	c.mu.RUnlock()
-
-	if conn == nil {
-		return nil, fmt.Errorf("resource %q not found", uri)
-	}
-
-	return conn.readResource(ctx, uri)
-}
-
-// ServerConnection methods
-
-func (conn *ServerConnection) initialize(ctx context.Context) error {
-	clientName := conn.config.ClientName
-	if clientName == "" {
-		clientName = "goai"
-	}
-	initParams := map[string]any{
-		"protocolVersion": LatestProtocolVersion,
-		"capabilities": map[string]any{
-			"tools":     map[string]any{},
-			"resources": map[string]any{"subscribe": true},
-		},
-		"clientInfo": map[string]any{
-			"name":    clientName,
-			"version": "1.0.0",
-		},
-	}
-
-	result, err := conn.transport.Send(ctx, "initialize", initParams)
-	if err != nil {
-		return fmt.Errorf("initialize failed: %w", err)
-	}
-
-	// Capture optional server-supplied instructions and the negotiated
-	// protocolVersion. Per the MCP HTTP spec the client MUST use the
-	// negotiated version in the MCP-Protocol-Version header on
-	// subsequent requests; strict servers hard 400 if we keep sending
-	// LatestProtocolVersion. Silently tolerate absence of instructions
-	// — many servers don't set it.
-	var initResp struct {
-		Instructions    string `json:"instructions"`
-		ProtocolVersion string `json:"protocolVersion"`
-	}
-	_ = json.Unmarshal(result, &initResp)
-	conn.mu.Lock()
-	conn.instructions = initResp.Instructions
-	conn.mu.Unlock()
-
-	if initResp.ProtocolVersion != "" {
-		supported := false
-		for _, v := range SupportedProtocolVersions {
-			if v == initResp.ProtocolVersion {
-				supported = true
-				break
+	var selected *ServerConnection
+	for _, conn := range c.servers {
+		conn.mu.Lock()
+		if conn.session.changed.Load() {
+			if err := conn.refresh(ctx); err != nil {
+				conn.mu.Unlock()
+				c.mu.RUnlock()
+				return nil, err
 			}
 		}
-		if !supported {
-			return fmt.Errorf("server's protocol version is not supported: %s", initResp.ProtocolVersion)
-		}
-		conn.transport.SetProtocolVersion(initResp.ProtocolVersion)
-	}
-
-	// Send initialized notification
-	_, err = conn.transport.Send(ctx, "notifications/initialized", nil)
-	if err != nil {
-		return fmt.Errorf("initialized notification failed: %w", err)
-	}
-
-	// List tools
-	if err := conn.listTools(ctx); err != nil {
-		return fmt.Errorf("list tools failed: %w", err)
-	}
-
-	// List resources
-	if err := conn.listResources(ctx); err != nil {
-		return fmt.Errorf("list resources failed: %w", err)
-	}
-
-	return nil
-}
-
-// handleNotification dispatches server-pushed notifications. The well-
-// known list_changed notifications trigger a re-fetch so our local view
-// stays in sync; everything else is silently ignored for now.
-func (conn *ServerConnection) handleNotification(method string, _ json.RawMessage) {
-	ctx := context.Background()
-	switch method {
-	case "notifications/tools/list_changed":
-		_ = conn.listTools(ctx)
-	case "notifications/resources/list_changed":
-		_ = conn.listResources(ctx)
-	}
-}
-
-func (conn *ServerConnection) listTools(ctx context.Context) error {
-	result, err := conn.transport.Send(ctx, "tools/list", nil)
-	if err != nil {
-		return err
-	}
-
-	var response struct {
-		Tools []struct {
-			Name        string          `json:"name"`
-			Description string          `json:"description"`
-			InputSchema json.RawMessage `json:"inputSchema"`
-		} `json:"tools"`
-	}
-
-	if err := json.Unmarshal(result, &response); err != nil {
-		return err
-	}
-
-	conn.mu.Lock()
-	defer conn.mu.Unlock()
-
-	for _, t := range response.Tools {
-		toolName := fmt.Sprintf("%s_%s", conn.config.Name, t.Name)
-		conn.tools[toolName] = tool.Tool{
-			Name:        toolName,
-			Description: t.Description,
-			InputSchema: t.InputSchema,
-			Execute:     conn.createToolExecutor(t.Name),
+		_, ok := conn.resources[uri]
+		conn.mu.Unlock()
+		if ok {
+			if selected != nil {
+				c.mu.RUnlock()
+				return nil, errors.New("resource URI belongs to multiple servers")
+			}
+			selected = conn
 		}
 	}
-
-	return nil
+	c.mu.RUnlock()
+	if selected == nil {
+		return nil, fmt.Errorf("resource %q not found", uri)
+	}
+	result, err := selected.session.ReadResource(ctx, uri)
+	if err != nil {
+		return nil, err
+	}
+	if result.NeedsInput() {
+		return nil, errors.New("MCP resource requires additional input")
+	}
+	if len(result.Contents) != 1 {
+		return nil, errors.New("ReadResource requires exactly one content item; use Session.ReadResource for multipart resources")
+	}
+	r := result.Contents[0]
+	return &ResourceContent{URI: r.URI, MimeType: r.MIMEType, Text: r.Text, Blob: base64.StdEncoding.EncodeToString(r.Blob)}, nil
 }
 
-func (conn *ServerConnection) createToolExecutor(toolName string) tool.ExecuteFunc {
+func (c *ServerConnection) createToolExecutor(name string) tool.ExecuteFunc {
 	return func(ctx context.Context, input json.RawMessage, opts tool.CallOptions) (tool.Result, error) {
-		conn.mu.RLock()
-		if !conn.connected {
-			conn.mu.RUnlock()
-			return tool.Result{}, fmt.Errorf("server not connected")
+		c.mu.Lock()
+		if c.session.changed.Load() {
+			if err := c.refresh(ctx); err != nil {
+				c.mu.Unlock()
+				return tool.Result{}, err
+			}
 		}
-		conn.mu.RUnlock()
-
-		var args map[string]any
-		if err := json.Unmarshal(input, &args); err != nil {
-			return tool.Result{}, err
+		_, exists := c.tools[c.config.Name+"_"+name]
+		c.mu.Unlock()
+		if !exists {
+			return tool.Result{}, fmt.Errorf("MCP tool %q is unavailable", name)
 		}
-
-		params := map[string]any{
-			"name":      toolName,
-			"arguments": args,
-		}
-
-		result, err := conn.transport.Send(ctx, "tools/call", params)
+		result, err := c.session.CallTool(ctx, name, input)
 		if err != nil {
 			return tool.Result{}, err
 		}
-
-		// Tool result content per MCP spec — supports text, image, resource
-		// (embedded), and resource_link. We carry text/embedded-text into
-		// Output and image/embedded-blob into Attachments. resource_link
-		// (just a URI reference) gets surfaced as a one-line marker so the
-		// LLM at least sees the pointer.
-		//
-		// The resource_link variant was added in ai-sdk #14928; before
-		// that goai silently dropped any non-text content.
-		var response struct {
-			Content []struct {
-				Type        string `json:"type"`
-				Text        string `json:"text,omitempty"`
-				Data        string `json:"data,omitempty"`        // base64 (image)
-				MimeType    string `json:"mimeType,omitempty"`    // image / resource
-				URI         string `json:"uri,omitempty"`         // resource / resource_link
-				Name        string `json:"name,omitempty"`        // resource_link
-				Description string `json:"description,omitempty"` // resource_link
-				Resource    *struct {
-					URI      string `json:"uri"`
-					MimeType string `json:"mimeType,omitempty"`
-					Text     string `json:"text,omitempty"`
-					Blob     string `json:"blob,omitempty"`
-				} `json:"resource,omitempty"`
-			} `json:"content"`
-			IsError bool `json:"isError"`
+		if result.NeedsInput() {
+			return tool.Result{}, errors.New("MCP tool requires additional input; call is incomplete")
 		}
-
-		if err := json.Unmarshal(result, &response); err != nil {
+		raw, err := json.Marshal(result)
+		if err != nil {
 			return tool.Result{}, err
 		}
-
-		if response.IsError {
-			if len(response.Content) > 0 {
-				return tool.Result{}, fmt.Errorf("tool error: %s", response.Content[0].Text)
-			}
-			return tool.Result{}, fmt.Errorf("tool error")
-		}
-
-		out := tool.Result{}
-		var sb strings.Builder
-		for _, c := range response.Content {
-			switch c.Type {
-			case "text":
-				sb.WriteString(c.Text)
-			case "image":
-				if c.Data != "" {
-					out.Attachments = append(out.Attachments, tool.Attachment{
-						Data:     c.Data,
-						MimeType: c.MimeType,
-					})
-				}
-			case "resource":
-				if c.Resource == nil {
-					continue
-				}
-				if c.Resource.Text != "" {
-					sb.WriteString(c.Resource.Text)
-				}
-				if c.Resource.Blob != "" {
-					out.Attachments = append(out.Attachments, tool.Attachment{
-						Data:     c.Resource.Blob,
-						MimeType: c.Resource.MimeType,
-					})
-				}
-			case "resource_link":
-				if sb.Len() > 0 {
-					sb.WriteByte('\n')
-				}
-				label := c.Name
-				if label == "" {
-					label = c.URI
-				}
-				if c.Description != "" {
-					fmt.Fprintf(&sb, "[Resource: %s — %s — %s]", label, c.URI, c.Description)
-				} else {
-					fmt.Fprintf(&sb, "[Resource: %s — %s]", label, c.URI)
-				}
-			}
-		}
-		out.Output = sb.String()
-		return out, nil
+		return projectResult(raw)
 	}
 }
 
-func (conn *ServerConnection) listResources(ctx context.Context) error {
-	result, err := conn.transport.Send(ctx, "resources/list", nil)
-	if err != nil {
-		// Resources might not be supported
-		return nil
-	}
-
-	var response struct {
-		Resources []struct {
-			URI         string `json:"uri"`
-			Name        string `json:"name"`
-			Description string `json:"description"`
-			MimeType    string `json:"mimeType"`
-		} `json:"resources"`
-	}
-
-	if err := json.Unmarshal(result, &response); err != nil {
-		return nil
-	}
-
-	conn.mu.Lock()
-	defer conn.mu.Unlock()
-
-	for _, r := range response.Resources {
-		conn.resources[r.URI] = Resource{
-			URI:         r.URI,
-			Name:        r.Name,
-			Description: r.Description,
-			MimeType:    r.MimeType,
-		}
-	}
-
-	return nil
-}
-
-func (conn *ServerConnection) readResource(ctx context.Context, uri string) (*ResourceContent, error) {
-	conn.mu.RLock()
-	if !conn.connected {
-		conn.mu.RUnlock()
-		return nil, fmt.Errorf("server not connected")
-	}
-	conn.mu.RUnlock()
-
-	params := map[string]any{
-		"uri": uri,
-	}
-
-	result, err := conn.transport.Send(ctx, "resources/read", params)
-	if err != nil {
-		return nil, err
-	}
-
-	var response struct {
-		Contents []struct {
-			URI      string `json:"uri"`
+// projectResult is the model-facing projection. Session.CallTool retains the
+// full typed result, including ordered content and structured output.
+func projectResult(raw json.RawMessage) (tool.Result, error) {
+	var result struct {
+		Content []struct {
+			Type     string `json:"type"`
+			Text     string `json:"text"`
+			Data     string `json:"data"`
 			MimeType string `json:"mimeType"`
-			Text     string `json:"text,omitempty"`
-			Blob     string `json:"blob,omitempty"`
-		} `json:"contents"`
+			URI      string `json:"uri"`
+			Name     string `json:"name"`
+			Resource *struct {
+				Text     string `json:"text"`
+				Blob     string `json:"blob"`
+				MimeType string `json:"mimeType"`
+			} `json:"resource"`
+		} `json:"content"`
+		StructuredContent json.RawMessage `json:"structuredContent"`
+		IsError           bool            `json:"isError"`
 	}
-
-	if err := json.Unmarshal(result, &response); err != nil {
-		return nil, err
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return tool.Result{}, err
 	}
-
-	if len(response.Contents) == 0 {
-		return nil, fmt.Errorf("no content returned")
+	out := tool.Result{Metadata: map[string]any{"mcp": raw}}
+	var text []string
+	for _, part := range result.Content {
+		switch part.Type {
+		case "text":
+			text = append(text, part.Text)
+		case "image", "audio":
+			out.Attachments = append(out.Attachments, tool.Attachment{Data: part.Data, MimeType: part.MimeType})
+		case "resource_link":
+			text = append(text, fmt.Sprintf("[Resource: %s — %s]", part.Name, part.URI))
+		case "resource":
+			if part.Resource != nil {
+				if part.Resource.Text != "" {
+					text = append(text, part.Resource.Text)
+				}
+				if part.Resource.Blob != "" {
+					out.Attachments = append(out.Attachments, tool.Attachment{Data: part.Resource.Blob, MimeType: part.Resource.MimeType})
+				}
+			}
+		}
 	}
-
-	c := response.Contents[0]
-	return &ResourceContent{
-		URI:      c.URI,
-		MimeType: c.MimeType,
-		Text:     c.Text,
-		Blob:     c.Blob,
-	}, nil
+	if len(result.Content) == 0 && len(result.StructuredContent) > 0 {
+		text = append(text, string(result.StructuredContent))
+	}
+	out.Output = strings.Join(text, "\n")
+	if result.IsError {
+		return out, fmt.Errorf("MCP tool error: %s", out.Output)
+	}
+	return out, nil
 }

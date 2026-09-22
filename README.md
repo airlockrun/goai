@@ -192,6 +192,23 @@ speech translation are outside this API surface.
 
 ## Scope
 
+### MCP
+
+`goai/mcp` uses the official `modelcontextprotocol/go-sdk` for MCP negotiation,
+HTTP/SSE/stdio transports, sessions, and protocol results. `mcp.Connect` returns
+a protocol-oriented session; `mcp.NewClient` manages named servers and projects
+tools into `tool.Tool`. HTTP connections require an explicit `*http.Client`.
+`GetTools(ctx)` and `GetResources(ctx)` return discovery errors and refresh
+snapshots invalidated by list-change notifications. Tool execution preserves
+raw JSON arguments and does not automatically replay input-required calls.
+
+`Session.CallTool` returns the official SDK's typed result, preserving content
+ordering, structured output, tool errors, and input-required state. The
+model-facing executor projects text and attachments into `tool.Result`.
+OAuth provider hooks own credential persistence and redirect completion;
+transport policy preserves supplied clients, origin-bound credentials, and
+response bounds.
+
 goai tracks vercel/ai upstream. We accept bug fixes specific to the Go port, but not changes that diverge from upstream's logic or API design — if you have an idea that improves the SDK conceptually, take it to [vercel/ai](https://github.com/vercel/ai) first; once it lands upstream, it'll flow into goai naturally. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
 ## Companion projects
