@@ -2,10 +2,140 @@ package openai
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/airlockrun/goai/message"
 )
+
+func convertToResponsesInput(messages []message.Message, systemMessageMode string, passThroughUnsupportedFiles bool) []responsesInputItem {
+	result := convertToResponsesInputWithWarnings(messages, systemMessageMode, passThroughUnsupportedFiles)
+	if result.Err != nil {
+		panic(result.Err)
+	}
+	return result.Input
+}
+
+func TestConvertToResponsesInput_ContentOutput(t *testing.T) {
+	detail := map[string]any{"openai": map[string]any{"imageDetail": "original"}}
+	for _, tt := range []struct {
+		name  string
+		items []message.ToolContentItem
+		want  string
+	}{
+		{"empty", nil, `[]`},
+		{"empty text", []message.ToolContentItem{{Type: "text"}}, `[{"type":"input_text","text":""}]`},
+		{"ordered mixed content", []message.ToolContentItem{
+			{Type: "text", Text: "before"},
+			{Type: "image-data", Data: "aW1n", MediaType: "image/png", ProviderOptions: detail},
+			{Type: "text", Text: "between"},
+			{Type: "file-data", Data: "cGRm", MediaType: "application/pdf", Filename: "catalogue.pdf"},
+			{Type: "text", Text: "after"},
+		}, `[{"type":"input_text","text":"before"},{"type":"input_image","image_url":"data:image/png;base64,aW1n","detail":"original"},{"type":"input_text","text":"between"},{"type":"input_file","file_data":"data:application/pdf;base64,cGRm","filename":"catalogue.pdf"},{"type":"input_text","text":"after"}]`},
+		{"image URL", []message.ToolContentItem{{Type: "image-url", URL: "https://example.com/image.png", ProviderOptions: detail}}, `[{"type":"input_image","image_url":"https://example.com/image.png","detail":"original"}]`},
+		{"image data URL", []message.ToolContentItem{{Type: "image-url", URL: "data:image/jpeg;base64,aW1n"}}, `[{"type":"input_image","image_url":"data:image/jpeg;base64,aW1n"}]`},
+		{"file image data", []message.ToolContentItem{{Type: "file-data", Data: "aW1n", MediaType: "image/webp", ProviderOptions: detail}}, `[{"type":"input_image","image_url":"data:image/webp;base64,aW1n","detail":"original"}]`},
+		{"file image URL", []message.ToolContentItem{{Type: "file-url", URL: "https://example.com/image.gif", MediaType: "image/gif", ProviderOptions: detail}}, `[{"type":"input_image","image_url":"https://example.com/image.gif","detail":"original"}]`},
+		{"file URL", []message.ToolContentItem{{Type: "file-url", URL: "https://example.com/document.pdf", MediaType: "application/pdf"}}, `[{"type":"input_file","file_url":"https://example.com/document.pdf"}]`},
+		{"file data URL", []message.ToolContentItem{{Type: "file-url", URL: "data:application/pdf;base64,cGRm", MediaType: "application/pdf"}}, `[{"type":"input_file","file_url":"data:application/pdf;base64,cGRm"}]`},
+		{"file data without filename", []message.ToolContentItem{{Type: "file-data", Data: "cGRm", MediaType: "application/pdf"}}, `[{"type":"input_file","file_data":"data:application/pdf;base64,cGRm","filename":"data"}]`},
+		{"other file media", []message.ToolContentItem{{Type: "file-data", Data: "dGV4dA==", MediaType: "text/plain", Filename: "note.txt"}}, `[{"type":"input_file","file_data":"data:text/plain;base64,dGV4dA==","filename":"note.txt"}]`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			converted := convertToResponsesInputWithWarnings([]message.Message{
+				message.NewToolMessage("call-image", "read", message.ContentOutput{Value: tt.items}),
+			}, "system", false)
+			if converted.Err != nil || len(converted.Warnings) != 0 || len(converted.Input) != 1 {
+				t.Fatalf("conversion = %+v", converted)
+			}
+			item := converted.Input[0]
+			if item.CallID != "call-image" || item.Type != "function_call_output" {
+				t.Fatalf("tool association = %+v", item)
+			}
+			data, err := json.Marshal(item.Output)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got, want any
+			if err := json.Unmarshal(data, &got); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal([]byte(tt.want), &want); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("output = %s, want %s", data, tt.want)
+			}
+		})
+	}
+}
+
+func TestConvertToResponsesInput_ContentOutputAssociation(t *testing.T) {
+	converted := convertToResponsesInputWithWarnings([]message.Message{{Role: message.RoleTool, Content: message.Content{Parts: []message.Part{
+		message.ToolResultPart{ToolCallID: "first", ToolName: "read", Output: message.ContentOutput{Value: []message.ToolContentItem{
+			{Type: "text", Text: "first image"}, {Type: "image-data", Data: "Zmlyc3Q=", MediaType: "image/png"},
+		}}},
+		message.FilePart{Data: message.FileDataURL{URL: "https://example.com/sibling.png"}, MimeType: "image/png"},
+		message.ToolResultPart{ToolCallID: "second", ToolName: "read", Output: message.ContentOutput{Value: []message.ToolContentItem{
+			{Type: "image-url", URL: "https://example.com/second.png"}, {Type: "text", Text: "second image"},
+		}}},
+	}}}}, "system", false)
+	if converted.Err != nil || len(converted.Input) != 2 {
+		t.Fatalf("conversion = %+v", converted)
+	}
+	first := converted.Input[0]
+	second := converted.Input[1]
+	if first.CallID != "first" || second.CallID != "second" {
+		t.Fatalf("call IDs = %q, %q", first.CallID, second.CallID)
+	}
+	wantFirst := []responsesContentPart{{Type: "input_text", Text: "first image"}, {Type: "input_image", ImageURL: "data:image/png;base64,Zmlyc3Q="}}
+	wantSecond := []responsesContentPart{{Type: "input_image", ImageURL: "https://example.com/second.png"}, {Type: "input_text", Text: "second image"}, {Type: "input_image", ImageURL: "https://example.com/sibling.png"}}
+	if !reflect.DeepEqual(first.Output, wantFirst) || !reflect.DeepEqual(second.Output, wantSecond) {
+		t.Fatalf("outputs = %#v, %#v", first.Output, second.Output)
+	}
+}
+
+func TestConvertToResponsesInput_ToolAttachmentErrors(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		parts []message.Part
+	}{
+		{"missing result", []message.Part{message.FilePart{MimeType: "image/png", Data: message.FileDataBytes{Data: "aW1n"}}}},
+		{"missing media type", []message.Part{message.ToolResultPart{ToolCallID: "call", Output: message.TextOutput{}}, message.FilePart{Data: message.FileDataBytes{Data: "aW1n"}}}},
+		{"reference", []message.Part{message.ToolResultPart{ToolCallID: "call", Output: message.TextOutput{}}, message.FilePart{Data: message.FileDataReference{Reference: map[string]any{"openai": "file-1"}}}}},
+		{"text file data", []message.Part{message.ToolResultPart{ToolCallID: "call", Output: message.TextOutput{}}, message.FilePart{Data: message.FileDataText{Text: "text"}}}},
+		{"unassociated text", []message.Part{message.ToolResultPart{ToolCallID: "call", Output: message.TextOutput{}}, message.TextPart{Text: "text"}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			result := convertToResponsesInputWithWarnings([]message.Message{{Role: message.RoleTool, Content: message.Content{Parts: tt.parts}}}, "system", false)
+			if result.Err == nil || len(result.Input) != 0 {
+				t.Fatalf("conversion = %+v", result)
+			}
+		})
+	}
+}
+
+func TestConvertToResponsesInput_ScalarToolOutputs(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		output message.ToolResultOutput
+		want   string
+	}{
+		{"text", message.TextOutput{Value: "ok"}, "ok"},
+		{"empty", message.TextOutput{}, ""},
+		{"JSON", message.JSONOutput{Value: map[string]any{"ok": true}}, `{"ok":true}`},
+		{"error", message.ErrorTextOutput{Value: "failed"}, "failed"},
+		{"error JSON", message.ErrorJSONOutput{Value: map[string]any{"failed": true}}, `{"failed":true}`},
+		{"denied", message.ExecutionDeniedOutput{Reason: "denied"}, "denied"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			result := convertToResponsesInputWithWarnings([]message.Message{message.NewToolMessage("call", "read", tt.output)}, "system", false)
+			if result.Err != nil || len(result.Input) != 1 || result.Input[0].Output != tt.want {
+				t.Fatalf("conversion = %+v, want scalar %q", result, tt.want)
+			}
+		})
+	}
+}
 
 // Tests for convertToResponsesInput - translated from ai-sdk
 // Source: ai-sdk/packages/openai/src/responses/convert-to-openai-responses-input.test.ts

@@ -8,14 +8,174 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 
+	"github.com/airlockrun/goai"
 	goaierrors "github.com/airlockrun/goai/errors"
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/stream"
 	"github.com/airlockrun/goai/tool"
 )
+
+func TestResponsesModel_ExecutorAttachmentsAndReplay(t *testing.T) {
+	const imageData = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII="
+	const pdfData = "JVBERi0xLjQKJSVFT0YK"
+	var requests, executions atomic.Int32
+	wantOutput := []any{
+		map[string]any{"type": "input_text", "text": "Image read successfully"},
+		map[string]any{"type": "input_image", "image_url": "data:image/png;base64," + imageData},
+		map[string]any{"type": "input_file", "file_data": "data:application/pdf;base64," + pdfData, "filename": "catalogue.pdf"},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" || r.Method != http.MethodPost || r.Header.Get("Authorization") != "" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		var body struct {
+			Model string `json:"model"`
+			Input []struct {
+				Type   string `json:"type"`
+				CallID string `json:"call_id"`
+				Output any    `json:"output"`
+			} `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if body.Model != "gpt-6.1-sol" {
+			t.Errorf("model = %q", body.Model)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		if requests.Add(1) == 1 {
+			io.WriteString(w, strings.ReplaceAll(createResponsesToolCallChunks(), "get_weather", "read"))
+			return
+		}
+		outputs := 0
+		for _, item := range body.Input {
+			if item.Type == "function_call_output" {
+				outputs++
+				if item.CallID != "call_abc123" || !reflect.DeepEqual(item.Output, wantOutput) {
+					t.Errorf("native tool output = %#v, want %#v", item, wantOutput)
+				}
+			}
+		}
+		if outputs != 1 {
+			t.Errorf("tool output count = %d", outputs)
+		}
+		io.WriteString(w, createResponsesStreamChunks("inspected", "stop"))
+	}))
+	defer server.Close()
+	model := NewResponsesModel("gpt-6.1-sol", ResponsesConfig{
+		Provider: "openai.responses", URL: server.URL + "/responses", HTTPClient: server.Client(),
+		ConfigureRequest: func(*http.Request) error { return nil },
+	})
+	tools := tool.Set{"read": {
+		Name: "read", InputSchema: json.RawMessage(`{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}`),
+		Execute: func(_ context.Context, _ json.RawMessage, _ tool.CallOptions) (tool.Result, error) {
+			executions.Add(1)
+			return tool.Result{Output: "Image read successfully", Attachments: []tool.Attachment{
+				{Data: imageData, MimeType: "image/png"},
+				{Data: pdfData, MimeType: "application/pdf", Filename: "catalogue.pdf"},
+			}}, nil
+		},
+	}}
+	input := stream.Input{Model: model, Messages: []message.Message{message.NewUserMessage("Inspect the catalogue")}, Tools: tools, MaxSteps: 2, MaxRetriesSet: true}
+	result, err := goai.GenerateText(t.Context(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Text != "inspected" || len(result.Steps) != 2 || executions.Load() != 1 || requests.Load() != 2 {
+		t.Fatalf("result: text=%q, steps=%d, executions=%d, requests=%d", result.Text, len(result.Steps), executions.Load(), requests.Load())
+	}
+	// CallOptions JSON is also the proxy transport's replay representation.
+	history := append([]message.Message{input.Messages[0]}, result.Steps[0].Response.Messages...)
+	wire, err := json.Marshal(stream.CallOptions{Messages: history})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var replay stream.CallOptions
+	if err := json.Unmarshal(wire, &replay); err != nil {
+		t.Fatal(err)
+	}
+	var foundContent bool
+	for _, msg := range replay.Messages {
+		for _, part := range msg.Content.Parts {
+			if result, ok := part.(message.ToolResultPart); ok {
+				_, foundContent = result.Output.(message.ContentOutput)
+			}
+		}
+	}
+	if !foundContent {
+		t.Fatal("executor attachments did not replay as ContentOutput")
+	}
+	events, err := model.Stream(t.Context(), &replay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var text strings.Builder
+	for event := range events {
+		switch data := event.Data.(type) {
+		case stream.TextDeltaEvent:
+			text.WriteString(data.Text)
+		case stream.ErrorEvent:
+			t.Fatal(data.Error)
+		}
+	}
+	if text.String() != "inspected" || requests.Load() != 3 || executions.Load() != 1 {
+		t.Fatalf("replay: text=%q, requests=%d, executions=%d", text.String(), requests.Load(), executions.Load())
+	}
+}
+
+func TestResponsesModel_UnsupportedToolContent(t *testing.T) {
+	for _, item := range []message.ToolContentItem{
+		{Type: "file-id", FileID: "file-1"},
+		{Type: "image-file-id", FileID: map[string]string{"openai": "image-1"}},
+		{Type: "file-reference", ProviderReference: map[string]string{"openai": "file-1"}},
+		{Type: "image-file-reference", ProviderReference: map[string]string{"openai": "image-1"}},
+		{Type: "custom", Data: "must-not-be-sent-as-text"},
+		{Type: "image-data", Data: "must-not-be-sent-as-text"},
+		{Type: "image-data", MediaType: "application/pdf", Data: "must-not-be-sent-as-text"},
+		{Type: "file-data", Data: "must-not-be-sent-as-text"},
+	} {
+		t.Run(item.Type+"/"+item.MediaType, func(t *testing.T) {
+			options := &stream.CallOptions{Messages: []message.Message{message.NewToolMessage("call-invalid", "read", message.ContentOutput{Value: []message.ToolContentItem{{Type: "text", Text: "before"}, item, {Type: "text", Text: "after"}}})}}
+			body, _, err := (&ResponsesModel{id: "gpt-6.1-sol"}).buildRequest(options)
+			if err == nil || body != nil || !strings.Contains(err.Error(), "call-invalid") || !strings.Contains(err.Error(), "content item 1") || strings.Contains(err.Error(), item.Data) && item.Data != "" {
+				t.Fatalf("body=%s, error=%v", body, err)
+			}
+		})
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("unsupported content reached HTTP transport")
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer server.Close()
+	model := NewResponsesModel("gpt-6.1-sol", ResponsesConfig{
+		Provider: "openai.responses", URL: server.URL, HTTPClient: server.Client(), ConfigureRequest: func(*http.Request) error { return nil },
+	})
+	events, err := model.Stream(t.Context(), &stream.CallOptions{Messages: []message.Message{
+		message.NewToolMessage("call-invalid", "read", message.ContentOutput{Value: []message.ToolContentItem{{Type: "custom"}}}),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawError bool
+	for event := range events {
+		if data, ok := event.Data.(stream.ErrorEvent); ok {
+			sawError = true
+			if !strings.Contains(data.Error.Error(), "unsupported tool content") {
+				t.Fatal(data.Error)
+			}
+		}
+	}
+	if !sawError {
+		t.Fatal("unsupported tool content did not emit an error")
+	}
+}
 
 // Test fixtures for Responses API
 
