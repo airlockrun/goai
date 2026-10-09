@@ -3,6 +3,8 @@
 package togetherai
 
 import (
+	"net/http"
+
 	"github.com/airlockrun/goai/model"
 	"github.com/airlockrun/goai/provider"
 	"github.com/airlockrun/goai/provider/openaicompat"
@@ -18,6 +20,8 @@ type Options struct {
 	APIKey  string
 	BaseURL string
 	Headers map[string]string
+	// HTTPClient sends language-model requests. Nil uses http.DefaultClient.
+	HTTPClient *http.Client
 }
 
 // Provider implements the Together AI provider.
@@ -39,13 +43,14 @@ func New(opts Options) *Provider {
 			BaseURL:    baseURL,
 			APIKey:     opts.APIKey,
 			Headers:    opts.Headers,
+			HTTPClient: opts.HTTPClient,
 		}),
 	}
 }
 
 func (p *Provider) ID() string { return "togetherai" }
 func (p *Provider) Model(modelID string) stream.Model {
-	return openaicompat.New(openaicompat.Options{ProviderID: p.ID(), BaseURL: p.compat.BaseURL(), APIKey: p.opts.APIKey, Headers: p.opts.Headers, SupportsStructuredOutputs: modelID == "deepseek-ai/DeepSeek-V4-Flash-0731"}).Model(modelID)
+	return openaicompat.New(openaicompat.Options{ProviderID: p.ID(), BaseURL: p.compat.BaseURL(), APIKey: p.opts.APIKey, Headers: p.opts.Headers, HTTPClient: p.opts.HTTPClient, SupportsStructuredOutputs: modelID == "deepseek-ai/DeepSeek-V4-Flash-0731"}).Model(modelID)
 }
 func (p *Provider) LanguageModel(modelID string) model.LanguageModel { return p.Model(modelID) }
 func (p *Provider) ImageModel(modelID string) model.ImageModel {

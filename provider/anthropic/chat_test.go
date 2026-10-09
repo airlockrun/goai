@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	goaierrors "github.com/airlockrun/goai/errors"
@@ -20,6 +21,50 @@ type failingStreamReader struct {
 	data string
 	err  error
 	sent bool
+}
+
+type clientInjectionTransport func(*http.Request) (*http.Response, error)
+
+func (f clientInjectionTransport) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func TestAnthropicHTTPClient(t *testing.T) {
+	for _, configured := range []bool{false, true} {
+		t.Run(map[bool]string{false: "default client", true: "explicit client"}[configured], func(t *testing.T) {
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				w.WriteHeader(http.StatusBadRequest)
+			}))
+			defer server.Close()
+			failure := errors.New("explicit client failure")
+			opts := Options{APIKey: "test-key", BaseURL: server.URL}
+			if configured {
+				opts.HTTPClient = &http.Client{Transport: clientInjectionTransport(func(req *http.Request) (*http.Response, error) {
+					if req.Header.Get("x-api-key") != "test-key" {
+						t.Error("injected client did not receive auth")
+					}
+					return nil, failure
+				})}
+			}
+			ch, err := New(opts).Model("claude-test").Stream(t.Context(), &stream.CallOptions{Messages: []message.Message{message.NewUserMessage("hello")}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got error
+			for event := range ch {
+				if e, ok := event.Data.(stream.ErrorEvent); ok {
+					got = e.Error
+				}
+			}
+			if configured {
+				if !errors.Is(got, failure) || calls.Load() != 0 {
+					t.Fatalf("explicit client error=%v, server calls=%d", got, calls.Load())
+				}
+			} else if got == nil || calls.Load() != 1 {
+				t.Fatalf("default client error=%v, server calls=%d", got, calls.Load())
+			}
+		})
+	}
 }
 
 func (r *failingStreamReader) Read(p []byte) (int, error) {

@@ -17,15 +17,23 @@ import (
 	"github.com/airlockrun/goai/tool"
 )
 
-// Tests for GenerateText and StreamText using MockLanguageModel
+// Tests for GenerateText and StreamText using MockModel
 // Source: ai-sdk/packages/ai/src/generate-text/generate-text.test.ts
 // Source: ai-sdk/packages/ai/src/generate-text/stream-text.test.ts
 
+func newMockModel(t testing.TB, config testutil.MockConfig) *testutil.MockModel {
+	t.Helper()
+	m, err := testutil.NewMockModel(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
 func TestGenerateText_BasicUsage(t *testing.T) {
 	t.Run("should generate text", func(t *testing.T) {
-		model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-			StreamResponse: testutil.MockTextResponse("Hello, world!", testutil.MockUsage(10, 20)),
-		})
+		model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+			Default: &testutil.MockResponse{Events: testutil.MockTextResponse("Hello, world!", testutil.MockUsage(10, 20))}})
 
 		result, err := GenerateText(context.Background(), stream.Input{
 			Model: model,
@@ -52,9 +60,8 @@ func TestGenerateText_BasicUsage(t *testing.T) {
 	})
 
 	t.Run("should record messages correctly", func(t *testing.T) {
-		model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-			StreamResponse: testutil.MockTextResponse("Response text", testutil.MockUsage(5, 10)),
-		})
+		model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+			Default: &testutil.MockResponse{Events: testutil.MockTextResponse("Response text", testutil.MockUsage(5, 10))}})
 
 		result, err := GenerateText(context.Background(), stream.Input{
 			Model: model,
@@ -80,14 +87,13 @@ func TestGenerateText_BasicUsage(t *testing.T) {
 	})
 
 	t.Run("should capture tool calls", func(t *testing.T) {
-		model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-			StreamResponse: testutil.MockToolCallResponse(
+		model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+			Default: &testutil.MockResponse{Events: testutil.MockToolCallResponse(
 				"call_123",
 				"get_weather",
 				map[string]string{"location": "NYC"},
 				testutil.MockUsage(15, 25),
-			),
-		})
+			)}})
 
 		result, err := GenerateText(context.Background(), stream.Input{
 			Model: model,
@@ -118,14 +124,13 @@ func TestGenerateText_BasicUsage(t *testing.T) {
 	})
 
 	t.Run("RefineToolInput rewrites tool input before exposure", func(t *testing.T) {
-		model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-			StreamResponse: testutil.MockToolCallResponse(
+		model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+			Default: &testutil.MockResponse{Events: testutil.MockToolCallResponse(
 				"call_1",
 				"echo",
 				map[string]string{"text": ""},
 				testutil.MockUsage(1, 1),
-			),
-		})
+			)}})
 
 		result, err := GenerateText(context.Background(), stream.Input{
 			Model:    model,
@@ -157,14 +162,13 @@ func TestGenerateText_BasicUsage(t *testing.T) {
 	})
 
 	t.Run("RefineToolInput error fails the call", func(t *testing.T) {
-		model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-			StreamResponse: testutil.MockToolCallResponse(
+		model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+			Default: &testutil.MockResponse{Events: testutil.MockToolCallResponse(
 				"call_1",
 				"echo",
 				map[string]string{"text": "hi"},
 				testutil.MockUsage(1, 1),
-			),
-		})
+			)}})
 		_, err := GenerateText(context.Background(), stream.Input{
 			Model:    model,
 			Messages: []message.Message{message.NewUserMessage("hi")},
@@ -181,9 +185,8 @@ func TestGenerateText_BasicUsage(t *testing.T) {
 	})
 
 	t.Run("should pass model input correctly", func(t *testing.T) {
-		model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-			StreamResponse: testutil.MockTextResponse("test", testutil.MockUsage(1, 1)),
-		})
+		model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+			Default: &testutil.MockResponse{Events: testutil.MockTextResponse("test", testutil.MockUsage(1, 1))}})
 
 		temp := 0.7
 		topP := 0.9
@@ -203,11 +206,11 @@ func TestGenerateText_BasicUsage(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if len(model.DoStreamCalls) != 1 {
-			t.Fatalf("expected 1 call, got %d", len(model.DoStreamCalls))
+		if len(model.Requests()) != 1 {
+			t.Fatalf("expected 1 call, got %d", len(model.Requests()))
 		}
 
-		input := model.DoStreamCalls[0]
+		input := model.Requests()[0]
 		if *input.Temperature != 0.7 {
 			t.Errorf("expected temperature 0.7, got %f", *input.Temperature)
 		}
@@ -239,10 +242,11 @@ func TestStreamText_ValidatesProviderToolCalls(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{StreamResponse: []stream.Event{
-				{Type: stream.EventToolCall, Data: tt.call},
-				{Type: stream.EventFinish, Data: stream.FinishEvent{FinishReason: stream.FinishReasonToolCalls}},
-			}})
+			model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+				Default: &testutil.MockResponse{Events: []stream.Event{
+					{Type: stream.EventToolCall, Data: tt.call},
+					{Type: stream.EventFinish, Data: stream.FinishEvent{FinishReason: stream.FinishReasonToolCalls}},
+				}}})
 			executor := &recordingToolExecutor{}
 			var reported []error
 			result, err := StreamText(t.Context(), stream.Input{
@@ -291,10 +295,11 @@ func TestStreamText_ValidAndRepairedToolCalls(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{StreamResponse: []stream.Event{
-				{Type: stream.EventToolCall, Data: tt.call},
-				{Type: stream.EventFinish, Data: stream.FinishEvent{FinishReason: stream.FinishReasonToolCalls}},
-			}})
+			model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+				Default: &testutil.MockResponse{Events: []stream.Event{
+					{Type: stream.EventToolCall, Data: tt.call},
+					{Type: stream.EventFinish, Data: stream.FinishEvent{FinishReason: stream.FinishReasonToolCalls}},
+				}}})
 			executor := &recordingToolExecutor{}
 			result, err := StreamText(t.Context(), stream.Input{
 				Model: model, Tools: tool.Set{"run_js": runJS}, Executor: executor, RepairToolCall: tt.repair,
@@ -320,12 +325,11 @@ func TestStreamText_ValidAndRepairedToolCalls(t *testing.T) {
 
 func TestStreamText_BasicUsage(t *testing.T) {
 	t.Run("should stream text chunks", func(t *testing.T) {
-		model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-			StreamResponse: testutil.MockStreamedTextResponse(
+		model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+			Default: &testutil.MockResponse{Events: testutil.MockStreamedTextResponse(
 				[]string{"Hello", ", ", "world", "!"},
 				testutil.MockUsage(10, 4),
-			),
-		})
+			)}})
 
 		result, err := StreamText(context.Background(), stream.Input{
 			Model: model,
@@ -360,9 +364,8 @@ func TestStreamText_BasicUsage(t *testing.T) {
 	})
 
 	t.Run("should provide usage after completion", func(t *testing.T) {
-		model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-			StreamResponse: testutil.MockTextResponse("test", testutil.MockUsage(100, 50)),
-		})
+		model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+			Default: &testutil.MockResponse{Events: testutil.MockTextResponse("test", testutil.MockUsage(100, 50))}})
 
 		result, err := StreamText(context.Background(), stream.Input{
 			Model: model,
@@ -391,15 +394,14 @@ func TestStreamText_BasicUsage(t *testing.T) {
 	})
 
 	t.Run("should capture tool calls", func(t *testing.T) {
-		model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-			StreamResponse: testutil.MockTextWithToolCallResponse(
+		model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+			Default: &testutil.MockResponse{Events: testutil.MockTextWithToolCallResponse(
 				"I'll check the weather",
 				"call_456",
 				"get_weather",
 				map[string]string{"location": "London"},
 				testutil.MockUsage(20, 30),
-			),
-		})
+			)}})
 
 		result, err := StreamText(context.Background(), stream.Input{
 			Model: model,
@@ -433,8 +435,8 @@ func TestStreamText_BasicUsage(t *testing.T) {
 
 func TestStreamText_RetriesStreamSetupErrors(t *testing.T) {
 	attempts := 0
-	model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-		DoStreamFunc: func(ctx context.Context, options *stream.CallOptions) (<-chan stream.Event, error) {
+	model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+		Stream: func(ctx context.Context, options *stream.CallOptions) (<-chan stream.Event, error) {
 			attempts++
 			if attempts == 1 {
 				return nil, goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{
@@ -448,8 +450,7 @@ func TestStreamText_RetriesStreamSetupErrors(t *testing.T) {
 			}
 			close(events)
 			return events, nil
-		},
-	})
+		}})
 
 	result, err := StreamText(context.Background(), stream.Input{
 		Model: model, Messages: []message.Message{message.NewUserMessage("hello")},
@@ -471,14 +472,13 @@ func TestStreamText_RetriesStreamSetupErrors(t *testing.T) {
 
 func TestStreamText_ExplicitZeroDisablesRetries(t *testing.T) {
 	attempts := 0
-	model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-		DoStreamFunc: func(context.Context, *stream.CallOptions) (<-chan stream.Event, error) {
+	model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+		Stream: func(context.Context, *stream.CallOptions) (<-chan stream.Event, error) {
 			attempts++
 			return nil, goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{
 				Message: "temporarily unavailable", StatusCode: 502,
 			})
-		},
-	})
+		}})
 	maxRetries := 0
 
 	result, err := StreamText(context.Background(), stream.Input{
@@ -497,15 +497,14 @@ func TestStreamText_ExplicitZeroDisablesRetries(t *testing.T) {
 
 func TestStreamText_LegacyPositiveMaxRetriesStillApplies(t *testing.T) {
 	attempts := 0
-	model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-		DoStreamFunc: func(context.Context, *stream.CallOptions) (<-chan stream.Event, error) {
+	model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+		Stream: func(context.Context, *stream.CallOptions) (<-chan stream.Event, error) {
 			attempts++
 			return nil, goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{
 				Message: "temporarily unavailable", StatusCode: 502,
 				ResponseHeaders: map[string]string{"Retry-After": "0"},
 			})
-		},
-	})
+		}})
 
 	result, err := StreamText(context.Background(), stream.Input{
 		Model: model, MaxRetries: 1,
@@ -523,8 +522,8 @@ func TestStreamText_LegacyPositiveMaxRetriesStillApplies(t *testing.T) {
 
 func TestStreamText_RetriesAsyncSetupErrorBeforeContent(t *testing.T) {
 	attempts := 0
-	model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-		DoStreamFunc: func(context.Context, *stream.CallOptions) (<-chan stream.Event, error) {
+	model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+		Stream: func(context.Context, *stream.CallOptions) (<-chan stream.Event, error) {
 			attempts++
 			events := make(chan stream.Event, 16)
 			events <- stream.Event{Type: stream.EventStart, Data: stream.StartEvent{}}
@@ -540,8 +539,7 @@ func TestStreamText_RetriesAsyncSetupErrorBeforeContent(t *testing.T) {
 			}
 			close(events)
 			return events, nil
-		},
-	})
+		}})
 
 	result, err := StreamText(context.Background(), stream.Input{
 		Model: model, Messages: []message.Message{message.NewUserMessage("hello")},
@@ -567,8 +565,8 @@ func TestStreamText_DoesNotRetryAsyncErrorAfterContent(t *testing.T) {
 		IsRetryableSet:  true,
 		ResponseHeaders: map[string]string{"Retry-After": "0"},
 	})
-	model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-		DoStreamFunc: func(context.Context, *stream.CallOptions) (<-chan stream.Event, error) {
+	model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+		Stream: func(context.Context, *stream.CallOptions) (<-chan stream.Event, error) {
 			attempts++
 			events := make(chan stream.Event, 5)
 			events <- stream.Event{Type: stream.EventStart, Data: stream.StartEvent{}}
@@ -578,8 +576,7 @@ func TestStreamText_DoesNotRetryAsyncErrorAfterContent(t *testing.T) {
 			events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: streamErr}}
 			close(events)
 			return events, nil
-		},
-	})
+		}})
 
 	result, err := StreamText(context.Background(), stream.Input{
 		Model: model, Messages: []message.Message{message.NewUserMessage("hello")},
@@ -609,16 +606,15 @@ func TestStreamText_ClosedSetupStreamFails(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-				DoStreamFunc: func(context.Context, *stream.CallOptions) (<-chan stream.Event, error) {
+			model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+				Stream: func(context.Context, *stream.CallOptions) (<-chan stream.Event, error) {
 					events := make(chan stream.Event, 1)
 					if tt.start {
 						events <- stream.Event{Type: stream.EventStart, Data: stream.StartEvent{}}
 					}
 					close(events)
 					return events, nil
-				},
-			})
+				}})
 			result, err := StreamText(context.Background(), stream.Input{Model: model})
 			if err != nil {
 				t.Fatal(err)
@@ -635,11 +631,10 @@ func TestStreamText_ClosedSetupStreamFails(t *testing.T) {
 }
 
 func TestStreamText_RejectsNilSetupStream(t *testing.T) {
-	model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-		DoStreamFunc: func(context.Context, *stream.CallOptions) (<-chan stream.Event, error) {
+	model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+		Stream: func(context.Context, *stream.CallOptions) (<-chan stream.Event, error) {
 			return nil, nil
-		},
-	})
+		}})
 	result, err := StreamText(context.Background(), stream.Input{Model: model, MaxRetriesSet: true})
 	if err != nil {
 		t.Fatal(err)
@@ -651,8 +646,9 @@ func TestStreamText_RejectsNilSetupStream(t *testing.T) {
 
 func TestStreamText_RejectsNegativeModelSetupRetries(t *testing.T) {
 	model := setupRetriesModel{
-		Model: testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{}),
-		max:   -1,
+		Model: newMockModel(t, testutil.MockConfig{ID: "fixture",
+			Default: &testutil.MockResponse{Events: []stream.Event{}}}),
+		max: -1,
 	}
 	result, err := StreamText(context.Background(), stream.Input{Model: model})
 	if err != nil {
@@ -665,8 +661,8 @@ func TestStreamText_RejectsNegativeModelSetupRetries(t *testing.T) {
 
 func TestGenerateText_RetriesStreamSetupErrors(t *testing.T) {
 	attempts := 0
-	model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-		DoStreamFunc: func(context.Context, *stream.CallOptions) (<-chan stream.Event, error) {
+	model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+		Stream: func(context.Context, *stream.CallOptions) (<-chan stream.Event, error) {
 			attempts++
 			if attempts == 1 {
 				return nil, goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{
@@ -679,8 +675,7 @@ func TestGenerateText_RetriesStreamSetupErrors(t *testing.T) {
 			}
 			close(events)
 			return events, nil
-		},
-	})
+		}})
 
 	result, err := GenerateText(context.Background(), stream.Input{
 		Model: model, Messages: []message.Message{message.NewUserMessage("hello")},
@@ -704,13 +699,12 @@ func (m setupRetriesModel) SetupMaxRetries() (int, bool) {
 
 func TestStreamText_TerminalErrorAccessors(t *testing.T) {
 	streamErr := errors.New("stream disconnected")
-	model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-		StreamResponse: []stream.Event{
+	model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+		Default: &testutil.MockResponse{Events: []stream.Event{
 			{Type: stream.EventTextStart, Data: stream.TextStartEvent{}},
 			{Type: stream.EventTextDelta, Data: stream.TextDeltaEvent{Text: "partial"}},
 			{Type: stream.EventError, Data: stream.ErrorEvent{Error: streamErr}},
-		},
-	})
+		}}})
 
 	var onError error
 	result, err := StreamText(context.Background(), stream.Input{
@@ -768,12 +762,11 @@ func TestStreamText_TerminalErrorAccessors(t *testing.T) {
 
 func TestGenerateText_WithMultipleResponses(t *testing.T) {
 	t.Run("should handle sequential calls with different responses", func(t *testing.T) {
-		model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-			StreamResponses: [][]stream.Event{
-				testutil.MockTextResponse("First response", testutil.MockUsage(10, 10)),
-				testutil.MockTextResponse("Second response", testutil.MockUsage(10, 15)),
-			},
-		})
+		model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+			Responses: []testutil.MockResponse{
+				{Events: testutil.MockTextResponse("First response", testutil.MockUsage(10, 10))},
+				{Events: testutil.MockTextResponse("Second response", testutil.MockUsage(10, 15))},
+			}})
 
 		// First call
 		result1, err := GenerateText(context.Background(), stream.Input{
@@ -808,17 +801,16 @@ func TestGenerateText_MultiStep(t *testing.T) {
 	t.Run("should execute tools and continue loop when MaxSteps > 1", func(t *testing.T) {
 		// Step 1: Model returns tool call
 		// Step 2: Tool executed, model returns final text
-		model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-			StreamResponses: [][]stream.Event{
-				testutil.MockToolCallResponse(
+		model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+			Responses: []testutil.MockResponse{
+				{Events: testutil.MockToolCallResponse(
 					"call_1",
 					"get_weather",
 					map[string]string{"location": "NYC"},
 					testutil.MockUsage(10, 15),
-				),
-				testutil.MockTextResponse("The weather in NYC is sunny.", testutil.MockUsage(20, 10)),
-			},
-		})
+				)},
+				{Events: testutil.MockTextResponse("The weather in NYC is sunny.", testutil.MockUsage(20, 10))},
+			}})
 
 		var stepFinishCount int
 		result, err := GenerateText(context.Background(), stream.Input{
@@ -889,13 +881,12 @@ func TestGenerateText_MultiStep(t *testing.T) {
 
 	t.Run("should stop at MaxSteps even if model keeps returning tool calls", func(t *testing.T) {
 		// All steps return tool calls
-		model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-			StreamResponses: [][]stream.Event{
-				testutil.MockToolCallResponse("call_1", "search", map[string]string{"q": "1"}, testutil.MockUsage(10, 10)),
-				testutil.MockToolCallResponse("call_2", "search", map[string]string{"q": "2"}, testutil.MockUsage(10, 10)),
-				testutil.MockToolCallResponse("call_3", "search", map[string]string{"q": "3"}, testutil.MockUsage(10, 10)),
-			},
-		})
+		model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+			Responses: []testutil.MockResponse{
+				{Events: testutil.MockToolCallResponse("call_1", "search", map[string]string{"q": "1"}, testutil.MockUsage(10, 10))},
+				{Events: testutil.MockToolCallResponse("call_2", "search", map[string]string{"q": "2"}, testutil.MockUsage(10, 10))},
+				{Events: testutil.MockToolCallResponse("call_3", "search", map[string]string{"q": "3"}, testutil.MockUsage(10, 10))},
+			}})
 
 		result, err := GenerateText(context.Background(), stream.Input{
 			Model: model,
@@ -924,23 +915,22 @@ func TestGenerateText_MultiStep(t *testing.T) {
 		}
 
 		// Model should have been called twice
-		if len(model.DoStreamCalls) != 2 {
-			t.Errorf("expected 2 model calls, got %d", len(model.DoStreamCalls))
+		if len(model.Requests()) != 2 {
+			t.Errorf("expected 2 model calls, got %d", len(model.Requests()))
 		}
 	})
 
 	t.Run("should include tool results in messages for next step", func(t *testing.T) {
-		model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-			StreamResponses: [][]stream.Event{
-				testutil.MockToolCallResponse(
+		model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+			Responses: []testutil.MockResponse{
+				{Events: testutil.MockToolCallResponse(
 					"call_1",
 					"get_data",
 					map[string]string{"key": "test"},
 					testutil.MockUsage(10, 10),
-				),
-				testutil.MockTextResponse("Got the data.", testutil.MockUsage(20, 5)),
-			},
-		})
+				)},
+				{Events: testutil.MockTextResponse("Got the data.", testutil.MockUsage(20, 5))},
+			}})
 
 		result, err := GenerateText(context.Background(), stream.Input{
 			Model: model,
@@ -964,11 +954,11 @@ func TestGenerateText_MultiStep(t *testing.T) {
 		}
 
 		// Check second call had tool result message
-		if len(model.DoStreamCalls) != 2 {
-			t.Fatalf("expected 2 model calls, got %d", len(model.DoStreamCalls))
+		if len(model.Requests()) != 2 {
+			t.Fatalf("expected 2 model calls, got %d", len(model.Requests()))
 		}
 
-		secondCallMessages := model.DoStreamCalls[1].Messages
+		secondCallMessages := model.Requests()[1].Messages
 		// Should have: user, assistant (with tool call), tool result
 		if len(secondCallMessages) < 3 {
 			t.Fatalf("expected at least 3 messages in second call, got %d", len(secondCallMessages))
@@ -987,12 +977,11 @@ func TestGenerateText_MultiStep(t *testing.T) {
 	})
 
 	t.Run("should default to single step (MaxSteps=1) when not specified", func(t *testing.T) {
-		model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-			StreamResponses: [][]stream.Event{
-				testutil.MockToolCallResponse("call_1", "tool", map[string]string{}, testutil.MockUsage(10, 10)),
-				testutil.MockTextResponse("Never reached", testutil.MockUsage(5, 5)),
-			},
-		})
+		model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+			Responses: []testutil.MockResponse{
+				{Events: testutil.MockToolCallResponse("call_1", "tool", map[string]string{}, testutil.MockUsage(10, 10))},
+				{Events: testutil.MockTextResponse("Never reached", testutil.MockUsage(5, 5))},
+			}})
 
 		result, err := GenerateText(context.Background(), stream.Input{
 			Model: model,
@@ -1021,25 +1010,24 @@ func TestGenerateText_MultiStep(t *testing.T) {
 		}
 
 		// Model should only be called once
-		if len(model.DoStreamCalls) != 1 {
-			t.Errorf("expected 1 model call, got %d", len(model.DoStreamCalls))
+		if len(model.Requests()) != 1 {
+			t.Errorf("expected 1 model call, got %d", len(model.Requests()))
 		}
 	})
 }
 
 func TestStreamText_MultiStep(t *testing.T) {
 	t.Run("should stream events from all steps", func(t *testing.T) {
-		model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-			StreamResponses: [][]stream.Event{
-				testutil.MockToolCallResponse(
+		model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+			Responses: []testutil.MockResponse{
+				{Events: testutil.MockToolCallResponse(
 					"call_1",
 					"get_time",
 					map[string]string{},
 					testutil.MockUsage(10, 10),
-				),
-				testutil.MockTextResponse("The time is 12:00", testutil.MockUsage(15, 8)),
-			},
-		})
+				)},
+				{Events: testutil.MockTextResponse("The time is 12:00", testutil.MockUsage(15, 8))},
+			}})
 
 		var stepFinishCount int
 		result, err := StreamText(context.Background(), stream.Input{
@@ -1204,12 +1192,11 @@ func TestGenerateText_Output(t *testing.T) {
 	}
 
 	t.Run("parses object output when finish reason is stop", func(t *testing.T) {
-		model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-			StreamResponse: testutil.MockTextResponse(
+		model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+			Default: &testutil.MockResponse{Events: testutil.MockTextResponse(
 				`{"sentiment":"positive","confidence":0.9}`,
 				testutil.MockUsage(5, 10),
-			),
-		})
+			)}})
 
 		result, err := GenerateText(context.Background(), stream.Input{
 			Model: model,
@@ -1238,16 +1225,15 @@ func TestGenerateText_Output(t *testing.T) {
 	})
 
 	t.Run("sends ResponseFormat on every step", func(t *testing.T) {
-		model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-			StreamResponses: [][]stream.Event{
-				testutil.MockToolCallResponse(
+		model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+			Responses: []testutil.MockResponse{
+				{Events: testutil.MockToolCallResponse(
 					"call_1", "lookup",
 					map[string]string{"q": "x"},
 					testutil.MockUsage(5, 5),
-				),
-				testutil.MockTextResponse(`{"sentiment":"neutral","confidence":0.5}`, testutil.MockUsage(5, 10)),
-			},
-		})
+				)},
+				{Events: testutil.MockTextResponse(`{"sentiment":"neutral","confidence":0.5}`, testutil.MockUsage(5, 10))},
+			}})
 
 		_, err := GenerateText(context.Background(), stream.Input{
 			Model:    model,
@@ -1272,10 +1258,10 @@ func TestGenerateText_Output(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if len(model.DoStreamCalls) != 2 {
-			t.Fatalf("expected 2 stream calls, got %d", len(model.DoStreamCalls))
+		if len(model.Requests()) != 2 {
+			t.Fatalf("expected 2 stream calls, got %d", len(model.Requests()))
 		}
-		for i, call := range model.DoStreamCalls {
+		for i, call := range model.Requests() {
 			if call.ResponseFormat == nil {
 				t.Errorf("step %d: ResponseFormat was nil", i)
 				continue
@@ -1287,16 +1273,15 @@ func TestGenerateText_Output(t *testing.T) {
 	})
 
 	t.Run("combines tools with output - parses on final stop step", func(t *testing.T) {
-		model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-			StreamResponses: [][]stream.Event{
-				testutil.MockToolCallResponse(
+		model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+			Responses: []testutil.MockResponse{
+				{Events: testutil.MockToolCallResponse(
 					"call_1", "lookup",
 					map[string]string{"q": "x"},
 					testutil.MockUsage(5, 5),
-				),
-				testutil.MockTextResponse(`{"sentiment":"positive","confidence":0.8}`, testutil.MockUsage(5, 10)),
-			},
-		})
+				)},
+				{Events: testutil.MockTextResponse(`{"sentiment":"positive","confidence":0.8}`, testutil.MockUsage(5, 10))},
+			}})
 
 		result, err := GenerateText(context.Background(), stream.Input{
 			Model:    model,
@@ -1339,13 +1324,12 @@ func TestGenerateText_Output(t *testing.T) {
 
 	t.Run("does not parse output when finish reason is not stop", func(t *testing.T) {
 		// MaxSteps=1 forces stop after the first step, even though it's a tool call.
-		model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-			StreamResponse: testutil.MockToolCallResponse(
+		model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+			Default: &testutil.MockResponse{Events: testutil.MockToolCallResponse(
 				"call_1", "noop",
 				map[string]string{},
 				testutil.MockUsage(5, 5),
-			),
-		})
+			)}})
 
 		result, err := GenerateText(context.Background(), stream.Input{
 			Model:    model,
@@ -1382,12 +1366,11 @@ func TestStreamText_Output(t *testing.T) {
 	}
 
 	t.Run("parses object output via Result.Output closure", func(t *testing.T) {
-		model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-			StreamResponse: testutil.MockTextResponse(
+		model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+			Default: &testutil.MockResponse{Events: testutil.MockTextResponse(
 				`{"greeting":"hi"}`,
 				testutil.MockUsage(2, 4),
-			),
-		})
+			)}})
 
 		res, err := StreamText(context.Background(), stream.Input{
 			Model: model,

@@ -3,6 +3,8 @@
 package groq
 
 import (
+	"net/http"
+
 	"github.com/airlockrun/goai/model"
 	"github.com/airlockrun/goai/provider"
 	"github.com/airlockrun/goai/provider/openaicompat"
@@ -33,6 +35,9 @@ type Options struct {
 
 	// Headers are additional HTTP headers to send.
 	Headers map[string]string
+
+	// HTTPClient sends language-model requests. Nil uses http.DefaultClient.
+	HTTPClient *http.Client
 }
 
 // Provider implements the Groq provider.
@@ -52,6 +57,7 @@ func New(opts Options) *Provider {
 			BaseURL:         baseURL,
 			APIKey:          opts.APIKey,
 			Headers:         opts.Headers,
+			HTTPClient:      opts.HTTPClient,
 			RequestModifier: groqRequestModifier,
 			ReasoningMapper: func(id string, options *stream.CallOptions) (map[string]any, []stream.Warning) {
 				if effort, _ := options.ProviderOptions["reasoningEffort"].(string); effort != "" {

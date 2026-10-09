@@ -3,6 +3,8 @@
 package xai
 
 import (
+	"net/http"
+
 	"github.com/airlockrun/goai/model"
 	"github.com/airlockrun/goai/provider"
 	"github.com/airlockrun/goai/provider/openaicompat"
@@ -18,14 +20,17 @@ type Options struct {
 	APIKey  string
 	BaseURL string
 	Headers map[string]string
+	// HTTPClient sends language-model requests. Nil uses http.DefaultClient.
+	HTTPClient *http.Client
 }
 
 // Provider implements the xAI provider.
 type Provider struct {
-	compat  *openaicompat.Provider
-	baseURL string
-	apiKey  string
-	headers map[string]string
+	compat     *openaicompat.Provider
+	baseURL    string
+	apiKey     string
+	headers    map[string]string
+	httpClient *http.Client
 }
 
 // New creates a new xAI provider.
@@ -40,6 +45,7 @@ func New(opts Options) *Provider {
 			BaseURL:         baseURL,
 			APIKey:          opts.APIKey,
 			Headers:         opts.Headers,
+			HTTPClient:      opts.HTTPClient,
 			RequestModifier: xaiRequestModifier,
 			ReasoningMapper: func(id string, options *stream.CallOptions) (map[string]any, []stream.Warning) {
 				explicit, _ := options.ProviderOptions["reasoningEffort"].(string)
@@ -52,9 +58,10 @@ func New(opts Options) *Provider {
 			CallWarner:            xaiChatCallWarner,
 			ToolSchemaTransformer: sanitizeToolSchema,
 		}),
-		baseURL: baseURL,
-		apiKey:  opts.APIKey,
-		headers: opts.Headers,
+		baseURL:    baseURL,
+		apiKey:     opts.APIKey,
+		headers:    opts.Headers,
+		httpClient: opts.HTTPClient,
 	}
 }
 

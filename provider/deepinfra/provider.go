@@ -24,6 +24,8 @@ type Options struct {
 	APIKey  string
 	BaseURL string
 	Headers map[string]string
+	// HTTPClient sends language-model requests. Nil uses http.DefaultClient.
+	HTTPClient *http.Client
 }
 
 // Provider implements the DeepInfra provider.
@@ -44,6 +46,7 @@ func New(opts Options) *Provider {
 			APIKey:     opts.APIKey,
 			BaseURL:    opts.BaseURL,
 			Headers:    opts.Headers,
+			HTTPClient: opts.HTTPClient,
 		}),
 	}
 }

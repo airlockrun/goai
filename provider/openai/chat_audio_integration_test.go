@@ -17,6 +17,9 @@ import (
 // are constructed directly so the OpenRouter-prefixed id still routes here.
 func chatAudioRig(t *testing.T) (*Provider, string) {
 	t.Helper()
+	if os.Getenv("GOAI_LIVE_TESTS") != "1" {
+		t.Skip("set GOAI_LIVE_TESTS=1 to run live chat-audio tests")
+	}
 	if k := os.Getenv("OPENAI_API_KEY"); k != "" {
 		return New(provider.Options{APIKey: k}), "gpt-audio-mini"
 	}

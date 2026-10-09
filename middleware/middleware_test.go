@@ -9,11 +9,19 @@ import (
 	"github.com/airlockrun/goai/testutil"
 )
 
+func newMockModel(t testing.TB, config testutil.MockConfig) *testutil.MockModel {
+	t.Helper()
+	m, err := testutil.NewMockModel(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
 func TestWrapModel(t *testing.T) {
 	t.Run("passes through with no middleware", func(t *testing.T) {
-		model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-			StreamResponse: testutil.MockTextResponse("Hello", testutil.MockUsage(10, 5)),
-		})
+		model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+			Default: &testutil.MockResponse{Events: testutil.MockTextResponse("Hello", testutil.MockUsage(10, 5))}})
 
 		wrapped := WrapModel(model)
 
@@ -23,9 +31,8 @@ func TestWrapModel(t *testing.T) {
 	})
 
 	t.Run("middleware can transform input", func(t *testing.T) {
-		model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-			StreamResponse: testutil.MockTextResponse("Hello", testutil.MockUsage(10, 5)),
-		})
+		model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+			Default: &testutil.MockResponse{Events: testutil.MockTextResponse("Hello", testutil.MockUsage(10, 5))}})
 
 		temp := 0.5
 		middleware := &DefaultSettingsMiddleware{
@@ -34,26 +41,27 @@ func TestWrapModel(t *testing.T) {
 
 		wrapped := WrapModel(model, middleware)
 
-		_, err := wrapped.Stream(context.Background(), &stream.CallOptions{})
+		events, err := wrapped.Stream(t.Context(), &stream.CallOptions{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-
-		// Check that temperature was applied
-		if len(model.DoStreamCalls) != 1 {
-			t.Fatalf("expected 1 call, got %d", len(model.DoStreamCalls))
+		for range events {
 		}
 
-		call := model.DoStreamCalls[0]
+		// Check that temperature was applied
+		if len(model.Requests()) != 1 {
+			t.Fatalf("expected 1 call, got %d", len(model.Requests()))
+		}
+
+		call := model.Requests()[0]
 		if call.Temperature == nil || *call.Temperature != 0.5 {
 			t.Errorf("expected temperature 0.5, got %v", call.Temperature)
 		}
 	})
 
 	t.Run("multiple middlewares are applied in order", func(t *testing.T) {
-		model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-			StreamResponse: testutil.MockTextResponse("Hello", testutil.MockUsage(10, 5)),
-		})
+		model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+			Default: &testutil.MockResponse{Events: testutil.MockTextResponse("Hello", testutil.MockUsage(10, 5))}})
 
 		var order []string
 
@@ -79,9 +87,11 @@ func TestWrapModel(t *testing.T) {
 
 		wrapped := WrapModel(model, middleware1, middleware2)
 
-		_, err := wrapped.Stream(context.Background(), &stream.CallOptions{})
+		events, err := wrapped.Stream(t.Context(), &stream.CallOptions{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
+		}
+		for range events {
 		}
 
 		// First middleware is outermost, so it transforms first and wraps last
@@ -159,9 +169,8 @@ func TestDefaultSettingsMiddleware(t *testing.T) {
 
 func TestLoggingMiddleware(t *testing.T) {
 	t.Run("calls OnCall and OnEvent", func(t *testing.T) {
-		model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{
-			StreamResponse: testutil.MockTextResponse("Hello", testutil.MockUsage(10, 5)),
-		})
+		model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+			Default: &testutil.MockResponse{Events: testutil.MockTextResponse("Hello", testutil.MockUsage(10, 5))}})
 
 		var called bool
 		var eventCount int

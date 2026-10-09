@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -230,81 +231,72 @@ func parseNDJSONEvent(line []byte) (stream.Event, error) {
 
 	eventType := stream.EventType(envelope.Type)
 	var data stream.EventData
+	var err error
+	// Marker events can omit their optional metadata payload.
+	if len(envelope.Data) == 0 {
+		switch eventType {
+		case stream.EventStart, stream.EventTextStart, stream.EventTextEnd, stream.EventStartStep:
+			envelope.Data = json.RawMessage(`{}`)
+		}
+	}
 
 	switch eventType {
 	case stream.EventStart:
-		data = stream.StartEvent{}
+		data, err = decodeEventData[stream.StartEvent](envelope.Data)
 	case stream.EventTextStart:
-		var d stream.TextStartEvent
-		json.Unmarshal(envelope.Data, &d)
-		data = d
+		data, err = decodeEventData[stream.TextStartEvent](envelope.Data)
 	case stream.EventTextDelta:
-		var d stream.TextDeltaEvent
-		json.Unmarshal(envelope.Data, &d)
-		data = d
+		data, err = decodeEventData[stream.TextDeltaEvent](envelope.Data)
 	case stream.EventTextEnd:
-		var d stream.TextEndEvent
-		json.Unmarshal(envelope.Data, &d)
-		data = d
+		data, err = decodeEventData[stream.TextEndEvent](envelope.Data)
 	case stream.EventToolInputStart:
-		var d stream.ToolInputStartEvent
-		json.Unmarshal(envelope.Data, &d)
-		data = d
+		data, err = decodeEventData[stream.ToolInputStartEvent](envelope.Data)
 	case stream.EventToolInputDelta:
-		var d stream.ToolInputDeltaEvent
-		json.Unmarshal(envelope.Data, &d)
-		data = d
+		data, err = decodeEventData[stream.ToolInputDeltaEvent](envelope.Data)
 	case stream.EventToolInputEnd:
-		var d stream.ToolInputEndEvent
-		json.Unmarshal(envelope.Data, &d)
-		data = d
+		data, err = decodeEventData[stream.ToolInputEndEvent](envelope.Data)
 	case stream.EventToolCall:
-		var d stream.ToolCallEvent
-		json.Unmarshal(envelope.Data, &d)
-		data = d
+		data, err = decodeEventData[stream.ToolCallEvent](envelope.Data)
 	case stream.EventToolResult:
-		var d stream.ToolResultEvent
-		json.Unmarshal(envelope.Data, &d)
-		data = d
+		data, err = decodeEventData[stream.ToolResultEvent](envelope.Data)
 	case stream.EventToolError:
-		var d stream.ToolErrorEvent
-		json.Unmarshal(envelope.Data, &d)
-		data = d
+		data, err = decodeEventData[stream.ToolErrorEvent](envelope.Data)
 	case stream.EventToolOutputDenied:
-		var d stream.ToolOutputDeniedEvent
-		json.Unmarshal(envelope.Data, &d)
-		data = d
+		data, err = decodeEventData[stream.ToolOutputDeniedEvent](envelope.Data)
 	case stream.EventReasoningStart:
-		var d stream.ReasoningStartEvent
-		json.Unmarshal(envelope.Data, &d)
-		data = d
+		data, err = decodeEventData[stream.ReasoningStartEvent](envelope.Data)
 	case stream.EventReasoningDelta:
-		var d stream.ReasoningDeltaEvent
-		json.Unmarshal(envelope.Data, &d)
-		data = d
+		data, err = decodeEventData[stream.ReasoningDeltaEvent](envelope.Data)
 	case stream.EventReasoningEnd:
-		var d stream.ReasoningEndEvent
-		json.Unmarshal(envelope.Data, &d)
-		data = d
+		data, err = decodeEventData[stream.ReasoningEndEvent](envelope.Data)
 	case stream.EventStartStep:
-		data = stream.StartStepEvent{}
+		data, err = decodeEventData[stream.StartStepEvent](envelope.Data)
 	case stream.EventFinishStep:
-		var d stream.FinishStepEvent
-		json.Unmarshal(envelope.Data, &d)
-		data = d
+		data, err = decodeEventData[stream.FinishStepEvent](envelope.Data)
 	case stream.EventFinish:
-		var d stream.FinishEvent
-		json.Unmarshal(envelope.Data, &d)
-		data = d
+		data, err = decodeEventData[stream.FinishEvent](envelope.Data)
+	case stream.EventRawChunk:
+		data, err = decodeEventData[stream.RawChunkEvent](envelope.Data)
+	case stream.EventSource:
+		data, err = decodeEventData[stream.SourceEvent](envelope.Data)
 	case stream.EventError:
 		var d struct {
 			Error string `json:"error"`
 		}
-		json.Unmarshal(envelope.Data, &d)
-		data = stream.ErrorEvent{Error: fmt.Errorf("%s", d.Error)}
+		err = json.Unmarshal(envelope.Data, &d)
+		data = stream.ErrorEvent{Error: errors.New(d.Error)}
 	default:
 		return stream.Event{}, fmt.Errorf("proxy: unknown event type %q", envelope.Type)
 	}
+	if err != nil {
+		return stream.Event{}, fmt.Errorf("proxy: parse %q event data: %w", envelope.Type, err)
+	}
 
 	return stream.Event{Type: eventType, Data: data}, nil
+}
+
+func decodeEventData[T stream.EventData](raw json.RawMessage) (stream.EventData, error) {
+	var data T
+	err := json.Unmarshal(raw, &data)
+	return data, err
 }

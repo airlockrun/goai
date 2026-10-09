@@ -3,6 +3,8 @@
 package perplexity
 
 import (
+	"net/http"
+
 	"github.com/airlockrun/goai/model"
 	"github.com/airlockrun/goai/provider"
 	"github.com/airlockrun/goai/provider/openaicompat"
@@ -18,6 +20,8 @@ type Options struct {
 	APIKey  string
 	BaseURL string
 	Headers map[string]string
+	// HTTPClient sends language-model requests. Nil uses http.DefaultClient.
+	HTTPClient *http.Client
 }
 
 // Provider implements the Perplexity provider.
@@ -37,6 +41,7 @@ func New(opts Options) *Provider {
 			BaseURL:    baseURL,
 			APIKey:     opts.APIKey,
 			Headers:    opts.Headers,
+			HTTPClient: opts.HTTPClient,
 			CallWarner: perplexityCallWarner,
 		}),
 	}

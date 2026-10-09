@@ -33,6 +33,9 @@ type Options struct {
 	Headers map[string]string
 	// ResponsesBaseURL overrides the language endpoint independently of inference modalities.
 	ResponsesBaseURL string
+
+	// HTTPClient sends language-model requests. Nil uses http.DefaultClient.
+	HTTPClient *http.Client
 }
 
 // Provider implements the Hugging Face provider.
@@ -66,7 +69,7 @@ func (p *Provider) LanguageModel(modelID string) model.LanguageModel {
 
 // Responses returns a language model using the Hugging Face router.
 func (p *Provider) Responses(modelID string) stream.Model {
-	return openresponses.New(openresponses.Options{Name: "huggingface", BaseURL: p.opts.ResponsesBaseURL, APIKey: p.opts.APIKey, Headers: p.opts.Headers}).Responses(modelID)
+	return openresponses.New(openresponses.Options{Name: "huggingface", BaseURL: p.opts.ResponsesBaseURL, APIKey: p.opts.APIKey, Headers: p.opts.Headers, HTTPClient: p.opts.HTTPClient}).Responses(modelID)
 }
 
 // TextGeneration returns a prompt-based Inference API model.
@@ -200,7 +203,11 @@ func (m *HuggingFaceLanguageModel) doStream(ctx context.Context, options *stream
 
 	events <- stream.Event{Type: stream.EventStart, Data: stream.StartEvent{}}
 
-	resp, err := http.DefaultClient.Do(req)
+	client := m.provider.opts.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{
 			Message: "Hugging Face API request failed", URL: url, RequestBodyValues: json.RawMessage(reqBytes),

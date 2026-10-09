@@ -3,6 +3,8 @@
 package fireworks
 
 import (
+	"net/http"
+
 	"github.com/airlockrun/goai/model"
 	"github.com/airlockrun/goai/provider"
 	"github.com/airlockrun/goai/provider/openaicompat"
@@ -26,6 +28,9 @@ type Options struct {
 	// PollTimeoutMS overrides the async image polling timeout. Defaults
 	// to 120000ms (2 minutes) when zero. Mirrors ai-sdk's pollTimeoutMillis.
 	PollTimeoutMS int
+
+	// HTTPClient sends language-model requests. Nil uses http.DefaultClient.
+	HTTPClient *http.Client
 }
 
 // Provider implements the Fireworks provider.
@@ -50,6 +55,7 @@ func New(opts Options) *Provider {
 			BaseURL:                   baseURL,
 			APIKey:                    opts.APIKey,
 			Headers:                   opts.Headers,
+			HTTPClient:                opts.HTTPClient,
 			SupportsStructuredOutputs: true,
 			RequestModifier:           fireworksRequestModifier,
 			TransformRequest: func(_ string, body map[string]any) error {
