@@ -2,6 +2,8 @@
 package google
 
 import (
+	"net/http"
+
 	"github.com/airlockrun/goai/model"
 	"github.com/airlockrun/goai/provider"
 	"github.com/airlockrun/goai/stream"
@@ -21,6 +23,9 @@ type Options struct {
 
 	// Headers are additional HTTP headers to send.
 	Headers map[string]string
+
+	// HTTPClient sends language-model requests. Nil uses http.DefaultClient.
+	HTTPClient *http.Client
 }
 
 // Provider implements the Google AI provider.

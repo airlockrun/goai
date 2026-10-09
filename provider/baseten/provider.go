@@ -32,6 +32,8 @@ type Options struct {
 	// ModelURL is the deployed embedding model's /sync or /sync/v1 endpoint.
 	ModelURL string
 	Headers  map[string]string
+	// HTTPClient sends language-model requests. Nil uses http.DefaultClient.
+	HTTPClient *http.Client
 }
 
 // Provider implements the Baseten provider.
@@ -168,7 +170,11 @@ func (m *BasetenLanguageModel) doStream(ctx context.Context, options *stream.Cal
 
 	events <- stream.Event{Type: stream.EventStart, Data: stream.StartEvent{}}
 
-	resp, err := http.DefaultClient.Do(req)
+	client := m.provider.opts.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{
 			Message: "Baseten API request failed", URL: url, RequestBodyValues: json.RawMessage(reqBytes),

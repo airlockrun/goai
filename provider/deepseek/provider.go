@@ -4,6 +4,7 @@ package deepseek
 
 import (
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/airlockrun/goai/model"
@@ -21,6 +22,8 @@ type Options struct {
 	APIKey  string
 	BaseURL string
 	Headers map[string]string
+	// HTTPClient sends language-model requests. Nil uses http.DefaultClient.
+	HTTPClient *http.Client
 }
 
 // Provider implements the DeepSeek provider.
@@ -40,6 +43,7 @@ func New(opts Options) *Provider {
 			BaseURL:         baseURL,
 			APIKey:          opts.APIKey,
 			Headers:         opts.Headers,
+			HTTPClient:      opts.HTTPClient,
 			RequestModifier: deepseekRequestModifier,
 			ReasoningMapper: func(_ string, options *stream.CallOptions) (map[string]any, []stream.Warning) {
 				fields := map[string]any{}

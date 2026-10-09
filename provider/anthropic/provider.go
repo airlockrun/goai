@@ -2,6 +2,8 @@
 package anthropic
 
 import (
+	"net/http"
+
 	"github.com/airlockrun/goai/model"
 	"github.com/airlockrun/goai/stream"
 )
@@ -30,6 +32,9 @@ type Options struct {
 	// Anthropic. "bearer" sends Authorization: Bearer {APIKey}, used by
 	// derived providers like Vertex Anthropic.
 	AuthScheme string
+
+	// HTTPClient sends language-model requests. Nil uses http.DefaultClient.
+	HTTPClient *http.Client
 }
 
 // Provider implements the Anthropic provider.

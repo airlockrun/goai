@@ -7,6 +7,9 @@ import (
 )
 
 func init() {
+	if os.Getenv("GOAI_LIVE_TESTS") != "1" {
+		return
+	}
 	// Load .env file if it exists
 	loadEnvFile(".env")
 	loadEnvFile("../.env") // Also check parent directory

@@ -33,15 +33,16 @@ func TestCoreEmptyStreamFailure(t *testing.T) {
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					attempts, ended := 0, false
-					model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{DoStreamFunc: func(context.Context, *stream.CallOptions) (<-chan stream.Event, error) {
-						attempts++
-						ch := make(chan stream.Event, len(tc.events))
-						for _, event := range tc.events {
-							ch <- event
-						}
-						close(ch)
-						return ch, nil
-					}})
+					model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+						Stream: func(context.Context, *stream.CallOptions) (<-chan stream.Event, error) {
+							attempts++
+							ch := make(chan stream.Event, len(tc.events))
+							for _, event := range tc.events {
+								ch <- event
+							}
+							close(ch)
+							return ch, nil
+						}})
 					input := stream.Input{Model: model, OnEnd: func(stream.OnEndData) { ended = true }}
 					var err error
 					if streaming {
@@ -75,57 +76,58 @@ func TestCoreProviderReplayOrder(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			calls := 0
 			metadata := map[string]any{"anthropic": map[string]any{"rawBlock": json.RawMessage(`{"type":"web_search_tool_result","tool_use_id":"hosted","content":[]}`)}}
-			model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{DoStreamFunc: func(_ context.Context, opts *stream.CallOptions) (<-chan stream.Event, error) {
-				calls++
-				var events []stream.Event
-				if calls == 1 {
-					events = []stream.Event{
-						{Type: stream.EventTextDelta, Data: stream.TextDeltaEvent{Text: "Before"}},
-						{Type: stream.EventToolCall, Data: stream.ToolCallEvent{ToolCallID: "hosted", ToolName: "search", Input: json.RawMessage(`{}`), ProviderExecuted: true}},
-						{Type: stream.EventToolResult, Data: stream.ToolResultEvent{ToolCallID: "hosted", ToolName: "search", Output: message.JSONOutput{Value: []any{}}, ProviderExecuted: true, ProviderMetadata: metadata}},
-						{Type: stream.EventTextDelta, Data: stream.TextDeltaEvent{Text: "After"}},
-						{Type: stream.EventToolCall, Data: stream.ToolCallEvent{ToolCallID: "local", ToolName: "local", Input: json.RawMessage(`{}`)}},
-						{Type: stream.EventFinish, Data: stream.FinishEvent{FinishReason: stream.FinishReasonToolCalls}},
-					}
-				} else {
-					// Exercise persistence as well as the next-request conversion.
-					raw, err := json.Marshal(opts.Messages)
-					if err != nil {
-						return nil, err
-					}
-					var messages []message.Message
-					if err := json.Unmarshal(raw, &messages); err != nil {
-						return nil, err
-					}
-					body, _, _, err := anthropic.BuildRequestBody(anthropic.Config{}, "claude-sonnet-4-6", &stream.CallOptions{Messages: messages})
-					if err != nil {
-						return nil, err
-					}
-					var wire struct {
-						Messages []struct {
-							Content []struct{ Type, Text string }
+			model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+				Stream: func(_ context.Context, opts *stream.CallOptions) (<-chan stream.Event, error) {
+					calls++
+					var events []stream.Event
+					if calls == 1 {
+						events = []stream.Event{
+							{Type: stream.EventTextDelta, Data: stream.TextDeltaEvent{Text: "Before"}},
+							{Type: stream.EventToolCall, Data: stream.ToolCallEvent{ToolCallID: "hosted", ToolName: "search", Input: json.RawMessage(`{}`), ProviderExecuted: true}},
+							{Type: stream.EventToolResult, Data: stream.ToolResultEvent{ToolCallID: "hosted", ToolName: "search", Output: message.JSONOutput{Value: []any{}}, ProviderExecuted: true, ProviderMetadata: metadata}},
+							{Type: stream.EventTextDelta, Data: stream.TextDeltaEvent{Text: "After"}},
+							{Type: stream.EventToolCall, Data: stream.ToolCallEvent{ToolCallID: "local", ToolName: "local", Input: json.RawMessage(`{}`)}},
+							{Type: stream.EventFinish, Data: stream.FinishEvent{FinishReason: stream.FinishReasonToolCalls}},
 						}
+					} else {
+						// Exercise persistence as well as the next-request conversion.
+						raw, err := json.Marshal(opts.Messages)
+						if err != nil {
+							return nil, err
+						}
+						var messages []message.Message
+						if err := json.Unmarshal(raw, &messages); err != nil {
+							return nil, err
+						}
+						body, _, _, err := anthropic.BuildRequestBody(anthropic.Config{}, "claude-sonnet-4-6", &stream.CallOptions{Messages: messages})
+						if err != nil {
+							return nil, err
+						}
+						var wire struct {
+							Messages []struct {
+								Content []struct{ Type, Text string }
+							}
+						}
+						if err := json.Unmarshal(body, &wire); err != nil {
+							return nil, err
+						}
+						var types []string
+						for _, part := range wire.Messages[1].Content {
+							types = append(types, part.Type+":"+part.Text)
+						}
+						want := []string{"text:Before", "server_tool_use:", "web_search_tool_result:", "text:After", "tool_use:"}
+						if !reflect.DeepEqual(types, want) {
+							t.Errorf("replay order = %v, want %v", types, want)
+						}
+						events = []stream.Event{{Type: stream.EventFinish, Data: stream.FinishEvent{FinishReason: stream.FinishReasonStop}}}
 					}
-					if err := json.Unmarshal(body, &wire); err != nil {
-						return nil, err
+					ch := make(chan stream.Event, len(events))
+					for _, event := range events {
+						ch <- event
 					}
-					var types []string
-					for _, part := range wire.Messages[1].Content {
-						types = append(types, part.Type+":"+part.Text)
-					}
-					want := []string{"text:Before", "server_tool_use:", "web_search_tool_result:", "text:After", "tool_use:"}
-					if !reflect.DeepEqual(types, want) {
-						t.Errorf("replay order = %v, want %v", types, want)
-					}
-					events = []stream.Event{{Type: stream.EventFinish, Data: stream.FinishEvent{FinishReason: stream.FinishReasonStop}}}
-				}
-				ch := make(chan stream.Event, len(events))
-				for _, event := range events {
-					ch <- event
-				}
-				close(ch)
-				return ch, nil
-			}})
+					close(ch)
+					return ch, nil
+				}})
 			input := stream.Input{Model: model, Messages: []message.Message{message.NewUserMessage("search")}, MaxSteps: 2, Tools: tool.Set{
 				"local": Tool("local", "", json.RawMessage(`{}`), func(context.Context, json.RawMessage, tool.CallOptions) (tool.Result, error) {
 					return tool.Result{Output: "done"}, nil
@@ -162,20 +164,21 @@ func TestCoreProviderExecutedTools(t *testing.T) {
 				t.Run(name, func(t *testing.T) {
 					localRuns := 0
 					var step stream.StepResultData
-					model := testutil.NewMockLanguageModel(testutil.MockLanguageModelOptions{DoStreamFunc: func(context.Context, *stream.CallOptions) (<-chan stream.Event, error) {
-						events := []stream.Event{
-							{Type: stream.EventToolCall, Data: stream.ToolCallEvent{ToolCallID: "hosted", ToolName: "search", Input: json.RawMessage(`{}`), ProviderExecuted: true, ProviderMetadata: map[string]any{"itemId": "remote"}}},
-							{Type: stream.EventToolResult, Data: stream.ToolResultEvent{ToolCallID: "hosted", ToolName: "search", Output: message.JSONOutput{Value: map[string]any{"found": true}}, ProviderExecuted: true, ProviderMetadata: map[string]any{"itemId": "result"}}},
-							{Type: stream.EventToolCall, Data: stream.ToolCallEvent{ToolCallID: "local", ToolName: "local", Input: json.RawMessage(`{}`)}},
-							{Type: stream.EventFinish, Data: stream.FinishEvent{FinishReason: stream.FinishReasonToolCalls, Usage: stream.Usage{InputTokens: stream.InputTokens{Total: stream.IntPtr(-1)}, Raw: map[string]any{"tokens": -1}}}},
-						}
-						ch := make(chan stream.Event, len(events))
-						for _, e := range events {
-							ch <- e
-						}
-						close(ch)
-						return ch, nil
-					}})
+					model := newMockModel(t, testutil.MockConfig{ID: "fixture",
+						Stream: func(context.Context, *stream.CallOptions) (<-chan stream.Event, error) {
+							events := []stream.Event{
+								{Type: stream.EventToolCall, Data: stream.ToolCallEvent{ToolCallID: "hosted", ToolName: "search", Input: json.RawMessage(`{}`), ProviderExecuted: true, ProviderMetadata: map[string]any{"itemId": "remote"}}},
+								{Type: stream.EventToolResult, Data: stream.ToolResultEvent{ToolCallID: "hosted", ToolName: "search", Output: message.JSONOutput{Value: map[string]any{"found": true}}, ProviderExecuted: true, ProviderMetadata: map[string]any{"itemId": "result"}}},
+								{Type: stream.EventToolCall, Data: stream.ToolCallEvent{ToolCallID: "local", ToolName: "local", Input: json.RawMessage(`{}`)}},
+								{Type: stream.EventFinish, Data: stream.FinishEvent{FinishReason: stream.FinishReasonToolCalls, Usage: stream.Usage{InputTokens: stream.InputTokens{Total: stream.IntPtr(-1)}, Raw: map[string]any{"tokens": -1}}}},
+							}
+							ch := make(chan stream.Event, len(events))
+							for _, e := range events {
+								ch <- e
+							}
+							close(ch)
+							return ch, nil
+						}})
 					input := stream.Input{Model: model, ToolCallExecutionMode: mode, Tools: tool.Set{
 						"search": Tool("search", "", json.RawMessage(`{}`), func(context.Context, json.RawMessage, tool.CallOptions) (tool.Result, error) {
 							t.Error("hosted tool executed locally")
