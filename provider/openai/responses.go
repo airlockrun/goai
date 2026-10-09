@@ -163,10 +163,17 @@ func (m *ResponsesModel) buildRequest(options *stream.CallOptions) ([]byte, []st
 		return nil, warnings, errors.New("conversation and previousResponseId are mutually exclusive")
 	}
 
+	converted := convertToResponsesInputWithWarnings(options.Messages, systemMessageMode, opts.PassThroughUnsupportedFiles)
+	if converted.Err != nil {
+		return nil, warnings, converted.Err
+	}
+	for _, warning := range converted.Warnings {
+		warnings = append(warnings, stream.Warning{Type: stream.WarningOther, Message: warning.Message})
+	}
 	req := responsesRequest{
 		Model:              m.id,
 		Stream:             true,
-		Input:              convertToResponsesInput(options.Messages, systemMessageMode, opts.PassThroughUnsupportedFiles),
+		Input:              converted.Input,
 		Conversation:       opts.Conversation,
 		PreviousResponseID: opts.PreviousResponseID,
 		Instructions:       opts.Instructions,

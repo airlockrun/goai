@@ -2,6 +2,7 @@ package openai
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -206,6 +207,17 @@ type responsesContentPart struct {
 	FileData string `json:"file_data,omitempty"`
 }
 
+func (p responsesContentPart) MarshalJSON() ([]byte, error) {
+	if p.Type == "input_text" {
+		return json.Marshal(struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}{Type: p.Type, Text: p.Text})
+	}
+	type wire responsesContentPart
+	return json.Marshal(wire(p))
+}
+
 type responsesOutputText struct {
 	Type string `json:"type"`
 	Text string `json:"text"`
@@ -362,15 +374,11 @@ type ConversionWarning struct {
 	Message string `json:"message"` // Warning message
 }
 
-// ConversionResult contains the converted input and any warnings.
+// ConversionResult contains converted input, warnings, and any content error.
 type ConversionResult struct {
 	Input    []responsesInputItem
 	Warnings []ConversionWarning
-}
-
-func convertToResponsesInput(messages []message.Message, systemMessageMode string, passThroughUnsupportedFiles bool) []responsesInputItem {
-	result := convertToResponsesInputWithWarnings(messages, systemMessageMode, passThroughUnsupportedFiles)
-	return result.Input
+	Err      error
 }
 
 // convertToResponsesInputWithWarnings converts messages to Responses API input format
@@ -560,11 +568,11 @@ func convertToResponsesInputWithWarnings(messages []message.Message, systemMessa
 				})
 			}
 		case message.RoleTool:
-			// ai-sdk puts image/file attachments inside function_call_output.output
-			// as an array of content parts. Collect all parts first, then build outputs.
+			// Content outputs own their ordered attachments. Sibling FileParts
+			// belong to the last tool result in the message.
 			type toolOutput struct {
 				callID string
-				text   string
+				value  any
 			}
 			var toolOutputs []toolOutput
 			var attachments []responsesContentPart
@@ -572,62 +580,61 @@ func convertToResponsesInputWithWarnings(messages []message.Message, systemMessa
 			for _, part := range msg.Content.Parts {
 				switch p := part.(type) {
 				case message.ToolResultPart:
-					toolOutputs = append(toolOutputs, toolOutput{callID: p.ToolCallID, text: message.ToolOutputWire(p.Output)})
+					var value any
+					if content, ok := p.Output.(message.ContentOutput); ok {
+						parts, err := convertResponsesToolContent(content)
+						if err != nil {
+							return ConversionResult{Warnings: warnings, Err: fmt.Errorf("tool result %q (%s): %w", p.ToolCallID, p.ToolName, err)}
+						}
+						value = parts
+					} else {
+						value = message.ToolOutputWire(p.Output)
+					}
+					toolOutputs = append(toolOutputs, toolOutput{callID: p.ToolCallID, value: value})
 				case message.FilePart:
+					item := message.ToolContentItem{MediaType: p.MimeType, Filename: p.Filename, ProviderOptions: p.ProviderOptions}
 					switch d := p.Data.(type) {
 					case message.FileDataBytes:
-						if strings.HasPrefix(p.MimeType, "image/") {
-							attachments = append(attachments, responsesContentPart{
-								Type:     "input_image",
-								ImageURL: "data:" + p.MimeType + ";base64," + d.Data,
-								Detail:   openaiImageDetail(p.ProviderOptions),
-							})
-						} else if p.MimeType == "application/pdf" {
-							filename := p.Filename
-							if filename == "" {
-								filename = "document.pdf"
-							}
-							attachments = append(attachments, responsesContentPart{
-								Type:     "input_file",
-								Filename: filename,
-								FileData: "data:application/pdf;base64," + d.Data,
-							})
+						item.Type, item.Data = "file-data", d.Data
+						if item.MediaType == "application/pdf" && item.Filename == "" {
+							item.Filename = "document.pdf"
 						}
 					case message.FileDataURL:
-						// ai-sdk #bc01093: a URL-bearing file in tool output
-						// becomes an input_file with file_url for any media
-						// type; an image URL becomes an input_image.
-						if strings.HasPrefix(p.MimeType, "image/") {
-							attachments = append(attachments, responsesContentPart{
-								Type:     "input_image",
-								ImageURL: d.URL,
-								Detail:   openaiImageDetail(p.ProviderOptions),
-							})
-						} else {
-							attachments = append(attachments, responsesContentPart{
-								Type:     "input_file",
-								Filename: p.Filename,
-								FileURL:  d.URL,
-							})
-						}
+						item.Type, item.URL = "file-url", d.URL
+					default:
+						return ConversionResult{Warnings: warnings, Err: fmt.Errorf("unsupported tool attachment data type %T", p.Data)}
 					}
-					// FileDataText / FileDataReference have no Responses tool-
-					// output representation; skip.
+					parts, err := convertResponsesToolContent(message.ContentOutput{Value: []message.ToolContentItem{item}})
+					if err != nil {
+						return ConversionResult{Warnings: warnings, Err: fmt.Errorf("tool attachment: %w", err)}
+					}
+					if item.Type == "file-url" && parts[0].Type == "input_file" {
+						parts[0].Filename = p.Filename
+					}
+					attachments = append(attachments, parts...)
+				default:
+					return ConversionResult{Warnings: warnings, Err: fmt.Errorf("unsupported tool message part %T", part)}
 				}
 			}
 
+			if len(attachments) > 0 && len(toolOutputs) == 0 {
+				return ConversionResult{Warnings: warnings, Err: errors.New("tool attachments require a tool result")}
+			}
+
 			for i, to := range toolOutputs {
-				var output any
-				// Attach images/files to the last tool output (matches ai-sdk behavior).
+				output := to.value
 				if i == len(toolOutputs)-1 && len(attachments) > 0 {
 					parts := make([]responsesContentPart, 0, len(attachments)+1)
-					if to.text != "" {
-						parts = append(parts, responsesContentPart{Type: "input_text", Text: to.text})
+					switch value := to.value.(type) {
+					case []responsesContentPart:
+						parts = append(parts, value...)
+					case string:
+						if value != "" {
+							parts = append(parts, responsesContentPart{Type: "input_text", Text: value})
+						}
 					}
 					parts = append(parts, attachments...)
 					output = parts
-				} else {
-					output = to.text
 				}
 				result = append(result, responsesInputItem{
 					Type:   "function_call_output",
@@ -642,6 +649,51 @@ func convertToResponsesInputWithWarnings(messages []message.Message, systemMessa
 		Input:    result,
 		Warnings: warnings,
 	}
+}
+
+// convertResponsesToolContent maps the canonical tool content union to native
+// function_call_output parts. Source: ai-sdk's convertFunctionToolResultOutput
+// in packages/openai/src/responses/convert-to-openai-responses-input.ts.
+// Unsupported variants fail rather than discarding content or sending encoded
+// image/file payloads as text.
+func convertResponsesToolContent(content message.ContentOutput) ([]responsesContentPart, error) {
+	parts := make([]responsesContentPart, 0, len(content.Value))
+	for i, item := range content.Value {
+		part := responsesContentPart{}
+		switch item.Type {
+		case "text":
+			part.Type, part.Text = "input_text", item.Text
+		case "image-data", "file-data":
+			if item.MediaType == "" {
+				return nil, fmt.Errorf("content item %d (%s) requires mediaType", i, item.Type)
+			}
+			if item.Type == "image-data" && !strings.HasPrefix(item.MediaType, "image/") {
+				return nil, fmt.Errorf("content item %d (image-data) requires an image mediaType", i)
+			}
+			data := "data:" + item.MediaType + ";base64," + item.Data
+			if strings.HasPrefix(item.MediaType, "image/") {
+				part.Type, part.ImageURL = "input_image", data
+				part.Detail = openaiImageDetail(item.ProviderOptions)
+			} else {
+				part.Type, part.FileData = "input_file", data
+				part.Filename = item.Filename
+				if part.Filename == "" {
+					part.Filename = "data"
+				}
+			}
+		case "image-url", "file-url":
+			if item.Type == "image-url" || strings.HasPrefix(item.MediaType, "image/") {
+				part.Type, part.ImageURL = "input_image", item.URL
+				part.Detail = openaiImageDetail(item.ProviderOptions)
+			} else {
+				part.Type, part.FileURL = "input_file", item.URL
+			}
+		default:
+			return nil, fmt.Errorf("unsupported tool content item %d type %q", i, item.Type)
+		}
+		parts = append(parts, part)
+	}
+	return parts, nil
 }
 
 func convertToResponsesContentParts(content message.Content, passThroughUnsupportedFiles bool) []responsesContentPart {
