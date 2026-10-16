@@ -60,12 +60,55 @@ func sanitizeJSONSchema(schema json.RawMessage) (json.RawMessage, error) {
 	if err := json.Unmarshal(schema, &any); err != nil {
 		return nil, fmt.Errorf("sanitize schema: %w", err)
 	}
+	if err := rejectDictionarySchema(any, "schema"); err != nil {
+		return nil, err
+	}
 	clean := sanitizeNode(any)
 	out, err := json.Marshal(clean)
 	if err != nil {
 		return nil, fmt.Errorf("sanitize schema: %w", err)
 	}
 	return out, nil
+}
+
+// Structured outputs require closed objects; dictionary constraints cannot be
+// replaced with additionalProperties=false without changing their meaning.
+func rejectDictionarySchema(node any, path string) error {
+	object, ok := node.(map[string]any)
+	if !ok {
+		return nil
+	}
+	if additional, present := object["additionalProperties"]; present {
+		if flag, ok := additional.(bool); !ok || flag {
+			return fmt.Errorf("%s.additionalProperties: Anthropic structured outputs do not support dictionary schemas", path)
+		}
+	}
+	for _, key := range []string{"properties", "$defs", "definitions", "patternProperties"} {
+		children, _ := object[key].(map[string]any)
+		names := make([]string, 0, len(children))
+		for name := range children {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			if err := rejectDictionarySchema(children[name], path+"."+key+"."+name); err != nil {
+				return err
+			}
+		}
+	}
+	for _, key := range []string{"items", "anyOf", "oneOf", "allOf"} {
+		child := object[key]
+		if children, ok := child.([]any); ok {
+			for i, child := range children {
+				if err := rejectDictionarySchema(child, fmt.Sprintf("%s.%s[%d]", path, key, i)); err != nil {
+					return err
+				}
+			}
+		} else if err := rejectDictionarySchema(child, path+"."+key); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // sanitizeNode walks any JSON value, sanitizing object schemas. Booleans

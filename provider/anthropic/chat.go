@@ -800,21 +800,27 @@ func ProcessStream(ctx context.Context, body io.Reader, tools []tool.Tool, event
 	// as text. Tracked per-index so mixed real-tool + synthetic streams work.
 	syntheticJSONIndexes := make(map[int]*toolCallAccumulator)
 	syntheticJSONSeen := false
-	// V3 usage breakdown: collect as individual counts and construct
-	// stream.Usage at emit time. All fields are pointers so "unreported"
-	// stays nil instead of being a zero-valued int.
-	var inputTotal, outputTotal int
-	var inputReported, outputReported bool
-	var cacheReadInputTokens, cacheCreationInputTokens int
-	var outputTokensText, outputTokensReasoning int
+	var reportedUsage anthropicUsageInfo
 	var rawUsage map[string]any
 	var finishReason stream.FinishReason
 	var contextMgmtMetadata any
 	var messageStarted, messageStopped bool
 	activeBlocks := make(map[int]bool)
 	providerCalls := make(map[string]*toolCallAccumulator)
+	failWithError := func(err error) {
+		usage, usageErr := reportedUsage.normalized()
+		if usageErr != nil {
+			err = goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{Message: usageErr.Error(), IsRetryableSet: true})
+		} else {
+			usage.Raw = rawUsage
+			if usage.InputTokens.NoCache != nil || usage.InputTokens.CacheRead != nil || usage.InputTokens.CacheWrite != nil || usage.OutputTokens.Total != nil {
+				events <- stream.Event{Type: stream.EventFinishStep, Data: stream.FinishStepEvent{FinishReason: stream.FinishReasonError, Usage: usage}}
+			}
+		}
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+	}
 	fail := func(detail string) {
-		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{Message: detail, IsRetryableSet: true})}}
+		failWithError(goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{Message: detail, IsRetryableSet: true}))
 	}
 
 	events <- stream.Event{Type: stream.EventStartStep, Data: stream.StartStepEvent{}}
@@ -822,7 +828,7 @@ func ProcessStream(ctx context.Context, body io.Reader, tools []tool.Tool, event
 	for chunk := scanner.Next(); chunk != nil; chunk = scanner.Next() {
 		select {
 		case <-ctx.Done():
-			events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: ctx.Err()}}
+			failWithError(ctx.Err())
 			return
 		default:
 		}
@@ -858,12 +864,18 @@ func ProcessStream(ctx context.Context, body io.Reader, tools []tool.Tool, event
 				return
 			}
 			messageStarted = true
-			if event.Message != nil && event.Message.Usage != nil {
-				u := event.Message.Usage
-				inputTotal = u.InputTokens
-				inputReported = true
-				cacheReadInputTokens = u.CacheReadInputTokens
-				cacheCreationInputTokens = u.CacheCreationInputTokens
+			if event.Message.Usage != nil {
+				reportedUsage.update(event.Message.Usage)
+				var envelope struct {
+					Message struct {
+						Usage map[string]any `json:"usage"`
+					} `json:"message"`
+				}
+				if err := json.Unmarshal([]byte(data), &envelope); err != nil {
+					fail("Malformed Anthropic usage: " + err.Error())
+					return
+				}
+				rawUsage = envelope.Message.Usage
 			}
 
 		case "content_block_start":
@@ -1057,27 +1069,19 @@ func ProcessStream(ctx context.Context, body io.Reader, tools []tool.Tool, event
 				}
 			}
 			if event.Usage != nil {
-				outputTotal = event.Usage.OutputTokens
-				outputReported = true
-				// ai-sdk #b9d105f: cache tokens on streaming, also
-				// #2445da4: outputTokens.text breakdown.
-				if event.Usage.CacheReadInputTokens > 0 {
-					cacheReadInputTokens = event.Usage.CacheReadInputTokens
-				}
-				if event.Usage.CacheCreationInputTokens > 0 {
-					cacheCreationInputTokens = event.Usage.CacheCreationInputTokens
-				}
-				if event.Usage.OutputTokensByType != nil {
-					outputTokensText = event.Usage.OutputTokensByType.Text
-					outputTokensReasoning = event.Usage.OutputTokensByType.Reasoning
-				}
+				reportedUsage.update(event.Usage)
 			}
 			// ai-sdk #8c2b1e1: surface full raw usage so callers can
 			// read any Anthropic-specific fields we don't model yet.
 			if len(event.UsageRaw) > 0 {
 				var raw map[string]any
 				if err := json.Unmarshal(event.UsageRaw, &raw); err == nil {
-					rawUsage = raw
+					if rawUsage == nil {
+						rawUsage = make(map[string]any)
+					}
+					for key, value := range raw {
+						rawUsage[key] = value
+					}
 				}
 			}
 
@@ -1091,7 +1095,7 @@ func ProcessStream(ctx context.Context, body io.Reader, tools []tool.Tool, event
 				} `json:"error"`
 			}
 			_ = json.Unmarshal([]byte(data), &envelope)
-			events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{Message: envelope.Error.Type + ": " + envelope.Error.Message, ResponseBody: data, IsRetryable: envelope.Error.Type == "overloaded_error" || envelope.Error.Type == "api_error" || envelope.Error.Type == "rate_limit_error", IsRetryableSet: true})}}
+			failWithError(goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{Message: envelope.Error.Type + ": " + envelope.Error.Message, ResponseBody: data, IsRetryable: envelope.Error.Type == "overloaded_error" || envelope.Error.Type == "api_error" || envelope.Error.Type == "rate_limit_error", IsRetryableSet: true}))
 			return
 		}
 	}
@@ -1100,7 +1104,7 @@ func ProcessStream(ctx context.Context, body io.Reader, tools []tool.Tool, event
 		if errors.As(scanner.Err(), &apiErr) {
 			err = apiErr
 		}
-		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+		failWithError(err)
 		return
 	}
 	if !messageStarted || !messageStopped || len(activeBlocks) > 0 || len(currentToolCalls) > 0 || len(syntheticJSONIndexes) > 0 {
@@ -1120,35 +1124,14 @@ func ProcessStream(ctx context.Context, body io.Reader, tools []tool.Tool, event
 		finishReason = stream.FinishReasonStop
 	}
 
-	// Assemble v3 Usage: totals + cache breakdown on InputTokens,
-	// text/reasoning split on OutputTokens, raw wire usage on Usage.Raw.
-	var usage stream.Usage
-	if inputReported {
-		usage.InputTokens.Total = stream.IntPtr(inputTotal)
+	usage, err := reportedUsage.normalized()
+	if err != nil {
+		fail(err.Error())
+		return
 	}
-	if outputReported {
-		usage.OutputTokens.Total = stream.IntPtr(outputTotal)
-	}
-	if cacheReadInputTokens > 0 {
-		usage.InputTokens.CacheRead = stream.IntPtr(cacheReadInputTokens)
-	}
-	if cacheCreationInputTokens > 0 {
-		usage.InputTokens.CacheWrite = stream.IntPtr(cacheCreationInputTokens)
-	}
-	if outputTokensText > 0 {
-		usage.OutputTokens.Text = stream.IntPtr(outputTokensText)
-	}
-	if outputTokensReasoning > 0 {
-		usage.OutputTokens.Reasoning = stream.IntPtr(outputTokensReasoning)
-	}
-	if rawUsage != nil {
-		usage.Raw = rawUsage
-	}
+	usage.Raw = rawUsage
 
-	// providerMetadata.anthropic now carries only Anthropic-specific
-	// info that doesn't fit the v3 Usage shape (applied context-
-	// management edits). Cache + text/reasoning + raw usage moved onto
-	// stream.Usage itself.
+	// Provider metadata carries applied context-management edits.
 	var providerMetadata map[string]any
 	if contextMgmtMetadata != nil {
 		providerMetadata = map[string]any{
@@ -1175,6 +1158,63 @@ func ProcessStream(ctx context.Context, body io.Reader, tools []tool.Tool, event
 			ProviderMetadata: providerMetadata,
 		},
 	}
+}
+
+// update replaces cumulative counts only when the provider reports them.
+func (u *anthropicUsageInfo) update(next *anthropicUsageInfo) {
+	if next.InputTokens != nil {
+		u.InputTokens = next.InputTokens
+	}
+	if next.OutputTokens != nil {
+		u.OutputTokens = next.OutputTokens
+	}
+	if next.CacheReadInputTokens != nil {
+		u.CacheReadInputTokens = next.CacheReadInputTokens
+	}
+	if next.CacheCreationInputTokens != nil {
+		u.CacheCreationInputTokens = next.CacheCreationInputTokens
+	}
+	if next.OutputTokensByType != nil {
+		if u.OutputTokensByType == nil {
+			u.OutputTokensByType = &outputTokensByType{}
+		}
+		if next.OutputTokensByType.Text != nil {
+			u.OutputTokensByType.Text = next.OutputTokensByType.Text
+		}
+		if next.OutputTokensByType.Reasoning != nil {
+			u.OutputTokensByType.Reasoning = next.OutputTokensByType.Reasoning
+		}
+	}
+}
+
+func (u anthropicUsageInfo) normalized() (stream.Usage, error) {
+	usage := stream.Usage{
+		InputTokens: stream.InputTokens{
+			NoCache: u.InputTokens, CacheRead: u.CacheReadInputTokens, CacheWrite: u.CacheCreationInputTokens,
+		},
+		OutputTokens: stream.OutputTokens{Total: u.OutputTokens},
+	}
+	if u.OutputTokensByType != nil {
+		usage.OutputTokens.Text = u.OutputTokensByType.Text
+		usage.OutputTokens.Reasoning = u.OutputTokensByType.Reasoning
+	}
+	usage = usage.Normalized()
+	// Anthropic input_tokens excludes cache reads and writes. Missing input
+	// usage cannot establish a total, even when cache counts are available.
+	if usage.InputTokens.NoCache != nil {
+		total := *usage.InputTokens.NoCache
+		maxInt := int(^uint(0) >> 1)
+		for _, count := range []*int{usage.InputTokens.CacheRead, usage.InputTokens.CacheWrite} {
+			if count != nil {
+				if *count > maxInt-total {
+					return stream.Usage{}, errors.New("Anthropic input token usage overflows int")
+				}
+				total += *count
+			}
+		}
+		usage.InputTokens.Total = stream.IntPtr(total)
+	}
+	return usage, nil
 }
 
 // mapAppliedContextEdits converts the wire-format applied_edits into the

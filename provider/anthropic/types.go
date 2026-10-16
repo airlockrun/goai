@@ -343,18 +343,18 @@ type anthropicMessageStart struct {
 // downstream consumers see exactly what Anthropic returned
 // (ai-sdk PRs #b9d105f, #2445da4, #8c2b1e1).
 type anthropicUsageInfo struct {
-	InputTokens              int                 `json:"input_tokens"`
-	OutputTokens             int                 `json:"output_tokens"`
-	CacheCreationInputTokens int                 `json:"cache_creation_input_tokens,omitempty"`
-	CacheReadInputTokens     int                 `json:"cache_read_input_tokens,omitempty"`
+	InputTokens              *int                `json:"input_tokens"`
+	OutputTokens             *int                `json:"output_tokens"`
+	CacheCreationInputTokens *int                `json:"cache_creation_input_tokens,omitempty"`
+	CacheReadInputTokens     *int                `json:"cache_read_input_tokens,omitempty"`
 	OutputTokensByType       *outputTokensByType `json:"output_tokens_by_type,omitempty"`
 }
 
 // outputTokensByType breaks OutputTokens down by text vs reasoning so
 // callers can surface `outputTokens.text` (ai-sdk #2445da4).
 type outputTokensByType struct {
-	Text      int `json:"text,omitempty"`
-	Reasoning int `json:"reasoning,omitempty"`
+	Text      *int `json:"text,omitempty"`
+	Reasoning *int `json:"reasoning,omitempty"`
 }
 
 type anthropicContentBlockStart struct {
@@ -395,13 +395,7 @@ type anthropicDelta struct {
 	ContextManagement *anthropicContextAppliedEdits `json:"context_management,omitempty"`
 }
 
-type anthropicUsageDelta struct {
-	InputTokens              int                 `json:"input_tokens,omitempty"`
-	OutputTokens             int                 `json:"output_tokens"`
-	CacheCreationInputTokens int                 `json:"cache_creation_input_tokens,omitempty"`
-	CacheReadInputTokens     int                 `json:"cache_read_input_tokens,omitempty"`
-	OutputTokensByType       *outputTokensByType `json:"output_tokens_by_type,omitempty"`
-}
+type anthropicUsageDelta = anthropicUsageInfo
 
 // Conversion functions
 

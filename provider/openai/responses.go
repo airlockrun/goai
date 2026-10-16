@@ -385,6 +385,13 @@ func (m *ResponsesModel) buildRequest(options *stream.CallOptions) ([]byte, []st
 
 	// Add tools (already ordered by core)
 	if len(options.Tools) > 0 {
+		for _, t := range options.Tools {
+			if !t.IsProviderTool() {
+				if err := validateResponsesIntegerBounds(t.InputSchema); err != nil {
+					return nil, warnings, fmt.Errorf("openai responses: tool %q: %w", t.Name, err)
+				}
+			}
+		}
 		tools, toolWarnings := convertToResponsesToolsWithWarnings(options.Tools, strictJsonSchema)
 		req.Tools = tools
 		warnings = append(warnings, toolWarnings...)

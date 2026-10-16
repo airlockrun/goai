@@ -2,8 +2,11 @@
 package schema
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math/big"
 	"reflect"
 	"sort"
 	"sync"
@@ -48,6 +51,10 @@ type Schema struct {
 	// AdditionalProperties controls additional properties (for object types).
 	AdditionalProperties *bool `json:"additionalProperties,omitempty"`
 
+	// AdditionalPropertiesSchema constrains dictionary values. It is mutually
+	// exclusive with AdditionalProperties and serializes as additionalProperties.
+	AdditionalPropertiesSchema *Schema `json:"-"`
+
 	// Items is the schema for array items (for array types).
 	Items *Schema `json:"items,omitempty"`
 
@@ -77,6 +84,11 @@ type Schema struct {
 
 	// Maximum is the maximum numeric value.
 	Maximum *float64 `json:"maximum,omitempty"`
+
+	// Numeric struct tags retain their JSON representation independently of
+	// the float64 fields used by programmatically constructed schemas.
+	minimumTag json.Number
+	maximumTag json.Number
 
 	// ExclusiveMinimum is the exclusive minimum numeric value.
 	ExclusiveMinimum *float64 `json:"exclusiveMinimum,omitempty"`
@@ -123,6 +135,9 @@ type Schema struct {
 // always have a "properties" field (even if empty), as required by OpenAI.
 // Uses ordered map to ensure $schema comes first.
 func (s *Schema) MarshalJSON() ([]byte, error) {
+	if s.AdditionalProperties != nil && s.AdditionalPropertiesSchema != nil {
+		return nil, errors.New("additionalProperties cannot have both a boolean and a schema")
+	}
 	m := make(map[string]any)
 
 	// $schema should come first (handled by ordered output below)
@@ -155,6 +170,8 @@ func (s *Schema) MarshalJSON() ([]byte, error) {
 	}
 	if s.AdditionalProperties != nil {
 		m["additionalProperties"] = *s.AdditionalProperties
+	} else if s.AdditionalPropertiesSchema != nil {
+		m["additionalProperties"] = s.AdditionalPropertiesSchema
 	}
 	if s.Items != nil {
 		m["items"] = s.Items
@@ -182,9 +199,13 @@ func (s *Schema) MarshalJSON() ([]byte, error) {
 	}
 	if s.Minimum != nil {
 		m["minimum"] = *s.Minimum
+	} else if s.minimumTag != "" {
+		m["minimum"] = s.minimumTag
 	}
 	if s.Maximum != nil {
 		m["maximum"] = *s.Maximum
+	} else if s.maximumTag != "" {
+		m["maximum"] = s.maximumTag
 	}
 	if s.ExclusiveMinimum != nil {
 		m["exclusiveMinimum"] = *s.ExclusiveMinimum
@@ -227,6 +248,33 @@ func (s *Schema) MarshalJSON() ([]byte, error) {
 	}
 
 	return json.Marshal(m)
+}
+
+// UnmarshalJSON accepts boolean and schema-valued additionalProperties.
+func (s *Schema) UnmarshalJSON(data []byte) error {
+	type plain Schema
+	var decoded plain
+	wire := struct {
+		*plain
+		Additional json.RawMessage `json:"additionalProperties"`
+	}{plain: &decoded}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if len(wire.Additional) > 0 && !bytes.Equal(bytes.TrimSpace(wire.Additional), []byte("null")) {
+		var flag bool
+		if err := json.Unmarshal(wire.Additional, &flag); err == nil {
+			decoded.AdditionalProperties = &flag
+		} else {
+			var value Schema
+			if err := json.Unmarshal(wire.Additional, &value); err != nil {
+				return fmt.Errorf("additionalProperties: %w", err)
+			}
+			decoded.AdditionalPropertiesSchema = &value
+		}
+	}
+	*s = Schema(decoded)
+	return nil
 }
 
 // JSON returns the schema as a JSON-encoded byte slice.
@@ -326,6 +374,7 @@ const DefaultSchemaURI = "https://json-schema.org/draft/2020-12/schema"
 
 // FromType generates a JSON Schema from a Go type.
 // Supports basic types, structs, slices, and maps.
+// Numeric fields accept minimum and maximum tags containing JSON numbers.
 // Adds $schema URI to root object schemas.
 func FromType(v any) (*Schema, error) {
 	s, err := fromReflectType(reflect.TypeOf(v))
@@ -409,11 +458,13 @@ func fromReflectKind(t reflect.Type) (*Schema, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &Schema{
-			Type:                 "object",
-			AdditionalProperties: nil, // Allow additional properties
-			Items:                valueSchema,
-		}, nil
+		result := &Schema{Type: "object", AdditionalPropertiesSchema: valueSchema}
+		if reflect.DeepEqual(valueSchema, &Schema{}) {
+			allow := true
+			result.AdditionalProperties = &allow
+			result.AdditionalPropertiesSchema = nil
+		}
+		return result, nil
 
 	case reflect.Struct:
 		return fromStructType(t)
@@ -467,6 +518,9 @@ func fromStructType(t reflect.Type) (*Schema, error) {
 		if desc := field.Tag.Get("description"); desc != "" {
 			fieldSchema.Description = desc
 		}
+		if err := numericFieldTags(fieldSchema, field); err != nil {
+			return nil, fmt.Errorf("field %s: %w", field.Name, err)
+		}
 
 		// Add enum from tag (comma-separated values)
 		if enumTag := field.Tag.Get("enum"); enumTag != "" {
@@ -517,6 +571,52 @@ func containsOmitempty(tag string) bool {
 	return false
 }
 
+func numericFieldTags(s *Schema, field reflect.StructField) error {
+	for _, entry := range []struct {
+		key    string
+		target *json.Number
+	}{{"minimum", &s.minimumTag}, {"maximum", &s.maximumTag}} {
+		raw, present := field.Tag.Lookup(entry.key)
+		if !present {
+			continue
+		}
+		t := field.Type
+		for t.Kind() == reflect.Pointer {
+			t = t.Elem()
+		}
+		switch t.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Float32, reflect.Float64:
+		default:
+			return fmt.Errorf("%s requires a numeric field", entry.key)
+		}
+		if !json.Valid([]byte(raw)) {
+			return fmt.Errorf("%s must be a JSON number", entry.key)
+		}
+		var v any
+		d := json.NewDecoder(bytes.NewReader([]byte(raw)))
+		d.UseNumber()
+		if err := d.Decode(&v); err != nil {
+			return err
+		}
+		n, ok := v.(json.Number)
+		if !ok {
+			return fmt.Errorf("%s must be a JSON number", entry.key)
+		}
+		if _, ok := new(big.Rat).SetString(string(n)); !ok {
+			return fmt.Errorf("%s cannot be represented as an exact numeric bound", entry.key)
+		}
+		*entry.target = n
+	}
+	if s.minimumTag != "" && s.maximumTag != "" {
+		lo, _ := new(big.Rat).SetString(string(s.minimumTag))
+		hi, _ := new(big.Rat).SetString(string(s.maximumTag))
+		if lo.Cmp(hi) > 0 {
+			return fmt.Errorf("minimum exceeds maximum")
+		}
+	}
+	return nil
+}
+
 func splitTag(tag string) []string {
 	var parts []string
 	start := 0
@@ -534,9 +634,9 @@ func splitTag(tag string) []string {
 	return parts
 }
 
-// ToStrict modifies a schema to be compatible with strict mode:
-// 1. Adds "additionalProperties": false to all object types
-// 2. Ensures all properties are listed in "required"
+// ToStrict normalizes fixed objects for strict mode and requires all properties.
+// Explicit dictionary schemas remain open; providers may reject dictionaries
+// in their strict JSON Schema subset.
 func ToStrict(s *Schema) *Schema {
 	if s == nil {
 		return nil
@@ -546,8 +646,13 @@ func ToStrict(s *Schema) *Schema {
 	result := *s
 
 	if result.Type == "object" {
-		additionalProperties := false
-		result.AdditionalProperties = &additionalProperties
+		if result.AdditionalProperties == nil && result.AdditionalPropertiesSchema == nil {
+			additionalProperties := false
+			result.AdditionalProperties = &additionalProperties
+		}
+		if result.AdditionalPropertiesSchema != nil {
+			result.AdditionalPropertiesSchema = ToStrict(result.AdditionalPropertiesSchema)
+		}
 
 		if result.Properties != nil {
 			// Ensure all properties are required (sorted for deterministic output)
@@ -590,6 +695,12 @@ func ToStrict(s *Schema) *Schema {
 			newAllOf[i] = ToStrict(sub)
 		}
 		result.AllOf = newAllOf
+	}
+	if result.Definitions != nil {
+		result.Definitions = make(map[string]*Schema, len(s.Definitions))
+		for name, definition := range s.Definitions {
+			result.Definitions[name] = ToStrict(definition)
+		}
 	}
 
 	return &result
