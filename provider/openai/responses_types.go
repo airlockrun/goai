@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -875,7 +876,9 @@ func ensureStrictSchema(schema json.RawMessage) json.RawMessage {
 	}
 
 	var obj map[string]any
-	if err := json.Unmarshal(schema, &obj); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(schema))
+	decoder.UseNumber()
+	if err := decoder.Decode(&obj); err != nil {
 		return schema
 	}
 
@@ -897,6 +900,9 @@ func processSchemaObject(obj map[string]any) {
 	if schemaType == "object" {
 		if _, hasAdditionalProps := obj["additionalProperties"]; !hasAdditionalProps {
 			obj["additionalProperties"] = false
+		}
+		if values, ok := obj["additionalProperties"].(map[string]any); ok {
+			processSchemaObject(values)
 		}
 
 		// Ensure all properties are in required (preserving existing order, adding missing ones)

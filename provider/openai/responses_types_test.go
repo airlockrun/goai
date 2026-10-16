@@ -6,7 +6,91 @@ import (
 	"testing"
 
 	"github.com/airlockrun/goai/message"
+	"github.com/airlockrun/goai/schema"
+	"github.com/airlockrun/goai/stream"
+	"github.com/airlockrun/goai/tool"
 )
+
+func TestResponsesRequestPreservesDictionarySchemas(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		input *schema.Schema
+	}{
+		{"typed", schema.MustFromType(map[string]int{})},
+		{"unconstrained", schema.MustFromType(map[string]any{})},
+		{"nested", schema.MustFromType(map[string]map[string]*int{})},
+		{"struct", schema.MustFromType(map[string]struct {
+			Count int `json:"count"`
+		}{})},
+		{"reference", &schema.Schema{Type: "object", AdditionalPropertiesSchema: &schema.Schema{Ref: "#/$defs/value"}, Definitions: map[string]*schema.Schema{"value": schema.Integer()}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, strict := range []bool{false, true} {
+				raw := tc.input.MustJSON()
+				body, _, err := (&ResponsesModel{id: "test"}).buildRequest(&stream.CallOptions{
+					Tools:           []tool.Tool{{Name: "dictionary", InputSchema: raw}},
+					ProviderOptions: map[string]any{"strictJsonSchema": strict},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var request struct {
+					Tools []struct {
+						Parameters map[string]any `json:"parameters"`
+						Strict     bool           `json:"strict"`
+					} `json:"tools"`
+				}
+				if err := json.Unmarshal(body, &request); err != nil {
+					t.Fatal(err)
+				}
+				var original map[string]any
+				if err := json.Unmarshal(raw, &original); err != nil {
+					t.Fatal(err)
+				}
+				if len(request.Tools) != 1 || request.Tools[0].Strict != strict {
+					t.Fatalf("unexpected tools: %s", body)
+				}
+				got := request.Tools[0].Parameters
+				// Empty required lists do not constrain dictionaries.
+				var omitEmptyRequired func(any)
+				omitEmptyRequired = func(value any) {
+					switch node := value.(type) {
+					case map[string]any:
+						if required, ok := node["required"].([]any); ok && len(required) == 0 {
+							delete(node, "required")
+						}
+						for _, child := range node {
+							omitEmptyRequired(child)
+						}
+					case []any:
+						for _, child := range node {
+							omitEmptyRequired(child)
+						}
+					}
+				}
+				omitEmptyRequired(got)
+				if !reflect.DeepEqual(got["additionalProperties"], original["additionalProperties"]) || !reflect.DeepEqual(got["$defs"], original["$defs"]) {
+					t.Fatalf("strict=%v dictionary changed: %s", strict, body)
+				}
+				if _, present := got["items"]; present {
+					t.Fatalf("dictionary has items: %s", body)
+				}
+			}
+		})
+	}
+}
+
+func TestEnsureStrictSchemaDictionaryValues(t *testing.T) {
+	raw := ensureStrictSchema(json.RawMessage(`{"type":"object","additionalProperties":{"type":"object","properties":{"count":{"type":"integer"}}}}`))
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	values, ok := got["additionalProperties"].(map[string]any)
+	if !ok || values["additionalProperties"] != false || !reflect.DeepEqual(values["required"], []any{"count"}) {
+		t.Fatalf("unexpected dictionary value normalization: %s", raw)
+	}
+}
 
 func convertToResponsesInput(messages []message.Message, systemMessageMode string, passThroughUnsupportedFiles bool) []responsesInputItem {
 	result := convertToResponsesInputWithWarnings(messages, systemMessageMode, passThroughUnsupportedFiles)

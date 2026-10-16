@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,11 +12,152 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/airlockrun/goai"
 	goaierrors "github.com/airlockrun/goai/errors"
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/stream"
+	"github.com/airlockrun/goai/testutil"
 	"github.com/airlockrun/goai/tool"
 )
+
+func TestAnthropicUsageNormalization(t *testing.T) {
+	maxInt := int(^uint(0) >> 1)
+	for _, tc := range []struct {
+		name    string
+		start   string
+		deltas  []string
+		want    stream.Usage
+		wantErr string
+	}{
+		{"cached", testutil.AnthropicCachedInputUsageJSON, []string{`{"output_tokens":42,"output_tokens_by_type":{"text":40,"reasoning":2}}`}, stream.Usage{InputTokens: stream.InputTokens{Total: stream.IntPtr(200), NoCache: stream.IntPtr(100), CacheRead: stream.IntPtr(80), CacheWrite: stream.IntPtr(20)}, OutputTokens: stream.OutputTokens{Total: stream.IntPtr(42), Text: stream.IntPtr(40), Reasoning: stream.IntPtr(2)}}, ""},
+		{"omitted cache", `{"input_tokens":100}`, []string{`{"output_tokens":42}`}, stream.Usage{InputTokens: stream.InputTokens{Total: stream.IntPtr(100), NoCache: stream.IntPtr(100)}, OutputTokens: stream.OutputTokens{Total: stream.IntPtr(42)}}, ""},
+		{"zero cache", `{"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0}`, nil, stream.Usage{InputTokens: stream.InputTokens{Total: stream.IntPtr(0), NoCache: stream.IntPtr(0), CacheRead: stream.IntPtr(0), CacheWrite: stream.IntPtr(0)}, OutputTokens: stream.OutputTokens{Total: stream.IntPtr(0)}}, ""},
+		{"cumulative updates", `{"input_tokens":100,"cache_read_input_tokens":80,"cache_creation_input_tokens":20,"output_tokens":1}`, []string{`{"input_tokens":110,"cache_read_input_tokens":90,"output_tokens":21}`, `{"cache_creation_input_tokens":30,"output_tokens":42}`, `{}`}, stream.Usage{InputTokens: stream.InputTokens{Total: stream.IntPtr(230), NoCache: stream.IntPtr(110), CacheRead: stream.IntPtr(90), CacheWrite: stream.IntPtr(30)}, OutputTokens: stream.OutputTokens{Total: stream.IntPtr(42)}}, ""},
+		{"reset cache", `{"input_tokens":100,"cache_read_input_tokens":80,"cache_creation_input_tokens":20}`, []string{`{"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":42}`, `{}`}, stream.Usage{InputTokens: stream.InputTokens{Total: stream.IntPtr(100), NoCache: stream.IntPtr(100), CacheRead: stream.IntPtr(0), CacheWrite: stream.IntPtr(0)}, OutputTokens: stream.OutputTokens{Total: stream.IntPtr(42)}}, ""},
+		{"missing input", `{"cache_read_input_tokens":80,"cache_creation_input_tokens":20}`, []string{`{"output_tokens":42}`}, stream.Usage{InputTokens: stream.InputTokens{CacheRead: stream.IntPtr(80), CacheWrite: stream.IntPtr(20)}, OutputTokens: stream.OutputTokens{Total: stream.IntPtr(42)}}, ""},
+		{"missing output", `{"input_tokens":100}`, []string{`{}`}, stream.Usage{InputTokens: stream.InputTokens{Total: stream.IntPtr(100), NoCache: stream.IntPtr(100)}}, ""},
+		{"unknown", `{}`, []string{`{}`}, stream.Usage{}, ""},
+		{"negative normalization", `{"input_tokens":-100,"cache_read_input_tokens":80,"cache_creation_input_tokens":20,"output_tokens":-42}`, nil, stream.Usage{InputTokens: stream.InputTokens{Total: stream.IntPtr(100), NoCache: stream.IntPtr(0), CacheRead: stream.IntPtr(80), CacheWrite: stream.IntPtr(20)}, OutputTokens: stream.OutputTokens{Total: stream.IntPtr(0)}}, ""},
+		{"overflow read", fmt.Sprintf(`{"input_tokens":%d,"cache_read_input_tokens":1}`, maxInt), nil, stream.Usage{}, "Anthropic input token usage overflows int"},
+		{"overflow write", fmt.Sprintf(`{"input_tokens":%d,"cache_creation_input_tokens":1}`, maxInt), nil, stream.Usage{}, "Anthropic input token usage overflows int"},
+		{"maximum", fmt.Sprintf(`{"input_tokens":%d,"cache_read_input_tokens":1}`, maxInt-1), nil, stream.Usage{InputTokens: stream.InputTokens{Total: stream.IntPtr(maxInt), NoCache: stream.IntPtr(maxInt - 1), CacheRead: stream.IntPtr(1)}}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wire := "data: {\"type\":\"message_start\",\"message\":{\"usage\":" + tc.start + "}}\n\n"
+			for _, delta := range tc.deltas {
+				wire += "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":" + delta + "}\n\n"
+			}
+			wire += "data: {\"type\":\"message_stop\"}\n\n"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, wire)
+			}))
+			defer server.Close()
+			m := createTestProvider(server.URL).Model("claude-test")
+			for _, mode := range []string{"GenerateText", "StreamText"} {
+				t.Run(mode, func(t *testing.T) {
+					input := stream.Input{Model: m, Messages: []message.Message{message.NewUserMessage("hello")}}
+					var usage stream.Usage
+					var err error
+					if mode == "GenerateText" {
+						var result *goai.GenerateTextResult
+						result, err = goai.GenerateText(t.Context(), input)
+						if result != nil {
+							usage = result.Usage
+						}
+					} else {
+						var result *stream.Result
+						result, err = goai.StreamText(t.Context(), input)
+						if err == nil {
+							usage, err = result.Usage()
+						}
+					}
+					if tc.wantErr != "" {
+						if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+							t.Fatalf("error = %v, want %q", err, tc.wantErr)
+						}
+						return
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					got, _ := json.Marshal(usage)
+					want, _ := json.Marshal(tc.want)
+					if string(got) != string(want) {
+						t.Fatalf("usage = %s, want %s", got, want)
+					}
+					if tc.name == "cached" && (usage.InputTotal() != 200 || usage.OutputTotal() != 42 || usage.GrandTotal() != 242) {
+						t.Fatalf("totals = %+v", usage)
+					}
+				})
+			}
+			// Provider finishes retain raw fields from the initial message and deltas.
+			events := make(chan stream.Event, 30)
+			ProcessStream(t.Context(), strings.NewReader(wire), nil, events, false, false)
+			close(events)
+			for event := range events {
+				if finish, ok := event.Data.(stream.FinishEvent); ok && tc.name == "cached" {
+					if finish.Usage.Raw["cache_creation"] == nil || finish.Usage.Raw["input_tokens"] != float64(100) {
+						t.Fatalf("raw usage = %+v", finish.Usage.Raw)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestAnthropicPartialUsageOnError(t *testing.T) {
+	for _, ending := range []string{
+		`data: {"type":"error","error":{"type":"api_error","message":"failed"}}` + "\n\n",
+		"",
+	} {
+		t.Run(map[bool]string{true: "provider error", false: "incomplete stream"}[ending != ""], func(t *testing.T) {
+			wire := `data: {"type":"message_start","message":{"usage":` + testutil.AnthropicCachedInputUsageJSON + `}}` + "\n\n" +
+				`data: {"type":"message_delta","delta":{},"usage":{"output_tokens":42}}` + "\n\n" + ending
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, wire)
+			}))
+			defer server.Close()
+			result, err := goai.StreamText(t.Context(), stream.Input{Model: createTestProvider(server.URL).Model("claude-test"), Messages: []message.Message{message.NewUserMessage("hello")}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			usage, err := result.Usage()
+			if err == nil || usage.InputTotal() != 200 || usage.OutputTotal() != 42 || usage.GrandTotal() != 242 {
+				t.Fatalf("usage = %+v, error = %v", usage, err)
+			}
+		})
+	}
+}
+
+func TestAnthropicUsageRequestIsolation(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		usage := testutil.AnthropicCachedInputUsageJSON
+		if calls.Add(1) > 1 {
+			usage = `{"input_tokens":1}`
+		}
+		_, _ = io.WriteString(w, `data: {"type":"message_start","message":{"usage":`+usage+`}}`+"\n\n"+
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}`+"\n\n"+
+			`data: {"type":"message_stop"}`+"\n\n")
+	}))
+	defer server.Close()
+	m := createTestProvider(server.URL).Model("claude-test")
+	for _, wantInput := range []int{200, 1} {
+		result, err := goai.GenerateText(t.Context(), stream.Input{Model: m, Messages: []message.Message{message.NewUserMessage("hello")}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Usage.InputTotal() != wantInput || result.Usage.GrandTotal() != wantInput+42 {
+			t.Fatalf("usage = %+v, want input %d", result.Usage, wantInput)
+		}
+		if wantInput == 1 && (result.Usage.InputTokens.CacheRead != nil || result.Usage.InputTokens.CacheWrite != nil) {
+			t.Fatalf("cache counts leaked between requests: %+v", result.Usage)
+		}
+	}
+}
 
 type failingStreamReader struct {
 	data string
@@ -115,8 +257,11 @@ func TestAnthropicStreamValidation(t *testing.T) {
 				if d, ok := e.Data.(stream.ErrorEvent); ok {
 					got = d.Error
 				}
-				if e.Type == stream.EventFinish || e.Type == stream.EventFinishStep {
+				if e.Type == stream.EventFinish {
 					t.Fatal("false finish")
+				}
+				if step, ok := e.Data.(stream.FinishStepEvent); ok && (step.FinishReason != stream.FinishReasonError || step.Usage.InputTotal() != 1) {
+					t.Fatalf("partial usage = %+v", step)
 				}
 			}
 			var apiErr *goaierrors.APICallError

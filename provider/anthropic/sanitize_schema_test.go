@@ -56,6 +56,22 @@ func TestSanitizeJSONSchema_ForcesAdditionalPropertiesFalse(t *testing.T) {
 	}
 }
 
+func TestSanitizeJSONSchema_RejectsDictionaries(t *testing.T) {
+	for _, tc := range []struct{ schema, path string }{
+		{`{"type":"object","additionalProperties":{"type":"integer"}}`, "schema.additionalProperties"},
+		{`{"type":"object","properties":{"values":{"type":"object","additionalProperties":true}}}`, "schema.properties.values.additionalProperties"},
+		{`{"anyOf":[{"type":"array","items":{"type":"object","additionalProperties":{"$ref":"#/$defs/value"}}}]}`, "schema.anyOf[0].items.additionalProperties"},
+		{`{"$defs":{"values":{"type":"object","additionalProperties":true}}}`, "schema.$defs.values.additionalProperties"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			out, err := sanitizeJSONSchema(json.RawMessage(tc.schema))
+			if err == nil || !strings.Contains(err.Error(), tc.path) || out != nil {
+				t.Fatalf("out=%s err=%v; want dictionary capability error at %s", out, err, tc.path)
+			}
+		})
+	}
+}
+
 func TestSanitizeJSONSchema_PreservesSupportedFormat(t *testing.T) {
 	in := json.RawMessage(`{"type":"string","format":"email"}`)
 	out, _ := sanitizeJSONSchema(in)

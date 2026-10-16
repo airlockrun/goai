@@ -1,9 +1,197 @@
 package schema
 
 import (
+	"bytes"
 	"encoding/json"
+	"reflect"
 	"testing"
+
+	"github.com/google/jsonschema-go/jsonschema"
 )
+
+func TestFromTypeMaps(t *testing.T) {
+	type stringKey string
+	type entry struct {
+		Count int `json:"count"`
+	}
+	for _, tc := range []struct {
+		name    string
+		value   any
+		valid   string
+		invalid string
+	}{
+		{"string", map[string]string{}, `{"key":"value"}`, `{"key":1}`},
+		{"integer", map[string]int{}, `{"key":1}`, `{"key":"1"}`},
+		{"named string key", map[stringKey]int{}, `{"key":1}`, `{"key":"1"}`},
+		{"fixed parent", struct {
+			Values map[string]int `json:"values"`
+		}{}, `{"values":{"key":1}}`, `{"values":{"key":1},"extra":2}`},
+		{"boolean", map[string]bool{}, `{"key":true}`, `{"key":"true"}`},
+		{"number", map[string]float64{}, `{"key":1.5}`, `{"key":"1.5"}`},
+		{"struct", map[string]entry{}, `{"key":{"count":1}}`, `{"key":{"count":1,"extra":2}}`},
+		{"nested", map[string]map[string]int{}, `{"key":{"nested":1}}`, `{"key":{"nested":"1"}}`},
+		{"slice", map[string][]int{}, `{"key":[1,2]}`, `{"key":["1"]}`},
+		{"nullable value", map[string]*entry{}, `{"key":null,"other":{"count":1}}`, `{"key":{"count":"1"}}`},
+		{"pointer map", new(map[string]int), `null`, `{"key":"1"}`},
+		{"slice of maps", []map[string]int{}, `[{"key":1}]`, `[{"key":"1"}]`},
+		{"any", map[string]any{}, `{"key":[null,1,"text",{"nested":true}]}`, ``},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			generated := MustFromType(tc.value)
+			for _, strict := range []bool{false, true} {
+				s := generated
+				if strict {
+					s = ToStrict(s)
+				}
+				raw := s.MustJSON()
+				var standard jsonschema.Schema
+				if err := json.Unmarshal(raw, &standard); err != nil {
+					t.Fatal(err)
+				}
+				resolved, err := standard.Resolve(nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, sample := range []struct {
+					data string
+					ok   bool
+				}{{tc.valid, true}, {tc.invalid, false}} {
+					if sample.data == "" {
+						continue
+					}
+					var value any
+					if err := json.Unmarshal([]byte(sample.data), &value); err != nil {
+						t.Fatal(err)
+					}
+					if err := resolved.Validate(value); (err == nil) != sample.ok {
+						t.Fatalf("strict=%v validate %s: %v; schema=%s", strict, sample.data, err, raw)
+					}
+				}
+				var roundTrip Schema
+				if err := json.Unmarshal(raw, &roundTrip); err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(raw, roundTrip.MustJSON()) {
+					t.Fatalf("schema changed during round trip: %s -> %s", raw, roundTrip.MustJSON())
+				}
+			}
+			mapSchema := generated
+			if len(mapSchema.AnyOf) > 0 {
+				mapSchema = mapSchema.AnyOf[0]
+			} else if mapSchema.Type == "array" {
+				mapSchema = mapSchema.Items
+			}
+			if mapSchema.Items != nil {
+				t.Fatal("object dictionary must not have items")
+			}
+			if tc.name == "any" && (mapSchema.AdditionalProperties == nil || !*mapSchema.AdditionalProperties) {
+				t.Fatal("map[string]any must have additionalProperties: true")
+			}
+		})
+	}
+	for _, value := range []any{map[int]string{}, map[bool]string{}} {
+		if _, err := FromType(value); err == nil {
+			t.Fatalf("accepted unsupported map keys: %T", value)
+		}
+	}
+}
+
+func TestDictionarySchemaReferences(t *testing.T) {
+	s := &Schema{
+		Type:                       "object",
+		AdditionalPropertiesSchema: &Schema{Ref: "#/$defs/value"},
+		Definitions:                map[string]*Schema{"value": {Type: "object", Properties: map[string]*Schema{"count": Integer()}}},
+	}
+	strict := ToStrict(s)
+	if strict.AdditionalPropertiesSchema.Ref != "#/$defs/value" || strict.Definitions["value"].AdditionalProperties == nil || *strict.Definitions["value"].AdditionalProperties {
+		t.Fatalf("unexpected dictionary/ref normalization: %s", strict.MustJSON())
+	}
+	if s.Definitions["value"].AdditionalProperties != nil || reflect.ValueOf(strict.AdditionalPropertiesSchema).Pointer() == reflect.ValueOf(s.AdditionalPropertiesSchema).Pointer() {
+		t.Fatal("ToStrict must copy dictionary schemas and definitions")
+	}
+	allow := true
+	s.AdditionalProperties = &allow
+	if _, err := s.JSON(); err == nil {
+		t.Fatal("accepted conflicting additionalProperties declarations")
+	}
+}
+
+func TestNumericFieldTags(t *testing.T) {
+	type bounded struct {
+		Count    int      `json:"count" minimum:"0" maximum:"1000000"`
+		Exact    int64    `json:"exact" minimum:"-9223372036854775808" maximum:"9223372036854775807"`
+		Fraction *float64 `json:"fraction" minimum:"0.125" maximum:"1e100"`
+	}
+	raw := MustFromType(bounded{}).MustJSON()
+	for _, expected := range []string{`"minimum":0`, `"maximum":1000000`, `"minimum":-9223372036854775808`, `"maximum":9223372036854775807`, `"minimum":0.125`, `"maximum":1e100`} {
+		if !bytes.Contains(raw, []byte(expected)) {
+			t.Fatalf("missing %s in %s", expected, raw)
+		}
+	}
+	for _, value := range []any{
+		struct {
+			Count int `minimum:"invalid"`
+		}{},
+		struct {
+			Count int `maximum:"\"100\""`
+		}{},
+		struct {
+			Count int `minimum:"10" maximum:"1"`
+		}{},
+		struct {
+			Text string `minimum:"0"`
+		}{},
+	} {
+		if _, err := FromType(value); err == nil {
+			t.Fatalf("accepted invalid tags on %T", value)
+		}
+	}
+}
+
+func TestGeneratedSchemasDoNotInventValidationLimits(t *testing.T) {
+	type unannotated struct {
+		Text     string            `json:"text"`
+		Count    int               `json:"count"`
+		Unsigned uint64            `json:"unsigned"`
+		Fraction float64           `json:"fraction"`
+		Enabled  bool              `json:"enabled"`
+		Values   []string          `json:"values"`
+		Fixed    [2]int            `json:"fixed"`
+		Labels   map[string]string `json:"labels"`
+		Optional *int              `json:"optional,omitempty"`
+	}
+	raw := MustFromType(unannotated{}).MustJSON()
+	var root map[string]any
+	if err := json.Unmarshal(raw, &root); err != nil {
+		t.Fatal(err)
+	}
+	var inspect func(any)
+	inspect = func(value any) {
+		switch v := value.(type) {
+		case map[string]any:
+			for _, keyword := range []string{"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf", "minLength", "maxLength", "pattern", "format", "minItems", "maxItems", "uniqueItems", "minProperties", "maxProperties", "default", "enum"} {
+				if _, ok := v[keyword]; ok {
+					t.Fatalf("invented %s constraint: %s", keyword, raw)
+				}
+			}
+			for _, child := range v {
+				inspect(child)
+			}
+		case []any:
+			for _, child := range v {
+				inspect(child)
+			}
+		}
+	}
+	inspect(root)
+	properties := root["properties"].(map[string]any)
+	for name, kind := range map[string]string{"text": "string", "count": "integer", "unsigned": "integer", "fraction": "number", "enabled": "boolean"} {
+		property := properties[name].(map[string]any)
+		if len(property) != 1 || property["type"] != kind {
+			t.Fatalf("unexpected %s schema: %s", name, raw)
+		}
+	}
+}
 
 // Tests for ToStrict (and schema utilities) - translated from ai-sdk
 // Source: ai-sdk/packages/provider-utils/src/add-additional-properties-to-json-schema.test.ts
@@ -156,8 +344,8 @@ func TestToStrict_OneOf(t *testing.T) {
 	})
 }
 
-func TestToStrict_OverwritesExisting(t *testing.T) {
-	t.Run("overwrites existing additionalProperties flags", func(t *testing.T) {
+func TestToStrict_PreservesExplicitDictionaries(t *testing.T) {
+	t.Run("preserves existing additionalProperties flags", func(t *testing.T) {
 		additionalTrue := true
 		schema := &Schema{
 			Type:                 "object",
@@ -175,13 +363,13 @@ func TestToStrict_OverwritesExisting(t *testing.T) {
 
 		result := ToStrict(schema)
 
-		if *result.AdditionalProperties != false {
-			t.Error("expected root additionalProperties to be overwritten to false")
+		if !*result.AdditionalProperties {
+			t.Error("expected root additionalProperties to remain true")
 		}
 
 		metaSchema := result.Properties["meta"]
-		if *metaSchema.AdditionalProperties != false {
-			t.Error("expected nested additionalProperties to be overwritten to false")
+		if !*metaSchema.AdditionalProperties {
+			t.Error("expected nested additionalProperties to remain true")
 		}
 	})
 }
