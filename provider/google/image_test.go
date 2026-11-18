@@ -38,7 +38,7 @@ func TestGoogleImageGenerate(t *testing.T) {
 	}))
 	defer server.Close()
 	seed := int64(42)
-	result, err := New(Options{BaseURL: server.URL, APIKey: "key", Headers: map[string]string{"X-Provider": "yes"}}).ImageModel("gemini-3.5-flash-image").Generate(context.Background(), model.ImageCallOptions{Prompt: "draw", N: 1, Seed: &seed, Size: "1024x1024", AspectRatio: "16:9", Files: [][]byte{[]byte("image")}, ProviderOptions: map[string]any{"imageConfig": map[string]any{"imageSize": "2K"}}})
+	result, err := New(Options{BaseURL: server.URL, APIKey: "key", Headers: map[string]string{"X-Provider": "yes"}}).ImageModel("gemini-3.5-flash-image").Generate(context.Background(), model.ImageCallOptions{Prompt: "draw", N: 1, Seed: &seed, Size: "1024x1024", AspectRatio: "16:9", Files: [][]byte{[]byte("\x89PNG\r\n\x1a\n")}, ProviderOptions: map[string]any{"imageConfig": map[string]any{"imageSize": "2K"}}})
 	if err != nil {
 		t.Fatal(err)
 	}

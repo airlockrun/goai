@@ -96,6 +96,9 @@ func (m *ChatModel) doStream(ctx context.Context, options *stream.CallOptions, e
 }
 
 func (m *ChatModel) buildRequest(options *stream.CallOptions) ([]byte, []stream.Warning, error) {
+	if err := m.ValidateMessages(options.Messages); err != nil {
+		return nil, nil, err
+	}
 	var warnings []stream.Warning
 
 	chatMessages, err := convertToChatMessages(options.Messages)

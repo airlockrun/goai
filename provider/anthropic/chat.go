@@ -158,6 +158,9 @@ func (m *AnthropicModel) buildRequest(options *stream.CallOptions) ([]byte, []st
 // error. Consumers (direct Anthropic, Bedrock, Vertex) can call this from
 // their own Stream path and then dispatch the body on their own transport.
 func BuildRequestBody(cfg Config, modelID string, options *stream.CallOptions) ([]byte, []string, []stream.Warning, error) {
+	if err := ValidateMessages(cfg, options.Messages); err != nil {
+		return nil, nil, nil, err
+	}
 	var warnings []stream.Warning
 
 	opts, err := provider.ParseProviderOptions[MessagesOptions](options.ProviderOptions)
@@ -285,14 +288,6 @@ func BuildRequestBody(cfg Config, modelID string, options *stream.CallOptions) (
 			// anthropic assistant message.
 			var content []anthropicContentBlock
 			for _, msg := range block.Messages {
-				for _, part := range msg.Content.Parts {
-					if tr, ok := part.(message.ToolResultPart); ok && tr.ProviderExecuted {
-						metadata, _ := tr.ProviderOptions["anthropic"].(map[string]any)
-						if metadata["rawBlock"] == nil {
-							return nil, nil, warnings, fmt.Errorf("Anthropic provider tool result %q is missing replay metadata", tr.ToolCallID)
-						}
-					}
-				}
 				content = append(content, convertAssistantContent(msg.Content, msg.ProviderOptions)...)
 			}
 			messages = append(messages, anthropicMessage{

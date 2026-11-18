@@ -39,18 +39,19 @@ func New(opts Options) *Provider {
 	return &Provider{
 		opts: opts,
 		compat: openaicompat.New(openaicompat.Options{
-			ProviderID: "togetherai",
-			BaseURL:    baseURL,
-			APIKey:     opts.APIKey,
-			Headers:    opts.Headers,
-			HTTPClient: opts.HTTPClient,
+			FileValidator: openaicompat.ValidateUserImageFile,
+			ProviderID:    "togetherai",
+			BaseURL:       baseURL,
+			APIKey:        opts.APIKey,
+			Headers:       opts.Headers,
+			HTTPClient:    opts.HTTPClient,
 		}),
 	}
 }
 
 func (p *Provider) ID() string { return "togetherai" }
 func (p *Provider) Model(modelID string) stream.Model {
-	return openaicompat.New(openaicompat.Options{ProviderID: p.ID(), BaseURL: p.compat.BaseURL(), APIKey: p.opts.APIKey, Headers: p.opts.Headers, HTTPClient: p.opts.HTTPClient, SupportsStructuredOutputs: modelID == "deepseek-ai/DeepSeek-V4-Flash-0731"}).Model(modelID)
+	return openaicompat.New(openaicompat.Options{FileValidator: openaicompat.ValidateUserImageFile, ProviderID: p.ID(), BaseURL: p.compat.BaseURL(), APIKey: p.opts.APIKey, Headers: p.opts.Headers, HTTPClient: p.opts.HTTPClient, SupportsStructuredOutputs: modelID == "deepseek-ai/DeepSeek-V4-Flash-0731"}).Model(modelID)
 }
 func (p *Provider) LanguageModel(modelID string) model.LanguageModel { return p.Model(modelID) }
 func (p *Provider) ImageModel(modelID string) model.ImageModel {

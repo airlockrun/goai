@@ -38,6 +38,8 @@ type CallWarner func(options *stream.CallOptions) []stream.Warning
 // conversion. It receives the model ID and the original goai messages and
 // returns a slice of message objects ready for JSON marshaling (each element
 // can be a ChatMessage, a map[string]any, or any other JSON-marshalable value).
+// Conversion must be side-effect-free: complete-message admission also invokes
+// it to verify that the actual serializer accepts the history.
 // Use this when a provider needs model-specific message conversion — for
 // example DeepSeek's different reasoning_content rules across deepseek-v4
 // (echo) vs deepseek-reasoner (strip). When nil, the default
@@ -85,6 +87,12 @@ type Options struct {
 	// MessageConverter, when set, replaces the default message conversion.
 	// See the MessageConverter type doc for details.
 	MessageConverter MessageConverter
+
+	// FileValidator explicitly declares endpoint/model file support. Without it,
+	// only UTF-8 text files are admitted. User files must also fit the default
+	// serializer unless a MessageConverter is supplied. Tool files require a
+	// matching MessageConverter. ProviderID never establishes file authority.
+	FileValidator func(modelID string, role message.Role, file message.FilePart) error
 
 	// SupportsStructuredOutputs indicates the provider's endpoint honors the
 	// OpenAI "json_schema" response_format with strict decoding. When false,
@@ -250,6 +258,11 @@ func flattenHeaders(headers http.Header) map[string]string {
 }
 
 func (m *CompatModel) buildRequest(options *stream.CallOptions) ([]byte, []stream.Warning, error) {
+	// The same content checks and converter used by ValidateMessages run here;
+	// request construction retains the converted output rather than converting twice.
+	if err := m.validateMessageContent(options.Messages); err != nil {
+		return nil, nil, err
+	}
 	var warnings []stream.Warning
 	if m.provider.opts.CallWarner != nil {
 		warnings = append(warnings, m.provider.opts.CallWarner(options)...)

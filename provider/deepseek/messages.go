@@ -2,6 +2,7 @@ package deepseek
 
 import (
 	"encoding/base64"
+	"errors"
 	"strings"
 
 	"github.com/airlockrun/goai/message"
@@ -91,20 +92,61 @@ func convertMessages(modelID string, messages []message.Message) ([]any, error) 
 			out = append(out, am)
 
 		case message.RoleTool:
-			for _, part := range msg.Content.Parts {
-				tr, ok := part.(message.ToolResultPart)
-				if !ok {
-					continue
+			results, err := message.ToolMessageResults(msg)
+			if err != nil {
+				return nil, err
+			}
+			for _, tr := range results {
+				content, err := convertToolOutput(tr.Output)
+				if err != nil {
+					return nil, err
 				}
 				out = append(out, map[string]any{
 					"role":         "tool",
-					"content":      message.ToolOutputWire(tr.Output),
+					"content":      content,
 					"tool_call_id": tr.ToolCallID,
 				})
 			}
 		}
 	}
 	return out, nil
+}
+
+// DeepSeek accepts image_url blocks in tool messages. Binary content must stay
+// multipart so the provider processes image bytes as vision input, not text.
+func convertToolOutput(output message.ToolResultOutput) (any, error) {
+	content, ok := output.(message.ContentOutput)
+	if !ok {
+		return message.ToolOutputWire(output), nil
+	}
+	parts := make([]map[string]any, 0, len(content.Value))
+	for _, item := range content.Value {
+		if strings.HasPrefix(item.MediaType, "image/") {
+			if item.Type == "file-data" {
+				item.Type = "image-data"
+			}
+			if item.Type == "file-url" {
+				item.Type = "image-url"
+			}
+		}
+		switch item.Type {
+		case "text":
+			parts = append(parts, map[string]any{"type": "text", "text": item.Text})
+		case "image-data":
+			if item.Data == "" || !strings.HasPrefix(item.MediaType, "image/") {
+				return nil, errors.New("image-data requires image mediaType and base64 data")
+			}
+			parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:" + item.MediaType + ";base64," + item.Data}})
+		case "image-url":
+			if item.URL == "" {
+				return nil, errors.New("image-url requires a URL")
+			}
+			parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": item.URL}})
+		default:
+			return nil, errors.New("unsupported multipart content type; use text or image-data/image-url with this adapter")
+		}
+	}
+	return parts, nil
 }
 
 // getText flattens message.Content to a string. Mirrors openaicompat's

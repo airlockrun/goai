@@ -3,10 +3,13 @@
 package deepseek
 
 import (
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
+	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/model"
 	"github.com/airlockrun/goai/provider"
 	"github.com/airlockrun/goai/provider/openaicompat"
@@ -39,11 +42,31 @@ func New(opts Options) *Provider {
 	}
 	return &Provider{
 		compat: openaicompat.New(openaicompat.Options{
-			ProviderID:      "deepseek",
-			BaseURL:         baseURL,
-			APIKey:          opts.APIKey,
-			Headers:         opts.Headers,
-			HTTPClient:      opts.HTTPClient,
+			ProviderID: "deepseek",
+			BaseURL:    baseURL,
+			APIKey:     opts.APIKey,
+			Headers:    opts.Headers,
+			HTTPClient: opts.HTTPClient,
+			FileValidator: func(_ string, role message.Role, file message.FilePart) error {
+				if role != message.RoleUser && role != message.RoleTool {
+					return provider.ErrUnsupportedFile
+				}
+				if role == message.RoleUser && strings.HasPrefix(file.MimeType, "text/") {
+					switch data := file.Data.(type) {
+					case message.FileDataText:
+						if utf8.ValidString(data.Text) {
+							return nil
+						}
+					case message.FileDataBytes:
+						decoded, err := base64.StdEncoding.DecodeString(data.Data)
+						if err == nil && utf8.Valid(decoded) {
+							return nil
+						}
+					}
+					return provider.ErrUnsupportedFile
+				}
+				return provider.ValidateInlineOrURLFile(file, []string{"image/png", "image/jpeg", "image/webp", "image/gif", "image/*"}, true)
+			},
 			RequestModifier: deepseekRequestModifier,
 			ReasoningMapper: func(_ string, options *stream.CallOptions) (map[string]any, []stream.Warning) {
 				fields := map[string]any{}

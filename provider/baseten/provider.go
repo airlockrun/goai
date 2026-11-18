@@ -97,6 +97,10 @@ func (m *BasetenLanguageModel) Stream(ctx context.Context, options *stream.CallO
 }
 
 func (m *BasetenLanguageModel) doStream(ctx context.Context, options *stream.CallOptions, events chan<- stream.Event) {
+	if err := provider.ValidatePromptMessages(options.Messages); err != nil {
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+		return
+	}
 	// Baseten exposes a plain prompt/completion API with no structured-output
 	// endpoint. When ResponseFormat asks for JSON, inject a JSON instruction
 	// so the model at least returns JSON-formatted text.

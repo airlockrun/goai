@@ -37,12 +37,13 @@ func New(opts Options) *Provider {
 	}
 	return &Provider{
 		compat: openaicompat.New(openaicompat.Options{
-			ProviderID: "perplexity",
-			BaseURL:    baseURL,
-			APIKey:     opts.APIKey,
-			Headers:    opts.Headers,
-			HTTPClient: opts.HTTPClient,
-			CallWarner: perplexityCallWarner,
+			FileValidator: openaicompat.ValidateUserImageFile,
+			ProviderID:    "perplexity",
+			BaseURL:       baseURL,
+			APIKey:        opts.APIKey,
+			Headers:       opts.Headers,
+			HTTPClient:    opts.HTTPClient,
+			CallWarner:    perplexityCallWarner,
 		}),
 	}
 }

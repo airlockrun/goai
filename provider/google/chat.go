@@ -109,6 +109,9 @@ func responseHeaders(headers http.Header) map[string]string {
 }
 
 func (m *GoogleModel) buildRequest(options *stream.CallOptions) ([]byte, []stream.Warning, error) {
+	if err := m.ValidateMessages(options.Messages); err != nil {
+		return nil, nil, err
+	}
 	var warnings []stream.Warning
 
 	// Parse typed provider options
@@ -149,53 +152,29 @@ func (m *GoogleModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 				Parts: parts,
 			})
 		case message.RoleTool:
-			// Tool results — emit one functionResponse part per ToolResultPart,
-			// then append any attachment FilePart as sibling inline/fileData
-			// parts in the same user turn. This matches ai-sdk's multimodal
-			// functionResponse behavior (#47114a3): a remote file URL becomes a
-			// fileData part, inline base64 becomes inlineData. An image FilePart
-			// also gets a synthetic explanatory text part.
+			// Gemini 3 carries media within functionResponse.parts. Recognized
+			// older models use typed siblings within the same response turn.
 			var parts []geminiPart
-			for _, part := range msg.Content.Parts {
-				switch p := part.(type) {
-				case message.ToolResultPart:
-					parts = append(parts, geminiPart{
-						FunctionResponse: &geminiFunctionResponse{
-							ID:       p.ToolCallID,
-							Name:     p.ToolName,
-							Response: map[string]any{"result": message.ToolOutputWire(p.Output)},
-						},
-					})
-				case message.TextPart:
-					parts = append(parts, geminiPart{
-						FunctionResponse: &geminiFunctionResponse{
-							ID:       toolCallIDFromMessage(msg),
-							Name:     toolNameFromMessage(msg),
-							Response: map[string]any{"result": p.Text},
-						},
-					})
-				case message.FilePart:
-					switch d := p.Data.(type) {
-					case message.FileDataURL:
-						parts = append(parts, geminiPart{
-							FileData: &geminiFileData{MimeType: p.MimeType, FileURI: d.URL},
-						})
-						if isImageMimeType(p.MimeType) {
-							parts = append(parts, geminiPart{
-								Text: "Tool executed successfully and returned this image as a response",
-							})
-						}
+			results, err := message.ToolMessageResults(msg)
+			if err != nil {
+				return nil, warnings, err
+			}
+			for _, p := range results {
+				response, files, err := BuildToolResponse(m.id, p)
+				if err != nil {
+					return nil, warnings, err
+				}
+				fr := &geminiFunctionResponse{ID: p.ToolCallID, Name: p.ToolName, Response: response["response"].(map[string]any)}
+				if media, ok := response["parts"].([]map[string]any); ok {
+					fr.Parts = media
+				}
+				parts = append(parts, geminiPart{FunctionResponse: fr})
+				for _, file := range files {
+					switch data := file.Data.(type) {
 					case message.FileDataBytes:
-						parts = append(parts, geminiPart{
-							InlineData: &geminiInlineData{MimeType: p.MimeType, Data: d.Data},
-						})
-						if isImageMimeType(p.MimeType) {
-							parts = append(parts, geminiPart{
-								Text: "Tool executed successfully and returned this image as a response",
-							})
-						}
-					case message.FileDataText, message.FileDataReference:
-						warnings = append(warnings, stream.UnsupportedWarning("filePart", "file data type not supported by Gemini"))
+						parts = append(parts, geminiPart{InlineData: &geminiInlineData{MimeType: file.MimeType, Data: data.Data, DisplayName: file.Filename}})
+					case message.FileDataURL:
+						parts = append(parts, geminiPart{FileData: &geminiFileData{MimeType: file.MimeType, FileURI: data.URL, DisplayName: file.Filename}})
 					}
 				}
 			}

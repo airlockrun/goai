@@ -136,7 +136,7 @@ func TestConvertToAnthropicContent_UserMessages(t *testing.T) {
 		content := message.Content{
 			Parts: []message.Part{
 				message.FilePart{
-					Data:     message.FileDataBytes{Data: "Hello, this is a text document."},
+					Data:     message.FileDataText{Text: "Hello, this is a text document."},
 					MimeType: "text/plain",
 					Filename: "notes.txt",
 				},

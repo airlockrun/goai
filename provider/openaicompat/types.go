@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/airlockrun/goai/message"
+	"github.com/airlockrun/goai/provider"
 	"github.com/airlockrun/goai/stream"
 	"github.com/airlockrun/goai/tool"
 )
@@ -240,8 +241,15 @@ func usageFromChat(u chatUsage) stream.Usage {
 
 // Conversion functions
 
-// ConvertMessages exposes the compatible wire messages for provider-specific conversion.
+// ConvertMessages exposes wire conversion for adapters that independently
+// declare endpoint support. Encoding support is not endpoint/model admission.
 func ConvertMessages(messages []message.Message) ([]any, error) {
+	if err := provider.ValidateMessageContent(messages, provider.FileValidationFunc(validateChatFileShape), false, nil); err != nil {
+		return nil, err
+	}
+	if err := provider.ValidateTextToolMessages(messages); err != nil {
+		return nil, err
+	}
 	data, err := json.Marshal(convertToMessages(messages))
 	if err != nil {
 		return nil, err
@@ -427,7 +435,7 @@ func convertUserContent(content message.Content) any {
 				} else if strings.HasPrefix(p.MimeType, "text/") {
 					decoded, err := base64.StdEncoding.DecodeString(d.Data)
 					if err != nil {
-						decoded = []byte(d.Data)
+						panic("compatible text file builder requires validated base64")
 					}
 					result = append(result, chatContentPart{
 						Type: "text",
@@ -448,6 +456,8 @@ func convertUserContent(content message.Content) any {
 					})
 				}
 				// Non-image remote files have no representation here; skip.
+			case message.FileDataText:
+				result = append(result, chatContentPart{Type: "text", Text: d.Text})
 			}
 			// FileDataText / FileDataReference are skipped: no generic
 			// openai-compatible chat content part carries them.

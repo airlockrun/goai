@@ -42,11 +42,12 @@ func New(opts Options) *Provider {
 	return &Provider{
 		opts: opts,
 		compat: openaicompat.New(openaicompat.Options{
-			ProviderID: "deepinfra",
-			APIKey:     opts.APIKey,
-			BaseURL:    opts.BaseURL,
-			Headers:    opts.Headers,
-			HTTPClient: opts.HTTPClient,
+			FileValidator: openaicompat.ValidateUserImageFile,
+			ProviderID:    "deepinfra",
+			APIKey:        opts.APIKey,
+			BaseURL:       opts.BaseURL,
+			Headers:       opts.Headers,
+			HTTPClient:    opts.HTTPClient,
 		}),
 	}
 }

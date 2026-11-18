@@ -201,9 +201,20 @@ func (m *AzureLanguageModel) Stream(ctx context.Context, options *stream.CallOpt
 }
 
 func (m *AzureLanguageModel) doStream(ctx context.Context, options *stream.CallOptions, events chan<- stream.Event) {
+	if err := m.ValidateMessages(options.Messages); err != nil {
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+		return
+	}
 	// Build request body (OpenAI compatible format)
 	msgs := make([]map[string]any, 0, len(options.Messages))
 	for _, msg := range options.Messages {
+		if msg.Role == message.RoleTool {
+			for _, part := range msg.Content.Parts {
+				tr := part.(message.ToolResultPart)
+				msgs = append(msgs, map[string]any{"role": "tool", "tool_call_id": tr.ToolCallID, "content": message.ToolOutputWire(tr.Output)})
+			}
+			continue
+		}
 		msgs = append(msgs, convertMessage(msg))
 	}
 

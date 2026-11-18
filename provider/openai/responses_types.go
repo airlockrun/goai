@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
 	"github.com/airlockrun/goai/message"
+	"github.com/airlockrun/goai/provider"
 	"github.com/airlockrun/goai/stream"
 	"github.com/airlockrun/goai/tool"
 )
@@ -585,7 +587,7 @@ func convertToResponsesInputWithWarnings(messages []message.Message, systemMessa
 					if content, ok := p.Output.(message.ContentOutput); ok {
 						parts, err := convertResponsesToolContent(content)
 						if err != nil {
-							return ConversionResult{Warnings: warnings, Err: fmt.Errorf("tool result %q (%s): %w", p.ToolCallID, p.ToolName, err)}
+							return ConversionResult{Warnings: warnings, Err: err}
 						}
 						value = parts
 					} else {
@@ -658,39 +660,47 @@ func convertToResponsesInputWithWarnings(messages []message.Message, systemMessa
 // Unsupported variants fail rather than discarding content or sending encoded
 // image/file payloads as text.
 func convertResponsesToolContent(content message.ContentOutput) ([]responsesContentPart, error) {
-	parts := make([]responsesContentPart, 0, len(content.Value))
-	for i, item := range content.Value {
+	normalized, err := message.ToolContentParts(content)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range normalized {
+		if file, ok := item.(message.FilePart); ok {
+			if err := (&ResponsesModel{}).ValidateFile(message.RoleTool, file); err != nil {
+				return nil, err
+			}
+		}
+	}
+	parts := make([]responsesContentPart, 0, len(normalized))
+	for _, item := range normalized {
 		part := responsesContentPart{}
-		switch item.Type {
-		case "text":
+		switch item := item.(type) {
+		case message.TextPart:
 			part.Type, part.Text = "input_text", item.Text
-		case "image-data", "file-data":
-			if item.MediaType == "" {
-				return nil, fmt.Errorf("content item %d (%s) requires mediaType", i, item.Type)
-			}
-			if item.Type == "image-data" && !strings.HasPrefix(item.MediaType, "image/") {
-				return nil, fmt.Errorf("content item %d (image-data) requires an image mediaType", i)
-			}
-			data := "data:" + item.MediaType + ";base64," + item.Data
-			if strings.HasPrefix(item.MediaType, "image/") {
-				part.Type, part.ImageURL = "input_image", data
-				part.Detail = openaiImageDetail(item.ProviderOptions)
-			} else {
-				part.Type, part.FileData = "input_file", data
-				part.Filename = item.Filename
-				if part.Filename == "" {
-					part.Filename = "data"
+		case message.FilePart:
+			switch data := item.Data.(type) {
+			case message.FileDataBytes:
+				value := "data:" + item.MimeType + ";base64," + data.Data
+				if strings.HasPrefix(item.MimeType, "image/") {
+					part.Type, part.ImageURL = "input_image", value
+					part.Detail = openaiImageDetail(item.ProviderOptions)
+				} else {
+					part.Type, part.FileData = "input_file", value
+					part.Filename = item.Filename
+					if part.Filename == "" {
+						part.Filename = "data"
+					}
+				}
+			case message.FileDataURL:
+				if strings.HasPrefix(item.MimeType, "image/") {
+					part.Type, part.ImageURL = "input_image", data.URL
+					part.Detail = openaiImageDetail(item.ProviderOptions)
+				} else {
+					part.Type, part.FileURL = "input_file", data.URL
 				}
 			}
-		case "image-url", "file-url":
-			if item.Type == "image-url" || strings.HasPrefix(item.MediaType, "image/") {
-				part.Type, part.ImageURL = "input_image", item.URL
-				part.Detail = openaiImageDetail(item.ProviderOptions)
-			} else {
-				part.Type, part.FileURL = "input_file", item.URL
-			}
 		default:
-			return nil, fmt.Errorf("unsupported tool content item %d type %q", i, item.Type)
+			return nil, provider.ErrUnsupportedFile
 		}
 		parts = append(parts, part)
 	}
@@ -716,27 +726,26 @@ func convertToResponsesContentParts(content message.Content, passThroughUnsuppor
 		case message.FilePart:
 			switch d := p.Data.(type) {
 			case message.FileDataBytes:
-				// Inline bytes. Images become input_image; PDFs become an
-				// input_file with file_data. Base64 file parts are otherwise
-				// restricted to PDF since that's all OpenAI Responses accepts
-				// as file_data, unless passThroughUnsupportedFiles forwards
-				// other media types using their real media type (ai-sdk
-				// #15297).
+				// Validated images become input_image. Supported documents use
+				// input_file with their real MIME and unchanged base64 bytes.
 				if strings.HasPrefix(p.MimeType, "image/") {
 					result = append(result, responsesContentPart{
 						Type:     "input_image",
 						ImageURL: "data:" + p.MimeType + ";base64," + d.Data,
 						Detail:   openaiImageDetail(p.ProviderOptions),
 					})
-				} else if p.MimeType == "application/pdf" {
+				} else if slices.Contains(responseFileMIMEs, p.MimeType) {
 					filename := p.Filename
 					if filename == "" {
-						filename = "document.pdf"
+						filename = "data"
+						if p.MimeType == "application/pdf" {
+							filename = "document.pdf"
+						}
 					}
 					result = append(result, responsesContentPart{
 						Type:     "input_file",
 						Filename: filename,
-						FileData: "data:application/pdf;base64," + d.Data,
+						FileData: "data:" + p.MimeType + ";base64," + d.Data,
 					})
 				} else if passThroughUnsupportedFiles {
 					result = append(result, responsesContentPart{

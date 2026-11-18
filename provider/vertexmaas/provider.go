@@ -82,9 +82,10 @@ func New(opts Options) *Provider {
 	return &Provider{
 		opts: opts,
 		compat: openaicompat.New(openaicompat.Options{
-			ProviderID: "vertex.maas",
-			BaseURL:    baseURL,
-			Headers:    headers,
+			FileValidator: openaicompat.ValidateUserImageFile,
+			ProviderID:    "vertex.maas",
+			BaseURL:       baseURL,
+			Headers:       headers,
 			// AuthScheme values are irrelevant when APIKey is unset; Bearer is
 			// already on Headers.
 		}),
