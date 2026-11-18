@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -418,9 +419,8 @@ func getTextFromContent(content message.Content) string {
 // in a single anthropic user message — Anthropic's API requires this pairing.
 func toolMessageToBlocks(msg message.Message) []anthropicContentBlock {
 	// Collect non-ToolResult parts (attachments) from the message; goai
-	// allows text/image/file parts to ride alongside ToolResults in a tool
-	// message, and they get embedded inside each tool_result's content
-	// array (legacy goai behavior preserved here).
+	// allows text/image/file parts alongside ToolResults. Sibling attachments
+	// belong to the final result in that message.
 	var attachments []message.Part
 	for _, part := range msg.Content.Parts {
 		switch part.(type) {
@@ -439,6 +439,10 @@ func toolMessageToBlocks(msg message.Message) []anthropicContentBlock {
 
 	out := make([]anthropicContentBlock, 0, len(toolResults))
 	for i, tr := range toolResults {
+		resultAttachments := attachments
+		if i != len(toolResults)-1 {
+			resultAttachments = nil
+		}
 		block := anthropicContentBlock{
 			Type:      "tool_result",
 			ToolUseID: tr.ToolCallID,
@@ -448,14 +452,14 @@ func toolMessageToBlocks(msg message.Message) []anthropicContentBlock {
 		// A content output carries its own multipart items; everything else
 		// reduces to a single string per ai-sdk's Anthropic converter.
 		contentItems := toolOutputContentParts(tr.Output)
-		if len(contentItems) > 0 || len(attachments) > 0 {
+		if len(contentItems) > 0 || len(resultAttachments) > 0 {
 			var contentBlocks []anthropicContentBlock
 			if len(contentItems) > 0 {
 				contentBlocks = append(contentBlocks, convertToAnthropicContent(message.Content{Parts: contentItems}, nil)...)
 			} else if resultStr := message.ToolOutputWire(tr.Output); resultStr != "" {
 				contentBlocks = append(contentBlocks, anthropicContentBlock{Type: "text", Text: resultStr})
 			}
-			contentBlocks = append(contentBlocks, convertToAnthropicContent(message.Content{Parts: attachments}, nil)...)
+			contentBlocks = append(contentBlocks, convertToAnthropicContent(message.Content{Parts: resultAttachments}, nil)...)
 			block.Content = contentBlocks
 		} else {
 			block.Content = message.ToolOutputWire(tr.Output)
@@ -524,24 +528,9 @@ func toolOutputProviderOptions(o message.ToolResultOutput) map[string]any {
 // images/files identically to other content. Non-content outputs return
 // nil (the caller stringifies them instead).
 func toolOutputContentParts(o message.ToolResultOutput) []message.Part {
-	co, ok := o.(message.ContentOutput)
-	if !ok {
-		return nil
-	}
-	parts := make([]message.Part, 0, len(co.Value))
-	for _, it := range co.Value {
-		switch it.Type {
-		case "text":
-			parts = append(parts, message.TextPart{Text: it.Text})
-		case "image-data":
-			parts = append(parts, message.FilePart{Data: message.FileDataBytes{Data: it.Data}, MimeType: it.MediaType})
-		case "image-url":
-			parts = append(parts, message.FilePart{Data: message.FileDataURL{URL: it.URL}})
-		case "file-data":
-			parts = append(parts, message.FilePart{Data: message.FileDataBytes{Data: it.Data}, MimeType: it.MediaType, Filename: it.Filename})
-		case "file-url":
-			parts = append(parts, message.FilePart{Data: message.FileDataURL{URL: it.URL}, MimeType: it.MediaType, Filename: it.Filename})
-		}
+	parts, err := message.ToolContentParts(o)
+	if err != nil {
+		panic("Anthropic tool builder requires validated content")
 	}
 	return parts
 }
@@ -572,20 +561,26 @@ func convertToAnthropicContent(content message.Content, msgOpts map[string]any) 
 			partOpts = p.ProviderOptions
 			// Choose the wire source by data variant: inline bytes encode as a
 			// base64/text source, a remote URL encodes as a url source. MimeType
-			// selects image-vs-document block shape; reference/text payloads have
-			// no Anthropic equivalent and are skipped.
+			// selects image-vs-document block shape. Inline text is a document
+			// text source; provider references require an explicit API mapping.
 			var src *anthropicSource
 			switch d := p.Data.(type) {
 			case message.FileDataBytes:
 				if p.MimeType == "text/plain" {
-					src = &anthropicSource{Type: "text", MediaType: "text/plain", Data: d.Data}
+					decoded, err := base64.StdEncoding.DecodeString(d.Data)
+					if err != nil {
+						panic("Anthropic text file builder requires validated base64")
+					}
+					src = &anthropicSource{Type: "text", MediaType: "text/plain", Data: string(decoded)}
 				} else {
 					src = &anthropicSource{Type: "base64", MediaType: p.MimeType, Data: d.Data}
 				}
 			case message.FileDataURL:
 				src = &anthropicSource{Type: "url", URL: d.URL}
+			case message.FileDataText:
+				src = &anthropicSource{Type: "text", MediaType: "text/plain", Data: d.Text}
 			default:
-				// FileDataText and FileDataReference: no Anthropic support.
+				// The request validator rejects unsupported file sources.
 				continue
 			}
 

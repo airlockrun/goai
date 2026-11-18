@@ -227,36 +227,17 @@ func TestConvertToolMessages_Google(t *testing.T) {
 			},
 		}
 
-		// Simulate what buildRequest does for RoleTool
-		var parts []geminiPart
-		for _, part := range msg.Content.Parts {
-			switch p := part.(type) {
-			case message.ToolResultPart:
-				parts = append(parts, geminiPart{
-					FunctionResponse: &geminiFunctionResponse{
-						Name:     p.ToolName,
-						Response: map[string]any{"result": message.ToolOutputWire(p.Output)},
-					},
-				})
-			case message.FilePart:
-				if d, ok := p.Data.(message.FileDataBytes); ok {
-					parts = append(parts, geminiPart{
-						InlineData: &geminiInlineData{
-							MimeType: p.MimeType,
-							Data:     d.Data,
-						},
-					})
-					if isImageMimeType(p.MimeType) {
-						parts = append(parts, geminiPart{
-							Text: "Tool executed successfully and returned this image as a response",
-						})
-					}
-				}
-			}
+		body, _, err := (&GoogleModel{id: "gemini-2.5-pro"}).buildRequest(&stream.CallOptions{Messages: []message.Message{msg}})
+		if err != nil {
+			t.Fatal(err)
 		}
-
-		if len(parts) != 3 {
-			t.Fatalf("expected 3 parts, got %d", len(parts))
+		var request geminiRequest
+		if err := json.Unmarshal(body, &request); err != nil {
+			t.Fatal(err)
+		}
+		parts := request.Contents[0].Parts
+		if len(parts) != 2 {
+			t.Fatalf("expected 2 correlated parts, got %d", len(parts))
 		}
 
 		// Part 1: function response
@@ -275,10 +256,6 @@ func TestConvertToolMessages_Google(t *testing.T) {
 			t.Errorf("expected data 'iVBORw0KGgo=', got '%s'", parts[1].InlineData.Data)
 		}
 
-		// Part 3: synthetic text
-		if parts[2].Text != "Tool executed successfully and returned this image as a response" {
-			t.Errorf("expected synthetic text, got '%s'", parts[2].Text)
-		}
 	})
 }
 
@@ -424,7 +401,7 @@ func TestGeminiRequest_ToolResultMultipart(t *testing.T) {
 				Role: message.RoleTool,
 				Content: message.Content{Parts: []message.Part{
 					message.ToolResultPart{ToolCallID: "call-1", ToolName: "fetch_report", Output: message.TextOutput{Value: "the-summary"}},
-					message.FilePart{Data: message.FileDataURL{URL: "gs://bucket/report.pdf"}, MimeType: "application/pdf"},
+					message.FilePart{Data: message.FileDataURL{URL: "https://generativelanguage.googleapis.com/v1beta/files/report"}, MimeType: "application/pdf"},
 				}},
 			},
 		},
@@ -461,7 +438,7 @@ func TestGeminiRequest_ToolResultMultipart(t *testing.T) {
 	if last.Parts[0].FunctionResponse == nil {
 		t.Errorf("parts[0] should be functionResponse, got %+v", last.Parts[0])
 	}
-	if last.Parts[1].FileData == nil || last.Parts[1].FileData.FileURI != "gs://bucket/report.pdf" {
-		t.Errorf("parts[1] should be fileData with gs:// URI, got %+v", last.Parts[1])
+	if last.Parts[1].FileData == nil || last.Parts[1].FileData.FileURI != "https://generativelanguage.googleapis.com/v1beta/files/report" {
+		t.Errorf("parts[1] should be fileData with Files API URI, got %+v", last.Parts[1])
 	}
 }

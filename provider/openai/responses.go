@@ -120,6 +120,9 @@ func (m *ResponsesModel) doStream(ctx context.Context, options *stream.CallOptio
 }
 
 func (m *ResponsesModel) buildRequest(options *stream.CallOptions) ([]byte, []stream.Warning, error) {
+	if err := m.ValidateMessages(options.Messages); err != nil {
+		return nil, nil, err
+	}
 	var warnings []stream.Warning
 
 	// Parse typed provider options

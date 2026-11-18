@@ -27,6 +27,9 @@ func bedrockModelName(id string) string {
 }
 
 func (m *BedrockLanguageModel) buildConverseRequest(options *stream.CallOptions) ([]byte, []stream.Warning, error) {
+	if err := m.ValidateMessages(options.Messages); err != nil {
+		return nil, nil, err
+	}
 	opts, err := provider.ParseProviderOptions[ChatOptions](options.ProviderOptions)
 	if err != nil {
 		return nil, nil, err
@@ -42,13 +45,19 @@ func (m *BedrockLanguageModel) buildConverseRequest(options *stream.CallOptions)
 			continue
 		}
 		var content []map[string]any
+		var attachments []any
+		var lastToolResult map[string]any
 		if msg.Content.Text != "" {
 			content = append(content, map[string]any{"text": msg.Content.Text})
 		}
 		for _, part := range msg.Content.Parts {
 			switch p := part.(type) {
 			case message.TextPart:
-				content = append(content, map[string]any{"text": p.Text})
+				if msg.Role == message.RoleTool {
+					attachments = append(attachments, map[string]any{"text": p.Text})
+				} else {
+					content = append(content, map[string]any{"text": p.Text})
+				}
 			case message.ToolCallPart:
 				var input map[string]any
 				if err := json.Unmarshal(p.Input, &input); err != nil || input == nil {
@@ -61,10 +70,23 @@ func (m *BedrockLanguageModel) buildConverseRequest(options *stream.CallOptions)
 				case message.ErrorTextOutput, message.ErrorJSONOutput, message.ExecutionDeniedOutput:
 					status = "error"
 				}
-				content = append(content, map[string]any{"toolResult": map[string]any{"toolUseId": p.ToolCallID, "status": status, "content": []any{map[string]any{"text": message.ToolOutputText(p.Output)}}}})
+				lastToolResult = map[string]any{"toolUseId": p.ToolCallID, "status": status, "content": converseToolOutput(p.Output)}
+				content = append(content, map[string]any{"toolResult": lastToolResult})
+			case message.FilePart:
+				if msg.Role == message.RoleTool {
+					attachments = append(attachments, converseFile(p))
+				} else {
+					content = append(content, converseFile(p))
+				}
 			default:
 				return nil, nil, fmt.Errorf("unsupported Bedrock Converse content %T", part)
 			}
+		}
+		if len(attachments) > 0 {
+			if lastToolResult == nil {
+				return nil, nil, provider.ErrUnsupportedFile
+			}
+			lastToolResult["content"] = append(lastToolResult["content"].([]any), attachments...)
 		}
 		role := string(msg.Role)
 		if msg.Role == message.RoleTool {

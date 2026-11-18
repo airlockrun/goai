@@ -343,6 +343,9 @@ func (m *BedrockLanguageModel) buildAnthropicRequest(options *stream.CallOptions
 }
 
 func (m *BedrockLanguageModel) buildTitanRequest(options *stream.CallOptions) ([]byte, []stream.Warning, error) {
+	if err := provider.ValidatePromptMessages(options.Messages); err != nil {
+		return nil, nil, err
+	}
 	messages := options.Messages
 	if options.ResponseFormat != nil && options.ResponseFormat.Type == "json" {
 		messages = provider.InjectJSONInstruction(messages, options.ResponseFormat.Schema)
@@ -393,6 +396,9 @@ func (m *BedrockLanguageModel) buildTitanRequest(options *stream.CallOptions) ([
 }
 
 func (m *BedrockLanguageModel) buildLlamaRequest(options *stream.CallOptions) ([]byte, []stream.Warning, error) {
+	if err := provider.ValidatePromptMessages(options.Messages); err != nil {
+		return nil, nil, err
+	}
 	messages := options.Messages
 	if options.ResponseFormat != nil && options.ResponseFormat.Type == "json" {
 		messages = provider.InjectJSONInstruction(messages, options.ResponseFormat.Schema)
@@ -435,6 +441,9 @@ func (m *BedrockLanguageModel) buildLlamaRequest(options *stream.CallOptions) ([
 }
 
 func (m *BedrockLanguageModel) buildMistralRequest(options *stream.CallOptions) ([]byte, []stream.Warning, error) {
+	if err := provider.ValidatePromptMessages(options.Messages); err != nil {
+		return nil, nil, err
+	}
 	messages := options.Messages
 	if options.ResponseFormat != nil && options.ResponseFormat.Type == "json" {
 		messages = provider.InjectJSONInstruction(messages, options.ResponseFormat.Schema)
@@ -478,6 +487,9 @@ func (m *BedrockLanguageModel) buildMistralRequest(options *stream.CallOptions) 
 }
 
 func (m *BedrockLanguageModel) buildCohereRequest(options *stream.CallOptions) ([]byte, []stream.Warning, error) {
+	if err := provider.ValidatePromptMessages(options.Messages); err != nil {
+		return nil, nil, err
+	}
 	messages := options.Messages
 	if options.ResponseFormat != nil && options.ResponseFormat.Type == "json" {
 		messages = provider.InjectJSONInstruction(messages, options.ResponseFormat.Schema)

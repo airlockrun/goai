@@ -97,7 +97,10 @@ type responsesContentPart struct {
 	// https://docs.x.ai/docs/guides/chat-with-files. ai-sdk #14805.
 	FileURL string `json:"file_url,omitempty"`
 	// FileID references a file uploaded via the xAI Files API.
-	FileID string `json:"file_id,omitempty"`
+	FileID   string `json:"file_id,omitempty"`
+	FileData string `json:"file_data,omitempty"`
+	Filename string `json:"filename,omitempty"`
+	MimeType string `json:"mime_type,omitempty"`
 }
 
 // responsesToolWire is a marker interface for wire-format structs that
@@ -415,7 +418,13 @@ func convertToResponsesInput(messages []message.Message) []responsesInputItem {
 			}
 
 		case message.RoleTool:
+			last := -1
+			var attachments []responsesContentPart
 			for _, part := range msg.Content.Parts {
+				if file, ok := part.(message.FilePart); ok {
+					attachments = append(attachments, xaiFilePart(file))
+					continue
+				}
 				tr, ok := part.(message.ToolResultPart)
 				if !ok {
 					continue
@@ -423,8 +432,19 @@ func convertToResponsesInput(messages []message.Message) []responsesInputItem {
 				result = append(result, responsesInputItem{
 					Type:   "function_call_output",
 					CallID: tr.ToolCallID,
-					Output: message.ToolOutputWire(tr.Output),
+					Output: xaiToolOutput(tr.Output),
 				})
+				last = len(result) - 1
+			}
+			if len(attachments) > 0 && last >= 0 {
+				var parts []responsesContentPart
+				switch output := result[last].Output.(type) {
+				case string:
+					parts = append(parts, responsesContentPart{Type: "input_text", Text: output})
+				case []responsesContentPart:
+					parts = append(parts, output...)
+				}
+				result[last].Output = append(parts, attachments...)
 			}
 		}
 	}
@@ -446,30 +466,7 @@ func convertToResponsesContentParts(content message.Content) []responsesContentP
 				Text: p.Text,
 			})
 		case message.FilePart:
-			isImage := strings.HasPrefix(p.MimeType, "image/")
-			switch d := p.Data.(type) {
-			case message.FileDataBytes:
-				// Inline images become a base64 data URL; xAI rejects inline
-				// bytes for non-image files (ai-sdk #14805), so they drop.
-				if isImage {
-					mime := p.MimeType
-					if mime == "" {
-						mime = "image/jpeg"
-					}
-					result = append(result, responsesContentPart{
-						Type:     "input_image",
-						ImageURL: "data:" + mime + ";base64," + d.Data,
-					})
-				}
-			case message.FileDataURL:
-				// Non-image documents (PDF, text, CSV, …) are supported via
-				// URL; images go through input_image. ai-sdk #14805.
-				if isImage {
-					result = append(result, responsesContentPart{Type: "input_image", ImageURL: d.URL})
-				} else {
-					result = append(result, responsesContentPart{Type: "input_file", FileURL: d.URL})
-				}
-			}
+			result = append(result, xaiFilePart(p))
 		}
 	}
 	return result

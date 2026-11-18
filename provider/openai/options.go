@@ -80,10 +80,9 @@ type ResponsesOptions struct {
 	// Store controls whether to store the generation. Defaults to false.
 	Store *bool `json:"store,omitempty"`
 
-	// PassThroughUnsupportedFiles forwards non-image inline file parts as
-	// generic input files. Inline file inputs are otherwise restricted to
-	// images and PDFs; enable this when the target model accepts additional
-	// media types such as text/csv. ai-sdk #15297.
+	// PassThroughUnsupportedFiles requests generic inline file transport.
+	// Adapter MIME/source validation is mandatory and cannot be bypassed by
+	// this option. Supported document MIME types use typed input_file parts.
 	PassThroughUnsupportedFiles bool `json:"passThroughUnsupportedFiles,omitempty"`
 
 	// StrictJsonSchema controls whether to use strict JSON schema validation.

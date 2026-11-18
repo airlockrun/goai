@@ -121,6 +121,10 @@ func (m *HuggingFaceLanguageModel) Stream(ctx context.Context, options *stream.C
 }
 
 func (m *HuggingFaceLanguageModel) doStream(ctx context.Context, options *stream.CallOptions, events chan<- stream.Event) {
+	if err := provider.ValidatePromptMessages(options.Messages); err != nil {
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+		return
+	}
 	// HuggingFace's Inference API is prompt-in / text-out — there is no
 	// structured-output endpoint. When ResponseFormat asks for JSON, inject
 	// the JSON instruction into the system message so the model still gets

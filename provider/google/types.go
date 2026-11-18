@@ -2,7 +2,6 @@ package google
 
 import (
 	"encoding/json"
-	"strings"
 
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/stream"
@@ -70,16 +69,18 @@ type geminiPart struct {
 }
 
 type geminiInlineData struct {
-	MimeType string `json:"mimeType"`
-	Data     string `json:"data"`
+	MimeType    string `json:"mimeType"`
+	Data        string `json:"data"`
+	DisplayName string `json:"displayName,omitempty"`
 }
 
 // geminiFileData references a remotely-hosted file by URI. Mirrors the
 // fileData part in ai-sdk's convert-to-google-generative-ai-messages.ts;
 // used when a FilePart carries a URL.
 type geminiFileData struct {
-	MimeType string `json:"mimeType,omitempty"`
-	FileURI  string `json:"fileUri"`
+	MimeType    string `json:"mimeType,omitempty"`
+	FileURI     string `json:"fileUri"`
+	DisplayName string `json:"displayName,omitempty"`
 }
 
 type geminiFunctionCall struct {
@@ -97,9 +98,10 @@ type geminiFunctionCall struct {
 type geminiFunctionResponse struct {
 	// ID echoes the originating functionCall.id so Gemini can correlate the
 	// result with the call. ai-sdk #15317.
-	ID       string         `json:"id,omitempty"`
-	Name     string         `json:"name"`
-	Response map[string]any `json:"response"`
+	ID       string           `json:"id,omitempty"`
+	Name     string           `json:"name"`
+	Response map[string]any   `json:"response"`
+	Parts    []map[string]any `json:"parts,omitempty"`
 }
 
 type geminiGenerationConfig struct {
@@ -301,24 +303,6 @@ func (u geminiUsageMetadata) toUsage() stream.Usage {
 
 // Conversion functions
 
-func toolNameFromMessage(msg message.Message) string {
-	for _, part := range msg.Content.Parts {
-		if tr, ok := part.(message.ToolResultPart); ok {
-			return tr.ToolName
-		}
-	}
-	return ""
-}
-
-func toolCallIDFromMessage(msg message.Message) string {
-	for _, part := range msg.Content.Parts {
-		if tr, ok := part.(message.ToolResultPart); ok {
-			return tr.ToolCallID
-		}
-	}
-	return ""
-}
-
 func getTextFromContent(content message.Content) string {
 	if content.Text != "" {
 		return content.Text
@@ -329,13 +313,6 @@ func getTextFromContent(content message.Content) string {
 		}
 	}
 	return ""
-}
-
-// isImageMimeType reports whether a FilePart carries an image, matching the
-// "image/" prefix convention the message package uses to fold images into
-// FilePart.
-func isImageMimeType(mimeType string) bool {
-	return strings.HasPrefix(mimeType, "image/")
 }
 
 // convertToGeminiParts maps message content parts to Gemini wire parts.

@@ -41,6 +41,7 @@ func New(opts Options) *Provider {
 	}
 	return &Provider{
 		compat: openaicompat.New(openaicompat.Options{
+			FileValidator:   openaicompat.ValidateUserImageFile,
 			ProviderID:      "xai",
 			BaseURL:         baseURL,
 			APIKey:          opts.APIKey,

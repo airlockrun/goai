@@ -121,7 +121,7 @@ func TestConvertToResponsesInput_ContentOutput(t *testing.T) {
 		{"file image data", []message.ToolContentItem{{Type: "file-data", Data: "aW1n", MediaType: "image/webp", ProviderOptions: detail}}, `[{"type":"input_image","image_url":"data:image/webp;base64,aW1n","detail":"original"}]`},
 		{"file image URL", []message.ToolContentItem{{Type: "file-url", URL: "https://example.com/image.gif", MediaType: "image/gif", ProviderOptions: detail}}, `[{"type":"input_image","image_url":"https://example.com/image.gif","detail":"original"}]`},
 		{"file URL", []message.ToolContentItem{{Type: "file-url", URL: "https://example.com/document.pdf", MediaType: "application/pdf"}}, `[{"type":"input_file","file_url":"https://example.com/document.pdf"}]`},
-		{"file data URL", []message.ToolContentItem{{Type: "file-url", URL: "data:application/pdf;base64,cGRm", MediaType: "application/pdf"}}, `[{"type":"input_file","file_url":"data:application/pdf;base64,cGRm"}]`},
+		{"file data URL", []message.ToolContentItem{{Type: "file-url", URL: "data:application/pdf;base64,cGRm", MediaType: "application/pdf"}}, `[{"type":"input_file","file_data":"data:application/pdf;base64,cGRm","filename":"data"}]`},
 		{"file data without filename", []message.ToolContentItem{{Type: "file-data", Data: "cGRm", MediaType: "application/pdf"}}, `[{"type":"input_file","file_data":"data:application/pdf;base64,cGRm","filename":"data"}]`},
 		{"other file media", []message.ToolContentItem{{Type: "file-data", Data: "dGV4dA==", MediaType: "text/plain", Filename: "note.txt"}}, `[{"type":"input_file","file_data":"data:text/plain;base64,dGV4dA==","filename":"note.txt"}]`},
 	} {
@@ -1244,18 +1244,18 @@ func TestConvertToResponsesInput_NamespaceRoundTrip(t *testing.T) {
 	})
 }
 
-// Opt-in pass-through for unsupported file media types (ai-sdk #15297).
-func TestConvertToResponsesContentParts_PassThroughUnsupportedFiles(t *testing.T) {
+// Supported documents retain their MIME in typed file transport.
+func TestConvertToResponsesContentParts_SupportedDocuments(t *testing.T) {
 	content := message.Content{
 		Parts: []message.Part{
 			message.FilePart{MimeType: "text/csv", Data: message.FileDataBytes{Data: "Zm9v"}, Filename: "data.csv"},
 		},
 	}
 
-	t.Run("drops non-image non-pdf files by default", func(t *testing.T) {
+	t.Run("forwards supported text files by default", func(t *testing.T) {
 		parts := convertToResponsesContentParts(content, false)
-		if len(parts) != 0 {
-			t.Errorf("expected file dropped, got %+v", parts)
+		if len(parts) != 1 || parts[0].Type != "input_file" || parts[0].FileData != "data:text/csv;base64,Zm9v" {
+			t.Errorf("expected typed text file, got %+v", parts)
 		}
 	})
 

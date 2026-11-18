@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/airlockrun/goai/message"
+	"github.com/airlockrun/goai/provider"
 	"github.com/airlockrun/goai/tool"
 )
 
@@ -247,6 +248,9 @@ func audioChatFormat(mime string) string {
 // Conversion functions
 
 func convertToChatMessages(messages []message.Message) ([]chatMessage, error) {
+	if err := provider.ValidateTextToolMessages(messages); err != nil {
+		return nil, err
+	}
 	result := make([]chatMessage, 0, len(messages))
 
 	for _, msg := range messages {

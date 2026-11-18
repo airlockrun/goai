@@ -131,6 +131,10 @@ func (m *VertexLanguageModel) Stream(ctx context.Context, options *stream.CallOp
 }
 
 func (m *VertexLanguageModel) doStream(ctx context.Context, options *stream.CallOptions, events chan<- stream.Event) {
+	if err := m.ValidateMessages(options.Messages); err != nil {
+		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+		return
+	}
 	var warnings []stream.Warning
 
 	// Build request body
@@ -140,6 +144,27 @@ func (m *VertexLanguageModel) doStream(ctx context.Context, options *stream.Call
 	for _, msg := range options.Messages {
 		if msg.Role == message.RoleSystem {
 			systemInstruction = msg.Content.Text
+			continue
+		}
+		if msg.Role == message.RoleTool {
+			var parts []map[string]any
+			results, err := message.ToolMessageResults(msg)
+			if err != nil {
+				events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+				return
+			}
+			for _, p := range results {
+				response, files, err := google.BuildToolResponse(m.id, p)
+				if err != nil {
+					events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: err}}
+					return
+				}
+				parts = append(parts, map[string]any{"functionResponse": response})
+				for _, file := range files {
+					parts = append(parts, google.FileWirePart(file))
+				}
+			}
+			contents = append(contents, map[string]any{"role": "user", "parts": parts})
 			continue
 		}
 		contents = append(contents, convertMessage(msg))
@@ -355,16 +380,12 @@ func convertMessage(msg message.Message) map[string]any {
 						"args": json.RawMessage(p.Input),
 					},
 				})
+				if p.ID != "" {
+					parts[len(parts)-1]["functionCall"].(map[string]any)["id"] = p.ID
+				}
 				if signature := google.ThoughtSignature(p.ProviderOptions); signature != "" {
 					parts[len(parts)-1]["thoughtSignature"] = signature
 				}
-			case message.ToolResultPart:
-				parts = append(parts, map[string]any{
-					"functionResponse": map[string]any{
-						"name":     p.ToolName,
-						"response": map[string]any{"result": message.ToolOutputWire(p.Output)},
-					},
-				})
 			}
 		}
 	}

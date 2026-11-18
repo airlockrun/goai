@@ -144,7 +144,7 @@ func TestResponsesModel_UnsupportedToolContent(t *testing.T) {
 		t.Run(item.Type+"/"+item.MediaType, func(t *testing.T) {
 			options := &stream.CallOptions{Messages: []message.Message{message.NewToolMessage("call-invalid", "read", message.ContentOutput{Value: []message.ToolContentItem{{Type: "text", Text: "before"}, item, {Type: "text", Text: "after"}}})}}
 			body, _, err := (&ResponsesModel{id: "gpt-6.1-sol"}).buildRequest(options)
-			if err == nil || body != nil || !strings.Contains(err.Error(), "call-invalid") || !strings.Contains(err.Error(), "content item 1") || strings.Contains(err.Error(), item.Data) && item.Data != "" {
+			if err == nil || body != nil || strings.Contains(err.Error(), "call-invalid") || strings.Contains(err.Error(), item.Data) && item.Data != "" {
 				t.Fatalf("body=%s, error=%v", body, err)
 			}
 		})

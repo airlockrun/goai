@@ -97,6 +97,9 @@ func (m *XaiResponsesModel) doStream(ctx context.Context, options *stream.CallOp
 }
 
 func (m *XaiResponsesModel) buildRequest(options *stream.CallOptions) ([]byte, []stream.Warning, error) {
+	if err := m.ValidateMessages(options.Messages); err != nil {
+		return nil, nil, err
+	}
 	var warnings []stream.Warning
 
 	opts, err := provider.ParseProviderOptions[ResponsesOptions](options.ProviderOptions)
