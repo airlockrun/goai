@@ -14,7 +14,64 @@ import (
 	goaierrors "github.com/airlockrun/goai/errors"
 	"github.com/airlockrun/goai/message"
 	"github.com/airlockrun/goai/stream"
+	"github.com/airlockrun/goai/tool"
 )
+
+func TestNativeProviderTools(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		converter func(tool.Tool) (json.RawMessage, error)
+		fail      bool
+	}{
+		{"unsupported", nil, true},
+		{"rejected", func(tool.Tool) (json.RawMessage, error) { return nil, errors.New("unsupported native tool") }, true},
+		{"native", func(tool.Tool) (json.RawMessage, error) {
+			return json.RawMessage(`{"type":"builtin_function","function":{"name":"$web_search"}}`), nil
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New(Options{ProviderID: "moonshotai", ProviderToolConverter: tc.converter}).Model("m").(*CompatModel)
+			body, _, err := m.buildRequest(&stream.CallOptions{Tools: []tool.Tool{{Type: "provider", ProviderID: "moonshotai.web_search", Name: "$web_search"}}})
+			if tc.fail {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var req struct {
+				Tools []json.RawMessage `json:"tools"`
+			}
+			if err := json.Unmarshal(body, &req); err != nil {
+				t.Fatal(err)
+			}
+			if len(req.Tools) != 1 || string(req.Tools[0]) != `{"type":"builtin_function","function":{"name":"$web_search"}}` {
+				t.Fatal(string(body))
+			}
+		})
+	}
+}
+
+func TestSearchResultSources(t *testing.T) {
+	m := New(Options{ProviderID: "moonshotai"}).Model("m").(*CompatModel)
+	events := make(chan stream.Event, 20)
+	m.processStream(t.Context(), strings.NewReader("data: {\"search_results\":[{\"title\":\"source\",\"url\":\"https://example.com\",\"content\":\"detail\"}],\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"), nil, events, false)
+	close(events)
+	var sources []stream.SourceEvent
+	for e := range events {
+		if s, ok := e.Data.(stream.SourceEvent); ok {
+			sources = append(sources, s)
+		}
+	}
+	if len(sources) != 1 || sources[0].URL != "https://example.com" || sources[0].Title != "source" {
+		t.Fatal(sources)
+	}
+	if sources[0].ProviderMetadata["openaiCompat"].(map[string]any)["content"] != "detail" {
+		t.Fatal(sources)
+	}
+}
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 

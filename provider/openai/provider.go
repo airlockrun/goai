@@ -71,6 +71,7 @@ func (p *Provider) Responses(modelID string) stream.Model {
 	}
 	return NewResponsesModel(modelID, ResponsesConfig{
 		Provider: "openai.responses", URL: strings.TrimRight(p.opts.BaseURL, "/") + "/responses", Headers: headers,
+		HTTPClient:       p.opts.HTTPClient,
 		ConfigureRequest: func(*http.Request) error { return nil },
 	})
 }
