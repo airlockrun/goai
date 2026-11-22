@@ -4,6 +4,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 
 	"github.com/airlockrun/goai/model"
 	"github.com/airlockrun/goai/stream"
@@ -83,6 +84,8 @@ type FilesProvider interface {
 
 // Options contains common provider configuration.
 type Options struct {
+	// HTTPClient sends OpenAI language-model requests. Nil uses http.DefaultClient.
+	HTTPClient *http.Client
 	// APIKey is the API key for authentication.
 	APIKey string
 

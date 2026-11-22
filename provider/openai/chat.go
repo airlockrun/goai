@@ -77,7 +77,11 @@ func (m *ChatModel) doStream(ctx context.Context, options *stream.CallOptions, e
 
 	events <- stream.Event{Type: stream.EventStart, Data: stream.StartEvent{Warnings: warnings}}
 
-	resp, err := http.DefaultClient.Do(req)
+	client := m.provider.opts.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: goaierrors.NewAPICallError(goaierrors.APICallErrorOptions{
 			Message: "OpenAI API request failed", URL: req.URL.String(), RequestBodyValues: json.RawMessage(reqBody),

@@ -112,6 +112,10 @@ type Options struct {
 	// additionalProperties:false).
 	ToolSchemaTransformer func(json.RawMessage) json.RawMessage
 
+	// ProviderToolConverter serializes native provider-defined tool declarations.
+	// Without a converter, provider-defined tools fail request construction.
+	ProviderToolConverter func(tool.Tool) (json.RawMessage, error)
+
 	// TransformRequest applies model-specific wire normalization after option conversion.
 	TransformRequest func(modelID string, body map[string]any) error
 	// MaxEmbeddingInputs overrides the compatible embedding batch limit.
@@ -367,7 +371,24 @@ func (m *CompatModel) buildRequest(options *stream.CallOptions) ([]byte, []strea
 
 	// Add tools (already ordered by core)
 	if len(options.Tools) > 0 {
-		req.Tools = convertToTools(options.Tools, m.provider.opts.ToolSchemaTransformer)
+		for _, t := range options.Tools {
+			if t.IsProviderTool() {
+				if m.provider.opts.ProviderToolConverter == nil {
+					return nil, warnings, fmt.Errorf("provider %s does not support native tool %q", m.Provider(), t.ProviderID)
+				}
+				declaration, err := m.provider.opts.ProviderToolConverter(t)
+				if err != nil {
+					return nil, warnings, err
+				}
+				req.Tools = append(req.Tools, declaration)
+				continue
+			}
+			declaration, err := json.Marshal(convertToTools([]tool.Tool{t}, m.provider.opts.ToolSchemaTransformer)[0])
+			if err != nil {
+				return nil, warnings, err
+			}
+			req.Tools = append(req.Tools, declaration)
+		}
 	}
 
 	// Translate goai's loose ToolChoice (bare strings or ai-sdk-shaped objects)
@@ -511,6 +532,15 @@ func (m *CompatModel) processStream(ctx context.Context, body io.Reader, tools [
 		if chunk.Choices == nil {
 			events <- stream.Event{Type: stream.EventError, Data: stream.ErrorEvent{Error: fmt.Errorf("%w: missing choices", goaierrors.ErrInvalidResponse)}}
 			return
+		}
+		for _, result := range chunk.SearchResults {
+			if result.URL == "" {
+				continue
+			}
+			events <- stream.Event{Type: stream.EventSource, Data: stream.SourceEvent{
+				SourceType: stream.SourceTypeURL, ID: result.URL, URL: result.URL, Title: result.Title,
+				ProviderMetadata: map[string]any{"openaiCompat": map[string]any{"content": result.Content}},
+			}}
 		}
 
 		// Handle usage

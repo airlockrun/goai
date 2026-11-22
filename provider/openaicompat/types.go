@@ -14,20 +14,20 @@ import (
 // Request types
 
 type chatRequest struct {
-	Model            string          `json:"model"`
-	Messages         []any           `json:"messages"`
-	Stream           bool            `json:"stream"`
-	Temperature      *float64        `json:"temperature,omitempty"`
-	TopP             *float64        `json:"top_p,omitempty"`
-	FrequencyPenalty *float64        `json:"frequency_penalty,omitempty"`
-	PresencePenalty  *float64        `json:"presence_penalty,omitempty"`
-	MaxTokens        *int            `json:"max_tokens,omitempty"`
-	Stop             []string        `json:"stop,omitempty"`
-	Tools            []chatTool      `json:"tools,omitempty"`
-	ToolChoice       any             `json:"tool_choice,omitempty"`
-	ResponseFormat   *responseFormat `json:"response_format,omitempty"`
-	StreamOptions    *streamOptions  `json:"stream_options,omitempty"`
-	ReasoningEffort  string          `json:"reasoning_effort,omitempty"`
+	Model            string            `json:"model"`
+	Messages         []any             `json:"messages"`
+	Stream           bool              `json:"stream"`
+	Temperature      *float64          `json:"temperature,omitempty"`
+	TopP             *float64          `json:"top_p,omitempty"`
+	FrequencyPenalty *float64          `json:"frequency_penalty,omitempty"`
+	PresencePenalty  *float64          `json:"presence_penalty,omitempty"`
+	MaxTokens        *int              `json:"max_tokens,omitempty"`
+	Stop             []string          `json:"stop,omitempty"`
+	Tools            []json.RawMessage `json:"tools,omitempty"`
+	ToolChoice       any               `json:"tool_choice,omitempty"`
+	ResponseFormat   *responseFormat   `json:"response_format,omitempty"`
+	StreamOptions    *streamOptions    `json:"stream_options,omitempty"`
+	ReasoningEffort  string            `json:"reasoning_effort,omitempty"`
 }
 
 // responseFormat mirrors OpenAI chat response_format.
@@ -94,13 +94,20 @@ type chatFunctionDef struct {
 // Response types
 
 type chatCompletionChunk struct {
-	ID       string            `json:"id"`
-	Object   string            `json:"object"`
-	Created  int64             `json:"created"`
-	Model    string            `json:"model"`
-	Choices  []chatChunkChoice `json:"choices"`
-	UsageRaw json.RawMessage   `json:"usage,omitempty"`
-	Error    json.RawMessage   `json:"error,omitempty"`
+	SearchResults []chatSearchResult `json:"search_results,omitempty"`
+	ID            string             `json:"id"`
+	Object        string             `json:"object"`
+	Created       int64              `json:"created"`
+	Model         string             `json:"model"`
+	Choices       []chatChunkChoice  `json:"choices"`
+	UsageRaw      json.RawMessage    `json:"usage,omitempty"`
+	Error         json.RawMessage    `json:"error,omitempty"`
+}
+
+type chatSearchResult struct {
+	Title   string `json:"title"`
+	URL     string `json:"url"`
+	Content string `json:"content"`
 }
 
 type chatChunkChoice struct {
